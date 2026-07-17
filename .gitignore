@@ -25,3 +25,12 @@ isaacpjt/tomatest/tomato_dataset/
 *.onnx
 *.pt
 *.pth
+
+# 개인 문서 — 나만 씀
+CLAUDE.md
+FREECAD_README.txt
+isaacpjt/SCENE_NOTES.txt
+isaacpjt/tomatest/CHECKLIST.txt
+
+# FreeCAD 형상 생성 스크립트 (FREECAD_README.txt 와 한 쌍)
+generate_tomatoes.py
