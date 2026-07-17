@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# ROS2 / colcon
+build/
+install/
+log/
+
+# 툴 로컬 설정 — 머신마다 다름 (GPU 노트북 = Isaac 3.11, 이 머신 = ROS2 3.10)
+# .vscode/browse.vc.db 는 1GB 넘게 커짐
+.vscode/
+.claude/
+
+# USD — obj 에서 스크립트로 재생성
+*.usd
+*.usda
+*.usdc
+isaacpjt/tomatest/tomato_assets_usd/
+
+# Replicator 데이터셋 출력
+isaacpjt/tomatest/tomato_dataset/
+
+# 학습 가중치
+*.onnx
+*.pt
+*.pth
