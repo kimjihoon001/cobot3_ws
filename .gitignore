@@ -1,6 +1,10 @@
 # Python
 __pycache__/
 *.py[cod]
+.venv/
+.env
+yolo_training
+.env.example
 
 # ROS2 / colcon
 build/
@@ -36,3 +40,11 @@ isaacpjt/tomatest/CHECKLIST.txt
 
 # FreeCAD 형상 생성 스크립트 (FREECAD_README.txt 와 한 쌍)
 generate_tomatoes.py
+
+# 다운로드한 대용량 학습 데이터(스크립트는 추적)
+yolo_training/raw/
+yolo_training/processed/
+yolo_training/runs/
+
+# 대용량 압축 아카이브 (GitHub 100MB 제한 초과)
+*.tar.gz
