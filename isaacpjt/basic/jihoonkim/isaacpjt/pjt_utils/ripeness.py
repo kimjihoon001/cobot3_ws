@@ -6,30 +6,25 @@ isaac/tomatest/tomato_lib.py 에서 이식 (테스트 스크립트 쪽은 자체
 클래스 근거 — 익음 기준을 우리가 정하지 않고 공개 데이터셋의 분류를 그대로 채택함.
 익음과 불량은 출처가 다른 데이터셋이다. 발표 시 분리해서 제시할 것.
 
-  [익음] green / half_ripe / fully_ripe
-    Laboro Tomato 데이터셋 (USDA 토마토 색상 등급 6단계에 뿌리를 둠)
-    정의 = 표면의 빨강 비율. 10% 미만 / 30~89% / 90% 이상.
-    -> 수치 정의가 있어서 sim 에서 red_fraction 으로 정확히 재현 가능.
+  2026-07-18 수확·운반으로 피벗 → 2클래스. 성숙 다단계(green/half_ripe)는 스코프 밖.
+  씬이 완숙 위주라 "딸 것(익은거) vs 버릴 것(상한거)"만 구분한다.
 
-  [불량] old
+  [익은거] ripe  = 수확 대상
+    Laboro Tomato 데이터셋의 fully-ripe 정의(표면 빨강 90% 이상, USDA 색상 등급에
+    뿌리). 수치 정의가 있어 sim 에서 red_fraction 으로 정확히 재현 가능.
+
+  [상한거] spoiled = 제거 대상
     VegNet: Suryawanshi Y., Patil K., Chumchu P.
     "VegNet: Dataset of vegetable quality images for machine learning
      applications", Data in Brief 45:108657 (2022)
     DOI 10.1016/j.dib.2022.108657 / dataset DOI 10.17632/6nxnjbn9w6.1
-    라이선스 CC BY
-    토마토를 Unripe / Ripe / Old / Dried / Damaged 로 분류 (총 3,061장).
-    그중 Old(1,234장) 를 채택. 클래스명도 VegNet 용어를 그대로 씀.
-
-    한계(정직하게 밝힐 것): VegNet 은 클래스 이름만 주고 정량 정의를 주지
-    않는다. 익음의 "빨강 %" 같은 수치 기준이 불량에는 없다.
-
-    미채택: Damaged(물리적 손상) — 이번 수확 범위가 "딸 것(fully_ripe) vs
-      버릴 것(old)" 이라 불필요. VegNet 에도 27장뿐이라 근거가 얇다.
-      Dried — 토마토 이미지 0장.
+    라이선스 CC BY. VegNet 의 Old(1,234장)/Damaged 계열을 "상한거"로 통합.
+    한계(정직하게 밝힐 것): VegNet 은 클래스 이름만 주고 정량 정의가 없다.
+    익음의 "빨강 %" 같은 수치 기준이 상한거에는 없다.
 
 색은 primvars:displayColor 로 입힘 → 머티리얼 셋업 없이도 RTX에서 렌더되고
-YOLO 학습 이미지에 그대로 보임. half_ripe 는 높이(z) 기반 그라데이션으로
-"빨강 몇 %"를 정확히 제어 → 클래스 정의(30~89%)에 매칭 + 라벨 자동 일치.
+YOLO 학습 이미지에 그대로 보임. ripe 는 높이(z) 기반 그라데이션으로 빨강 비율을
+제어(대부분 빨강) → 라벨과 자동 일치. spoiled 는 갈색+얼룩.
 """
 import random
 from pxr import Usd, UsdGeom, UsdShade, Gf, Sdf
@@ -40,10 +35,8 @@ BROWN = Gf.Vec3f(0.32, 0.18, 0.10)
 
 # red_fraction = 표면 중 빨강 비율 범위 (아래→빨강, 위(어깨)→초록)
 CLASSES = {
-    "green":      {"red_fraction": (0.00, 0.10)},  # 거의 초록      (Laboro)
-    "half_ripe":  {"red_fraction": (0.30, 0.89)},  # 부분 착색      (Laboro)
-    "fully_ripe": {"red_fraction": (0.90, 1.00)},  # 거의 빨강      (Laboro)
-    "old":        {"red_fraction": None},          # 갈색 + 얼룩    (VegNet Old)
+    "ripe":    {"red_fraction": (0.90, 1.00)},  # 익은거=수확대상 (거의 빨강, Laboro fully-ripe)
+    "spoiled": {"red_fraction": None},          # 상한거=제거대상 (갈색+얼룩, VegNet Old/Damaged)
 }
 
 
@@ -62,14 +55,14 @@ def _set_vertex_colors(mesh, colors):
 
 def apply_ripeness_color(stage, prim_path, class_name, rng=random):
     """prim_path 아래 모든 메시에 클래스 색을 displayColor 로 입힘.
-    반환: 실제 사용된 red_fraction (라벨 메타 저장용, old 는 None)."""
+    반환: 실제 사용된 red_fraction (라벨 메타 저장용, spoiled 는 None)."""
     spec = CLASSES[class_name]
     frac = None
     for mesh in _iter_meshes(stage, prim_path):
         pts = mesh.GetPointsAttr().Get()
         if not pts:
             continue
-        if class_name == "old":
+        if class_name == "spoiled":
             colors = []
             for _ in pts:
                 j = rng.uniform(-0.05, 0.05)

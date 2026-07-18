@@ -76,8 +76,8 @@ def main() -> None:
     print("\n[Scene] 과실 %d개" % len(fruits))
     for name in sorted(counts):
         print("  %-11s %4d" % (name, counts[name]))
-    print("  수확 대상(fully_ripe) %d개 / 제거 대상(old) %d개\n"
-          % (counts.get("fully_ripe", 0), counts.get("old", 0)))
+    print("  수확 대상(ripe) %d개 / 제거 대상(spoiled) %d개\n"
+          % (counts.get("ripe", 0), counts.get("spoiled", 0)))
 
     if bridge is not None:
         print("[Bridge] 대기 중 — dev 머신에서 ros2 run harvest_fsm fsm_node\n")

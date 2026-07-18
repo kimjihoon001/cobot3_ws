@@ -210,7 +210,7 @@ def check_scene() -> None:
         record(verdict, "렌더 FPS", "%.1f fps (과실 %d개)" % (fps, len(fruits)))
 
         # 수확 + 재현성
-        ripe = [f for f in fruits if f["class_name"] == "fully_ripe"]
+        ripe = [f for f in fruits if f["class_name"] == "ripe"]
         if ripe:
             before = len(task.pickable_fruits())
             task.detach_fruit(ripe[0]["path"])
@@ -225,7 +225,7 @@ def check_scene() -> None:
             record("OK" if kin2 is True else "FAIL",
                    "post_reset 복원", "kinematic=%s" % kin2)
         else:
-            record("SKIP", "수확 검증", "fully_ripe 과실이 없음")
+            record("SKIP", "수확 검증", "ripe(익은거) 과실이 없음")
 
     except Exception:
         record("FAIL", "씬 빌드", traceback.format_exc().splitlines()[-1][:70])

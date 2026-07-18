@@ -5,7 +5,7 @@
   큐브 -> 토마토 USD,  color=red -> 클래스별 색(그라데이션).
 
 실행: isaac_python 01_spawn_tomato.py
-CLASS_NAME 만 바꿔가며 green/half_ripe/fully_ripe/old 확인.
+CLASS_NAME 만 바꿔가며 ripe/spoiled 확인 (2026-07-18 수확·운반 피벗 → 2클래스).
 """
 from isaacsim import SimulationApp
 simulation_app = SimulationApp({"headless": False})
@@ -29,7 +29,7 @@ _CFG = SceneConfig()
 USD_DIR = _CFG.tomato_assets.usd_dir
 BODY_USD = os.path.join(USD_DIR, "tomato_ripe_01.usd")
 CALYX_USD = os.path.join(USD_DIR, "tomato_ripe_01_calyx.usd")
-CLASS_NAME = "half_ripe"          # green / half_ripe / fully_ripe / old
+CLASS_NAME = "ripe"               # ripe(익은거) / spoiled(상한거)
 TOMATO_SCALE = _CFG.tomato_assets.scale   # 씬과 같은 값을 쓴다. 여기서 따로 정하지 말 것
 
 world = World(stage_units_in_meters=1.0)

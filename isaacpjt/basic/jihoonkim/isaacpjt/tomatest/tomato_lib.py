@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """토마토 익음/불량 클래스 정의 + 색 적용 헬퍼 (Isaac Sim 5.1).
 
-- green / half_ripe / fully_ripe : 익음 단계 (Laboro/USDA 색상 % 기준)
-- old                            : 불량 (VegNet 의 Old 클래스)
-                                   Data in Brief 45:108657 (2022), CC BY
-                                   DOI 10.1016/j.dib.2022.108657
+2026-07-18 수확·운반 피벗 → 2클래스:
+- ripe    : 익은거=수확 대상 (Laboro fully-ripe 정의, 표면 빨강 90%+)
+- spoiled : 상한거=제거 대상 (VegNet 의 Old/Damaged 계열)
+            Data in Brief 45:108657 (2022), CC BY / DOI 10.1016/j.dib.2022.108657
 
-근거 상세는 isaac/utils/ripeness.py 의 docstring 참고 (같은 내용의 사본).
-클래스명은 YOLO 라벨이 되므로 씬(utils/ripeness.py)과 반드시 일치해야 한다.
+근거 상세는 pjt_utils/ripeness.py 의 docstring 참고 (같은 내용의 사본).
+클래스명은 YOLO 라벨이 되므로 씬(pjt_utils/ripeness.py)과 반드시 일치해야 한다.
 
 색은 primvars:displayColor 로 입힘 → 머티리얼 셋업 없이도 RTX에서 렌더되고
-YOLO 학습 이미지에 그대로 보임. half_ripe 는 높이(z) 기반 그라데이션으로
-"빨강 몇 %"를 정확히 제어 → 클래스 정의(30~89%)에 매칭 + 라벨 자동 일치.
+YOLO 학습 이미지에 그대로 보임. ripe 는 높이(z) 기반 그라데이션으로 빨강 비율을
+제어(대부분 빨강). spoiled 는 갈색+얼룩.
 """
 import random
 from pxr import Usd, UsdGeom, Gf, Sdf
@@ -22,10 +22,8 @@ BROWN = Gf.Vec3f(0.32, 0.18, 0.10)
 
 # red_fraction = 표면 중 빨강 비율 범위 (아래→빨강, 위(어깨)→초록)
 CLASSES = {
-    "green":      {"red_fraction": (0.00, 0.10)},  # 거의 초록      (Laboro)
-    "half_ripe":  {"red_fraction": (0.30, 0.89)},  # 부분 착색      (Laboro)
-    "fully_ripe": {"red_fraction": (0.90, 1.00)},  # 거의 빨강      (Laboro)
-    "old":        {"red_fraction": None},          # 갈색 + 얼룩    (VegNet Old)
+    "ripe":    {"red_fraction": (0.90, 1.00)},  # 익은거=수확대상 (거의 빨강, Laboro fully-ripe)
+    "spoiled": {"red_fraction": None},          # 상한거=제거대상 (갈색+얼룩, VegNet Old/Damaged)
 }
 
 
@@ -44,14 +42,14 @@ def _set_vertex_colors(mesh, colors):
 
 def apply_ripeness_color(stage, prim_path, class_name, rng=random):
     """prim_path 아래 모든 메시에 클래스 색을 displayColor 로 입힘.
-    반환: 실제 사용된 red_fraction (라벨 메타 저장용, old 는 None)."""
+    반환: 실제 사용된 red_fraction (라벨 메타 저장용, spoiled 는 None)."""
     spec = CLASSES[class_name]
     frac = None
     for mesh in _iter_meshes(stage, prim_path):
         pts = mesh.GetPointsAttr().Get()
         if not pts:
             continue
-        if class_name == "old":
+        if class_name == "spoiled":
             colors = []
             for _ in pts:
                 j = rng.uniform(-0.05, 0.05)

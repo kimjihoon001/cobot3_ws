@@ -26,7 +26,8 @@ from dataclasses import dataclass
 import numpy as np
 
 # 클래스 순서 = YOLO class_id. 02_generate_dataset.py / settings.py 와 일치해야 한다.
-CLASSES = ("green", "half_ripe", "fully_ripe", "old")
+# 2026-07-18 수확·운반 피벗 → 2클래스(익은거=ripe / 상한거=spoiled).
+CLASSES = ("ripe", "spoiled")
 
 # 너무 가려진 개체는 학습에 해가 된다. Replicator 가 주는 occlusionRatio 로 거른다.
 MAX_OCCLUSION = 0.8
