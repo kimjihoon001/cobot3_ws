@@ -11,7 +11,7 @@ import math
 import os
 import random
 
-from pxr import Usd, UsdGeom, UsdShade, Gf
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdShade
 
 from isaacsim.core.utils.stage import add_reference_to_stage
 
@@ -245,6 +245,9 @@ class TomatoPlants:
                                    self._phys.fruit_approximation)
         prim = stage.GetPrimAtPath(path)
         physics.add_rigid_body(prim, self._phys.fruit_density, kinematic=False)
+        # sleep 비활성 — 과실이 매달려 가만히 있으면 PhysX 가 잠재우는데, 잠든 강체는
+        # 조인트를 끊어도(pedicel.cut) 안 깨어나 안 떨어진다. 절단=낙하가 보장돼야 한다.
+        PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateSleepThresholdAttr(0.0)
         physics.bind_physics_material(prim, self._fruit_material)
 
         # 꽃자루 + 파단 조인트로 줄기에 매단다. 자를 땐 이 joint 를 pedicel.cut() 한다.
