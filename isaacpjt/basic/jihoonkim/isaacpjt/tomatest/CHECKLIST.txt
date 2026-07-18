@@ -1,0 +1,149 @@
+================================================================
+스마트팜 토마토 YOLO 프로젝트 - 근거 & Isaac 머신 확인 체크리스트
+작성: 2026-07-15
+================================================================
+
+프로젝트 요약
+----------------------------------------------------------------
+- Isaac Sim 5.1 안에서 로봇이 토마토를 관리/수확/선별
+- 토마토 익음 단계를 YOLO로 구분 (sim-only: 학습·추론 모두 Isaac 안)
+- 토마토 3D는 FreeCAD 매크로로 형상 생성, 색/익음은 Isaac에서 입힘
+
+
+================================================================
+1. 클래스 근거 (강사 요구: "우리가 익음 기준을 정하지 말고 데이터셋 기반")
+================================================================
+
+[익음 클래스] green / half_ripe / fully_ripe
+  근거: Laboro Tomato 데이터셋 (공개, 논문·YOLO 프로젝트 표준 인용)
+  정의(빨강 표면 비율):
+    - green (unripe)   : 빨강 ~30% 미만 (거의 초록)
+    - half_ripe        : 빨강 30 ~ 89% (부분 착색)
+    - fully_ripe       : 빨강 90% 이상 (거의 빨강)
+  뿌리 표준: USDA 토마토 색상 등급
+    (Green - Breakers - Turning - Pink - Light Red - Red 6단계)
+
+  => 발표 멘트: "익음 기준은 우리가 정한 게 아니라 USDA 표준을 따른
+     Laboro Tomato 데이터셋 정의를 그대로 채택했다."
+
+[불량 클래스] old   ※ 2026-07-17: spoiled -> old 로 이름 변경 (근거 확보 완료)
+  - old(숙과 경과/부패)는 익음 클래스가 아님 (Laboro엔 없음)
+  - 근거: VegNet 데이터셋
+      Suryawanshi Y., Patil K., Chumchu P.
+      "VegNet: Dataset of vegetable quality images for machine learning
+       applications", Data in Brief 45:108657 (2022)
+      DOI 10.1016/j.dib.2022.108657 / dataset DOI 10.17632/6nxnjbn9w6.1
+      라이선스 CC BY
+  - VegNet 토마토 분류: Unripe / Ripe / Old / Dried / Damaged (총 3,061장)
+      Old 1,234 / Ripe 955 / Unripe 845 / Damaged 27 / Dried 0
+  - 클래스명을 VegNet 용어 "Old" 그대로 채택 -> "우리가 지은 이름이 아님"이 명확
+  - 미채택: Damaged(물리적 손상, 27장뿐) — 이번 수확 범위는 "딸 것 vs 버릴 것"
+            Dried — 토마토 0장
+  - 발표 시 익음(Laboro)과 불량(VegNet) 근거를 분리해서 제시할 것
+
+  ★한계 (먼저 밝히는 게 나음)★
+  - VegNet 은 클래스 이름만 주고 정량 정의가 없음.
+    익음의 "빨강 30~89%" 같은 수치 기준이 불량에는 존재하지 않음.
+  - 역으로 sim 의 강점 논거: 실제 데이터셋은 Damaged 가 27장뿐이라 학습이
+    사실상 불가능한데, sim 은 필요한 만큼 생성 가능.
+
+  [참고 URL]
+    - VegNet (ScienceDirect):
+      https://www.sciencedirect.com/science/article/pii/S2352340922008629
+    - VegNet (PMC 전문):
+      https://pmc.ncbi.nlm.nih.gov/articles/PMC9679474/
+
+[참고 URL]
+  - Laboro Tomato (Mask R-CNN/YOLOv8):
+    https://github.com/JeanN00B/Tomato-maturity-recognition---Mask-R-CNN-YOLOv8
+  - Tomato Ripeness (Roboflow, PROJECT KIYOSHI):
+    https://universe.roboflow.com/project-kiyoshi/tomato-ripeness-detection-rcctu
+  - Tomato Ripeness 3-class (Roboflow):
+    https://universe.roboflow.com/dataset-w8sqm/tomato-ripeness-jionb
+  - ripe tomatoes 데이터셋 모음:
+    https://universe.roboflow.com/search?q=class%3Aripe+tomatoes
+
+
+================================================================
+2. sim 데이터의 강점 (강사 어필 포인트)
+================================================================
+- half_ripe 를 "빨강 %"로 정밀 제어(z-그라데이션) → 데이터셋 정의에 정확 매칭
+- 색(%)을 우리가 설정 → 클래스 라벨 자동 결정 → 라벨 오류 0 (실제 데이터보다 정확)
+- sim-only라 학습색 = 추론색 → 도메인 격차 없음
+
+주의(본질적 한계, Isaac 문제 아님):
+- 경계값(빨강 30%/89% 딱 걸치는 것)은 실제 데이터도 애매 → 경계에서 좀 떨어진 값 위주
+- 조명/그림자가 색을 흐릴 수 있음 → 조명 랜덤화 + 클래스 색 충분히 벌리기
+
+
+================================================================
+3. 파일 구성 (isaac/ 폴더)
+================================================================
+  tomato_lib.py            공통: 4클래스 정의 + 색 입히기(그라데이션 포함)
+  00_convert_obj_to_usd.py FreeCAD OBJ -> USD 일괄 변환
+  01_spawn_tomato.py       토마토 1개 스폰 + 클래스 색 (흐름 익히기)
+  02_generate_dataset.py   Replicator 랜덤 스폰 + 자동 라벨 데이터셋
+
+  (형상 생성) ../generate_tomatoes.py  = FreeCAD 매크로 (이미 완료)
+  (형상 출력) ~/tomato_assets/         = OBJ/STL (종류별 하위폴더)
+
+
+================================================================
+4. 내일 Isaac 머신에서 확인/수정할 것  ★핵심★
+================================================================
+
+준비:
+  [ ] 스크립트 4개 + CHECKLIST 를 ~/cobot3_ws/isaacpjt/ 에 넣기
+  [ ] tomato_assets/ (OBJ) 를 ~/cobot3_ws/isaacpjt/tomato_assets/ 로 복사
+        => 최종 구조:
+           ~/cobot3_ws/isaacpjt/
+             ├── 00_..py, 01_..py, 02_..py, tomato_lib.py, CHECKLIST.txt
+             ├── tomato_assets/       (OBJ, 복사)
+             ├── tomato_assets_usd/   (00번이 생성)
+             └── tomato_dataset/      (02번이 생성)
+        => 경로는 스크립트 폴더 기준 자동. 사용자명(rokey)/위치 무관
+  [ ] Isaac Sim 5.1 python.sh 경로 확인
+  [ ] 실행은 isaacpjt/ 안에서 (tomato_lib.py import 때문)
+
+실행 명령 (별칭):
+  isaac_python = ~/dev_ws/isaac_sim/isaacsim/_build/linux-x86_64/release/python.sh
+  반드시 cd ~/cobot3_ws/isaacpjt 후 실행 (tomato_lib import).
+
+실행 순서 (각 단계에서 아래 항목 확인):
+  [ ] isaac_python 00_convert_obj_to_usd.py
+        - USD 파일들이 tomato_assets_usd/ 에 생겼는지
+
+  [ ] isaac_python 01_spawn_tomato.py
+        - (A) TOMATO_SCALE 확인 ★가장 가능성 높은 문제★
+              변환 후 단위가 mm/cm/m 중 뭐로 잡히는지에 따라 토마토가
+              너무 크거나 작을 수 있음. 실제 지름 5~6cm 되게 0.001 조정
+        - (B) 토마토가 화면에 뜨고 지면 위에 있는지
+        - (C) CLASS_NAME 바꿔가며 green/half_ripe/fully_ripe/old 색 확인
+              특히 half_ripe 그라데이션(아래 빨강/위 초록)이 자연스러운지
+        - (D) 꼭지가 초록으로 나오는지
+
+  [ ] isaac_python 02_generate_dataset.py
+        - (E) add_update_semantics import 경로 확인 ★
+              현재: isaacsim.core.utils.semantics
+              안되면: omni.isaac.core.utils.semantics 로 교체
+        - (F) BasicWriter 출력 포맷 확인
+              -> KITTI 계열이라 YOLO txt로 변환하는 후처리 필요
+              (또는 YOLO 전용 writer로 교체)
+        - (G) bounding box 에 클래스 라벨(green/half_ripe/...)이 붙는지
+        - (H) 조명/포즈/개수 랜덤이 실제로 다양하게 나오는지
+        - (I) NUM_FRAMES 는 테스트로 작게(예: 20) 먼저 → 확인 후 늘리기
+
+수정 예상 지점 요약:
+  - TOMATO_SCALE (단위)          -> 01 에서 눈으로 보고 조정
+  - semantics import 경로         -> 02 실행 에러 나면 교체
+  - Writer -> YOLO 포맷 변환 단계  -> 후처리 스크립트 추가 필요
+
+
+================================================================
+5. 이후 단계 (데이터셋 이후)
+================================================================
+  [ ] YOLO 학습 (green/half_ripe/fully_ripe + old)
+  [ ] 로봇 본체: RobotCAD로 URDF -> Isaac URDF Importer
+  [ ] 수확: 토마토를 줄기에 breakable joint로 붙이고 그리퍼로 당겨 따기
+  [ ] 콜라이더는 구/convex, 매달린 건 static, 수확되는 것만 dynamic (성능)
+================================================================
