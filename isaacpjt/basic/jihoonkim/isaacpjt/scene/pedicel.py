@@ -95,11 +95,15 @@ def spawn(stage: Usd.Stage, stem_path: str, fruit_path: str,
           stem_point: tuple[float, float, float],
           fruit_point: tuple[float, float, float],
           cfg: PedicelConfig, break_force: float, break_torque: float,
-          joint_path: str | None = None) -> str:
+          joint_path: str | None = None, viz_root: str | None = None) -> str:
     """줄기와 과실 사이에 꽃자루를 놓고 파단 조인트로 잇는다.
 
     stem_point  : 줄기 쪽 부착점 (월드)
     fruit_point : 과실 쪽 부착점 (월드, 보통 과실 중심)
+    viz_root    : 시각 세그먼트를 놓을 부모(월드 좌표를 쓰므로 **변환 없는 prim** 이어야
+                  한다). 씬에서 줄기·과실 Xform 은 이동/스케일이 걸려 있어 그 밑에 두면
+                  세그먼트가 어긋나거나(이동) 찌그러진다(과실 스케일 0.001675). 안 주면
+                  예전처럼 stem/fruit 자식으로 둔다(스파이크는 헤드리스라 배치 무관).
     반환: 생성한 조인트의 prim 경로 (자를 때 이걸로 찾는다)
     """
     a, b = Gf.Vec3d(*stem_point), Gf.Vec3d(*fruit_point)
@@ -114,13 +118,21 @@ def spawn(stage: Usd.Stage, stem_path: str, fruit_path: str,
     p1 = a + u * l_prox                      # proximal 끝 = 이탈층 시작
     p2 = p1 + u * l_absc                     # 이탈층 끝 = distal 시작 (절단 지점)
 
+    # 세그먼트 부모 — viz_root 를 주면 변환 없는 그 밑에(월드 좌표대로), 안 주면 예전처럼.
+    if viz_root is not None:
+        leaf = fruit_path.rsplit("/", 1)[-1]             # 과실별 고유 이름
+        prox_p = f"{viz_root}/Ped_{leaf}_proximal"
+        absc_p = f"{viz_root}/Ped_{leaf}_abscission"
+        dist_p = f"{viz_root}/Ped_{leaf}_distal"
+    else:
+        prox_p = f"{stem_path}/Pedicel_proximal"
+        absc_p = f"{stem_path}/Pedicel_abscission"
+        dist_p = f"{fruit_path}/Pedicel_distal"
     # 줄기에 남는 부분
-    _segment(stage, f"{stem_path}/Pedicel_proximal", p0, p1,
-             cfg.proximal_diameter)
-    _segment(stage, f"{stem_path}/Pedicel_abscission", p1, p2,
-             cfg.abscission_diameter)
+    _segment(stage, prox_p, p0, p1, cfg.proximal_diameter)
+    _segment(stage, absc_p, p1, p2, cfg.abscission_diameter)
     # 과실이 달고 가는 부분 (커터가 p2 를 자른다)
-    _segment(stage, f"{fruit_path}/Pedicel_distal", p2, b, cfg.distal_diameter)
+    _segment(stage, dist_p, p2, b, cfg.distal_diameter)
 
     # 이탈층을 대표하는 조인트. 여기서 끊어진다.
     jp = joint_path or f"{fruit_path}/PedicelJoint"
@@ -138,10 +150,19 @@ def spawn(stage: Usd.Stage, stem_path: str, fruit_path: str,
     cache = UsdGeom.XformCache()
     m0 = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(stem_path))
     m1 = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(fruit_path))
-    rel = m1 * m0.GetInverse()                    # 과실 포즈를 줄기 로컬로
-    # ★ 과실 Xform 의 스케일(0.001675)이 rel 에 섞여 ExtractRotationQuat 가
-    #   정규화 안 된 쿼터니언을 내놓는다(예: (0.5,0,0,0)). 그대로 쓰면 조인트 프레임이
-    #   깨져 과실이 안 매달리고 떨어진다(spike 02 진단). GetNormalized() 로 바로잡는다.
+
+    # ★ 과실 Xform 의 스케일(0.001675)이 L2W 에 섞여 있다. rel=m1*m0⁻¹ 를 그대로 쓰면
+    #   회전뿐 아니라 **위치(translation)도 스케일에 오염**돼 앵커가 어긋나고, PhysX 가
+    #   시작 순간 큰 보정 토크로 스냅시켜 조인트가 끊긴다(과실 낙하). 회전만 정규화하던
+    #   기존 코드는 위치 오염을 못 잡았다 — 그래서 낮은 break_torque 로는 끊겼다(spike 02
+    #   재분석 2026-07-18). 스케일을 제거한 **순수 강체 변환**으로 프레임을 만든다.
+    def _rigid(m):
+        r = Gf.Matrix4d()
+        r.SetRotate(m.ExtractRotationQuat().GetNormalized())   # 순수 회전(이동 0)
+        r.SetTranslateOnly(m.ExtractTranslation())             # 이동만 덮어씀
+        return r
+
+    rel = _rigid(m1) * _rigid(m0).GetInverse()     # 스케일 없는 과실→줄기 상대 강체변환
     joint.CreateLocalPos0Attr().Set(Gf.Vec3f(rel.ExtractTranslation()))
     joint.CreateLocalRot0Attr().Set(Gf.Quatf(rel.ExtractRotationQuat().GetNormalized()))
     joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))

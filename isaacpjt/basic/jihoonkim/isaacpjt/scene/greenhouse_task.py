@@ -14,7 +14,7 @@ from pxr import Usd
 from isaacsim.core.api.tasks import BaseTask
 
 from pjt_config.settings import SceneConfig
-from scene import physics
+from scene import pedicel
 from scene.ground import Ground
 from scene.lighting import Lighting
 from scene.greenhouse import Greenhouse
@@ -75,36 +75,48 @@ class GreenhouseTask(BaseTask):
     def post_reset(self) -> None:
         """Play/Stop 반복 시 매번 동일한 초기 상태로 복원.
 
-        수확된 과실을 다시 kinematic 으로 되돌려 원래 자리에 매단다.
+        끊었던 꽃자루 조인트를 다시 이어(jointEnabled=True) 과실을 원래 자리에 매단다.
+        World 가 prim 변환을 초기 상태로 되돌리므로 조인트만 복원하면 된다.
         """
         stage = omni.usd.get_context().get_stage()
         for path in self._harvested:
-            prim = stage.GetPrimAtPath(path)
-            if prim.IsValid():
-                physics.set_kinematic(prim, True)
+            joint = self._joint_of(path)
+            if joint:
+                pedicel.restore(stage, joint)
         self._harvested.clear()
 
     # ----- 수확 -----
 
     def pickable_fruits(self) -> list[dict]:
-        """아직 안 딴 과실만. 수확 대상은 fully_ripe, 제거 대상은 old."""
+        """아직 안 딴 과실만. 수확 대상은 ripe(익은거), 제거 대상은 spoiled(상한거)."""
         if self._plants is None:
             return []
         return [f for f in self._plants.fruits
                 if f["path"] not in self._harvested]
 
-    def detach_fruit(self, path: str) -> bool:
-        """과실을 줄기에서 분리 (= 커터가 꽃자루를 자른 순간).
+    def _joint_of(self, path: str) -> str | None:
+        """과실 경로 -> 꽃자루 조인트 경로."""
+        if self._plants is None:
+            return None
+        for f in self._plants.fruits:
+            if f["path"] == path:
+                return f.get("joint")
+        return None
 
-        kinematic 을 꺼서 dynamic 으로 전환한다. 물리 breakForce 로 끊지 않는
-        이유는 그쪽이 비결정적이라 Play/Stop 재현성이 깨지기 때문.
+    def detach_fruit(self, path: str) -> bool:
+        """과실을 줄기에서 분리 (= 커터가 distal 꽃자루를 자른 순간).
+
+        꽃자루 조인트를 끊는다(jointEnabled=False). 과실은 이미 dynamic 이라 낙하한다.
+        물리 breakForce 로 자연히 끊기길 기다리지 않는 이유는 그쪽이 비결정적이라
+        Play/Stop 재현성이 깨지기 때문 — cut 은 코드로 끊어 결정적이다.
         """
         if path in self._harvested:
             return False
-        stage = omni.usd.get_context().get_stage()
-        prim = stage.GetPrimAtPath(path)
-        if not prim.IsValid():
+        joint = self._joint_of(path)
+        if joint is None:
             return False
-        physics.set_kinematic(prim, False)
+        stage = omni.usd.get_context().get_stage()
+        if not pedicel.cut(stage, joint):
+            return False
         self._harvested.add(path)
         return True

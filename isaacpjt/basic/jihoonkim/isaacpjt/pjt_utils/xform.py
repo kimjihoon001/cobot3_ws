@@ -51,3 +51,16 @@ def set_translate(prim: Usd.Prim, vec) -> None:
                 op.Set(Gf.Vec3d(*vec))
             return
     xf.AddTranslateOp().Set(Gf.Vec3d(*vec))
+
+
+def set_scale(prim: Usd.Prim, s: float) -> None:
+    """prim 의 local uniform scale 를 설정. 기존 scale op 가 있으면 재사용한다."""
+    xf = UsdGeom.Xformable(prim)
+    for op in xf.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+            if op.GetPrecision() == UsdGeom.XformOp.PrecisionFloat:
+                op.Set(Gf.Vec3f(s, s, s))
+            else:
+                op.Set(Gf.Vec3d(s, s, s))
+            return
+    xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
