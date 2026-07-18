@@ -139,4 +139,4 @@ gripper open/close 파라미터 조정
 
 ---
 
-*문의: 팀 채널에서 팀장(jihoonkim)에게*
+*문의: 팀 채널에서 팀장(hyeonminlee)에게*
