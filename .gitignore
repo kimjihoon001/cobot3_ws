@@ -18,6 +18,8 @@ log/
 *.usdc
 isaacpjt/tomatest/tomato_assets_usd/
 
+isaacpjt/M0609/
+
 # Replicator 데이터셋 출력
 isaacpjt/tomatest/tomato_dataset/
 
