@@ -59,6 +59,62 @@ git config --global user.name "본인이름"
 git config --global user.email "본인GitHub이메일"
 ```
 
+### Roboflow 학습 데이터 다운로드
+
+API 키가 저장소와 셸 히스토리에 남지 않도록 환경변수로 설정합니다.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r yolo_training/requirements.txt
+cp .env.example .env
+# .env를 열어 ROBOFLOW_API_KEY 값을 발급받은 실제 키로 변경
+
+# 1순위 Fresh/Rotten 베이스 데이터셋만 다운로드
+python yolo_training/scripts/download_roboflow_datasets.py
+
+# 보강용 12클래스 데이터셋만 다운로드
+python yolo_training/scripts/download_roboflow_datasets.py --dataset booster
+
+# 두 데이터셋 모두 다운로드
+python yolo_training/scripts/download_roboflow_datasets.py --dataset all
+```
+
+다운로드 결과는 Git에서 제외된 `yolo_training/raw/` 아래에 저장됩니다. 원본은
+직접 수정하지 않고 이후 전처리 결과를 별도 폴더에 생성합니다.
+
+Ubuntu/Debian이 관리하는 시스템 Python에는 `--break-system-packages`로 설치하지
+않습니다. 터미널을 새로 열었다면 `source .venv/bin/activate`를 다시 실행합니다.
+
+### 토마토 데이터 전처리
+
+다운로드 원본은 유지하면서 학습용 bbox 데이터 두 종류를 생성합니다.
+
+```bash
+python yolo_training/scripts/preprocess_tomato_dataset.py
+```
+
+- `yolo_training/processed/tomato_detection`: 모든 토마토를 `tomato` 1클래스로 통합
+- `yolo_training/processed/tomato_quality`: Fresh/Rotten 2클래스를 유지
+- `yolo_training/reports/preprocess_summary.json`: 변환 통계와 제외된 라벨 기록
+
+### YOLO 2단계 학습
+
+```bash
+# Quality train split을 Fresh/Rotten 균형에 가깝게 재구성
+python yolo_training/scripts/create_balanced_quality_dataset.py
+
+# 1단계: 균형화한 공개 실사진으로 Fresh/Rotten Detection 학습
+python yolo_training/yolo_train.py --device 0
+
+# 2단계: 1단계 best.pt를 자동 선택해 Isaac Sim 캡처 데이터로 파인튜닝
+python yolo_training/yolo_finetune_own.py --data yolo_training/simulation/data.yaml --device 0
+```
+
+시뮬레이션 데이터의 클래스는 1차 모델과 동일한 `Fresh Tomato`, `Rotten Tomato`
+2클래스여야 하며, 결과와 최종 `best.pt`는 `yolo_training/runs/` 아래에 저장됩니다.
+
 ### 저장소 clone
 
 ```bash
