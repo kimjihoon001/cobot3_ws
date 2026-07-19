@@ -207,3 +207,17 @@ ros2 topic pub -1 /harvester_0/cmd std_msgs/msg/String '{data: "{\"blade\": 0}"}
 | 다른 PC 에서 토픽이 안 보임 | 도메인 108·RMW·화이트리스트 셋 다 일치? 유선 10.10.0.x 인지? `ROS_LOCALHOST_ONLY` 해제? |
 
 로봇 배치(온실 앞마당 y=−12)는 임시 — 물류 동선 확정 후 조정 예정.
+
+---
+
+## 6. git 참고 (다른 컴퓨터에서 pull 할 때)
+
+`.gitignore` 가 `*.usd` 를 전역 무시하지만(재생성 방침), **실행에 필요한 USD 는
+예외로 추적**되어 있어 pull 만 받으면 바로 돈다:
+
+| 자산 | git | 비고 |
+|---|---|---|
+| `assets/tomato/*.usd` (과실 20개) | ✅ 추적 | obj 소스에서 재생성도 가능 (개인폴더 tomatest/00_convert) |
+| `assets/aoc/usd/tomato_plant.usd` (배경) | ✅ 추적 | 없어도 씬은 뜸 (경고 후 원기둥 줄기로 대체) |
+| `robots/cad_jig/*.usd` (커터 지그) | ✅ 추적 | 재생성 스크립트가 repo 밖 — 필수 |
+| 로봇·환경 에셋 (Ridgeback/UR10e/지게차/iw.hub…) | — | git 아님 — **Nucleus 서버**에서 런타임 로드 (인터넷/캐시 필요) |
