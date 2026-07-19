@@ -1,0 +1,222 @@
+"""Isaac Sim Forklift C를 GUI에서 키보드로 조종하는 standalone 예제.
+
+실행:
+    isaac_python 7_forklift_keyboard.py
+
+조작:
+    W / S       전진 / 후진
+    A / D       좌회전 / 우회전
+    I / K       포크 올리기 / 내리기
+    Space       즉시 정지
+"""
+
+from isaacsim import SimulationApp
+
+
+simulation_app = SimulationApp({"headless": False})
+
+import time
+
+import carb
+import numpy as np
+import omni.appwindow
+import omni.graph.core as og
+import omni.usd
+import usdrt.Sdf
+from isaacsim.core.api import World
+from isaacsim.core.utils.stage import add_reference_to_stage
+from isaacsim.core.utils.viewports import set_camera_view
+from isaacsim.storage.native import get_assets_root_path
+
+
+FORKLIFT_PRIM_PATH = "/World/Forklift"
+FORKLIFT_USD_RELATIVE_PATH = "/Isaac/Robots/IsaacSim/ForkliftC/forklift_c.usd"
+
+DRIVE_SPEED = 6.0          # 구동 바퀴 목표 각속도(rad/s)
+STEERING_ANGLE = 25.0      # 최대 조향각(deg, USD Drive targetPosition 단위)
+LIFT_MIN = 0.0             # 리프트 최저 위치(m)
+LIFT_MAX = 2.0             # 리프트 최고 위치(m)
+LIFT_SPEED = 0.7           # 초당 리프트 목표 위치 변화량(m/s)
+
+GRAPH_PATH = "/ForkliftKeyboardGraph"
+
+
+class KeyboardState:
+    """동시에 누른 키 상태를 유지하는 키보드 입력 처리기."""
+
+    def __init__(self):
+        self.pressed = set()
+        app_window = omni.appwindow.get_default_app_window()
+        self._input = carb.input.acquire_input_interface()
+        self._keyboard = app_window.get_keyboard()
+        self._subscription = self._input.subscribe_to_keyboard_events(
+            self._keyboard, self._on_keyboard_event
+        )
+
+    def _on_keyboard_event(self, event, *args, **kwargs):
+        key_name = event.input.name
+        if event.type in (
+            carb.input.KeyboardEventType.KEY_PRESS,
+            carb.input.KeyboardEventType.KEY_REPEAT,
+        ):
+            self.pressed.add(key_name)
+        elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
+            self.pressed.discard(key_name)
+        return True
+
+    def is_down(self, key_name):
+        return key_name in self.pressed
+
+    def close(self):
+        if self._subscription is not None:
+            self._input.unsubscribe_to_keyboard_events(
+                self._keyboard, self._subscription
+            )
+            self._subscription = None
+
+
+def create_control_graph():
+    """Forklift C의 바퀴, 조향, 리프트를 구동하는 Action Graph를 생성한다."""
+    keys = og.Controller.Keys
+    og.Controller.edit(
+        {"graph_path": GRAPH_PATH, "evaluator_name": "execution"},
+        {
+            keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("WheelController", "isaacsim.core.nodes.IsaacArticulationController"),
+                ("WriteSteerLeft", "omni.graph.nodes.WritePrimAttribute"),
+                ("WriteSteerRight", "omni.graph.nodes.WritePrimAttribute"),
+                ("WriteLift", "omni.graph.nodes.WritePrimAttribute"),
+                ("SteeringTarget", "omni.graph.nodes.ConstantDouble"),
+                ("LiftTarget", "omni.graph.nodes.ConstantDouble"),
+            ],
+            keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "WheelController.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "WriteSteerLeft.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "WriteSteerRight.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "WriteLift.inputs:execIn"),
+                ("SteeringTarget.inputs:value", "WriteSteerLeft.inputs:value"),
+                ("SteeringTarget.inputs:value", "WriteSteerRight.inputs:value"),
+                ("LiftTarget.inputs:value", "WriteLift.inputs:value"),
+            ],
+            keys.SET_VALUES: [
+                ("WheelController.inputs:robotPath", FORKLIFT_PRIM_PATH),
+                (
+                    "WheelController.inputs:jointNames",
+                    ["left_back_wheel_joint", "right_back_wheel_joint"],
+                ),
+                ("WheelController.inputs:velocityCommand", [0.0, 0.0]),
+                (
+                    "WriteSteerLeft.inputs:prim",
+                    [usdrt.Sdf.Path(FORKLIFT_PRIM_PATH + "/left_rotator_joint")],
+                ),
+                (
+                    "WriteSteerLeft.inputs:name",
+                    "drive:angular:physics:targetPosition",
+                ),
+                (
+                    "WriteSteerRight.inputs:prim",
+                    [usdrt.Sdf.Path(FORKLIFT_PRIM_PATH + "/right_rotator_joint")],
+                ),
+                (
+                    "WriteSteerRight.inputs:name",
+                    "drive:angular:physics:targetPosition",
+                ),
+                (
+                    "WriteLift.inputs:prim",
+                    [usdrt.Sdf.Path(FORKLIFT_PRIM_PATH + "/lift_joint")],
+                ),
+                ("WriteLift.inputs:name", "drive:linear:physics:targetPosition"),
+                ("SteeringTarget.inputs:value", 0.0),
+                ("LiftTarget.inputs:value", LIFT_MIN),
+            ],
+        },
+    )
+
+
+def set_drive_command(speed, steering, lift_height):
+    """현재 키 입력을 Action Graph의 목표값으로 전달한다."""
+    og.Controller.attribute(
+        GRAPH_PATH + "/WheelController.inputs:velocityCommand"
+    ).set([speed, speed])
+    og.Controller.attribute(
+        GRAPH_PATH + "/SteeringTarget.inputs:value"
+    ).set(steering)
+    og.Controller.attribute(
+        GRAPH_PATH + "/LiftTarget.inputs:value"
+    ).set(lift_height)
+
+
+def wait_for_stage_loading():
+    """원격/로컬 USD 참조가 모두 로드될 때까지 GUI를 갱신한다."""
+    while simulation_app.is_running():
+        _, _, loading_count = omni.usd.get_context().get_stage_loading_status()
+        if loading_count == 0:
+            return
+        simulation_app.update()
+        time.sleep(0.01)
+
+
+def main():
+    assets_root = get_assets_root_path()
+    if assets_root is None:
+        raise RuntimeError(
+            "Isaac Sim Assets 경로를 찾지 못했습니다. 인터넷 연결 또는 "
+            "persistent.isaac.asset_root.default 설정을 확인하세요."
+        )
+
+    world = World(stage_units_in_meters=1.0, physics_dt=1.0 / 60.0, rendering_dt=1.0 / 60.0)
+    world.scene.add_default_ground_plane()
+
+    forklift_usd = assets_root + FORKLIFT_USD_RELATIVE_PATH
+    print(f"[LOAD] Forklift C: {forklift_usd}")
+    add_reference_to_stage(forklift_usd, FORKLIFT_PRIM_PATH)
+    wait_for_stage_loading()
+
+    create_control_graph()
+    world.reset()
+    world.play()
+
+    set_camera_view(
+        eye=np.array([-7.0, -7.0, 4.5]),
+        target=np.array([0.5, 0.0, 1.0]),
+        camera_prim_path="/OmniverseKit_Persp",
+    )
+
+    keyboard = KeyboardState()
+    lift_height = LIFT_MIN
+
+    print("\n" + "=" * 58)
+    print(" Forklift C 키보드 조종 시작")
+    print(" W/S: 전진/후진 | A/D: 좌/우 | I/K: 포크 위/아래")
+    print(" Space: 정지 | 종료: Isaac Sim 창 닫기")
+    print(" 키 입력이 안 되면 먼저 Viewport를 한 번 클릭하세요.")
+    print("=" * 58 + "\n")
+
+    try:
+        while simulation_app.is_running():
+            forward = float(keyboard.is_down("W")) - float(keyboard.is_down("S"))
+            turn = float(keyboard.is_down("A")) - float(keyboard.is_down("D"))
+            # F는 Viewport의 '선택 항목에 초점 맞추기' 단축키이므로
+            # 시점 전환을 피하기 위해 리프트에는 I/K를 사용한다.
+            lift = float(keyboard.is_down("I")) - float(keyboard.is_down("K"))
+
+            speed = DRIVE_SPEED * forward
+            steering = STEERING_ANGLE * turn
+            lift_height = float(
+                np.clip(lift_height + lift * LIFT_SPEED / 60.0, LIFT_MIN, LIFT_MAX)
+            )
+
+            if keyboard.is_down("SPACE"):
+                speed = 0.0
+
+            set_drive_command(speed, steering, lift_height)
+            world.step(render=True)
+    finally:
+        set_drive_command(0.0, 0.0, lift_height)
+        keyboard.close()
+        simulation_app.close()
+
+
+if __name__ == "__main__":
+    main()
