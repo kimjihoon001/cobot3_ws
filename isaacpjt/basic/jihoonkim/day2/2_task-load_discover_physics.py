@@ -27,7 +27,8 @@ from isaacsim.core.api.tasks import BaseTask
 # ============================================================
 _THIS_DIR = Path(__file__).resolve().parent
 
-USD_PATH        = str(_THIS_DIR / "Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
+# USD_PATH        = str(_THIS_DIR / "Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
+USD_PATH = str(Path(__file__).resolve().parents[3] / "M0609/Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
 ROBOT_PRIM_PATH = "/World/m0609"
 EE_LINK_NAME    = "link_6"
 GRIPPER_JOINTS  = ["finger_joint", "right_inner_knuckle_joint"]

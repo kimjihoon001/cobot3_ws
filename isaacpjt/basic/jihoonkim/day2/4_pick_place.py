@@ -24,9 +24,10 @@ from isaacsim.robot.manipulators.grippers import ParallelGripper
 from isaacsim.robot.manipulators.manipulators import SingleManipulator
 
 _THIS_DIR = Path(__file__).resolve().parent
+M0609_DIR = Path(__file__).resolve().parents[3] / "M0609"   # 로봇 자산 루트 (day2 밖, gitignore)
 
 # rmpflow 인프라 폴더 경로 등록 (인프라 파일 내부 import가 그대로 동작)
-RMPFLOW_DIR = str(_THIS_DIR / "rmpflow")
+RMPFLOW_DIR = str(M0609_DIR / "rmpflow")
 if RMPFLOW_DIR not in sys.path:
     sys.path.insert(0, RMPFLOW_DIR)
  
@@ -35,7 +36,8 @@ from m0609_pick_place_controller import PickPlaceController
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  A. Task 파라미터 (이전 장과 동일)                              ║
 # ╚══════════════════════════════════════════════════════════════╝
-USD_PATH        = str(_THIS_DIR / "Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
+# USD_PATH        = str(_THIS_DIR / "Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
+USD_PATH = str(Path(__file__).resolve().parents[3] / "M0609/Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
 ROBOT_PRIM_PATH = "/World/m0609"
 EE_LINK_NAME    = "link_6"
 GRIPPER_JOINTS  = ["finger_joint", "right_inner_knuckle_joint"]
@@ -59,9 +61,9 @@ CUBE_DYNAMIC    = 1.0
 # ╚══════════════════════════════════════════════════════════════╝
 
 # ── B-1. 인프라 파일 경로 (RMPFlow가 참조) ────────────────────
-M0609_URDF_PATH           = str(_THIS_DIR / "doosan-robot2/urdf/m0609_isaac_sim.urdf")
-M0609_DESCRIPTION_PATH    = str(_THIS_DIR / "rmpflow/m0609_description.yaml")
-M0609_RMPFLOW_CONFIG_PATH = str(_THIS_DIR / "rmpflow/m0609_rmpflow_common.yaml")
+M0609_URDF_PATH           = str(M0609_DIR / "doosan-robot2/urdf/m0609_isaac_sim.urdf")
+M0609_DESCRIPTION_PATH    = str(M0609_DIR / "rmpflow/m0609_description.yaml")
+M0609_RMPFLOW_CONFIG_PATH = str(M0609_DIR / "rmpflow/m0609_rmpflow_common.yaml")
 
 # ── B-2. Pick & Place 동작 파라미터 ───────────────────────────
 CUBE_INIT_POS = np.array([0.30, 0.4, 0.0515 / 2.0])   # 큐브 초기 위치

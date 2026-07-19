@@ -33,8 +33,9 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-# USD
-USD_PATH        = str(_THIS_DIR / "Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
+# # USD
+# USD_PATH        = str(_THIS_DIR / "Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
+USD_PATH = str(Path(__file__).resolve().parents[3] / "M0609/Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
 ROBOT_PRIM_PATH = "/World/m0609"
 
 # 링크·관절

@@ -11,7 +11,9 @@ import time
 import omni.usd
 from pxr import Usd, UsdGeom
 
-USD_PATH = str(Path(__file__).resolve().parent / "Collected_m0609_camera_view/m0609_camera_view.usd")
+# USD_PATH = str(Path(__file__).resolve().parent / "Collected_m0609_camera_view/m0609_camera_view.usd")
+USD_PATH = str(Path(__file__).resolve().parents[3] / "M0609/Collected_m0609_camera_view/Collected_m0609_camera_view.usd")
+
 
 # /World prim 명시적 생성 후 USD reference 연결
 stage = omni.usd.get_context().get_stage()

@@ -48,3 +48,6 @@ yolo_training/runs/
 
 # 대용량 압축 아카이브 (GitHub 100MB 제한 초과)
 *.tar.gz
+
+# 디버그 산물 임시보관 (블레이드 커터 튜닝 세션 2026-07-19)
+isaacpjt/basic/jihoonkim/isaacpjt/temp/

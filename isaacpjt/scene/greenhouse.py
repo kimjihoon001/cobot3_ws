@@ -1,0 +1,88 @@
+# -*- coding: utf-8 -*-
+"""온실 프레임 스폰 — 기둥 + 상단 보 (패널 없는 골조).
+
+프레임은 static collider. RigidBody 를 안 붙이므로 움직이지 않고,
+로봇이 통과하지 못한다.
+
+투명 지붕/벽 패널은 RTX 반투명 세팅 확인 후 다음 단계에서 추가.
+"""
+from pxr import Usd, UsdGeom, Gf
+
+from pjt_config.settings import GreenhouseConfig
+from scene import physics
+
+
+class Greenhouse:
+    def __init__(self, cfg: GreenhouseConfig):
+        self._cfg = cfg
+
+    def spawn(self, stage: Usd.Stage, root: str = "/World/Greenhouse") -> None:
+        UsdGeom.Xform.Define(stage, root)
+        c = self._cfg
+        half_w, half_l = c.width / 2.0, c.length / 2.0
+        t = c.frame_size
+
+        # 기둥 y 위치: 길이 방향으로 post_spacing 간격 (양 끝 포함)
+        n_spans = max(1, round(c.length / c.post_spacing))
+        ys = [-half_l + i * (c.length / n_spans) for i in range(n_spans + 1)]
+
+        # 기둥 (양쪽 벽)
+        for i, y in enumerate(ys):
+            for side, x in (("L", -half_w), ("R", half_w)):
+                self._add_beam(stage, f"{root}/Post_{side}_{i:02d}",
+                               center=(x, y, c.height / 2.0), size=(t, t, c.height))
+
+        # 길이 방향 상단 보 (양쪽)
+        for side, x in (("L", -half_w), ("R", half_w)):
+            self._add_beam(stage, f"{root}/TopBeam_{side}",
+                           center=(x, 0.0, c.height), size=(t, c.length + t, t))
+
+        # 폭 방향 크로스 보 (기둥 위치마다)
+        for i, y in enumerate(ys):
+            self._add_beam(stage, f"{root}/CrossBeam_{i:02d}",
+                           center=(0.0, y, c.height), size=(c.width + t, t, t))
+
+        # 유리 패널 — 시각 전용 (콜라이더 없음. 로봇 차단은 골조/베드가 담당)
+        # 지붕은 안 덮는다 — 시연을 위에서 내려다보는 게 우선 (사용자 결정 2026-07-18).
+        self._add_glass(stage, f"{root}/Glass_L",
+                        (-half_w, 0.0, c.height / 2.0), (0.02, c.length, c.height))
+        self._add_glass(stage, f"{root}/Glass_R",
+                        (half_w, 0.0, c.height / 2.0), (0.02, c.length, c.height))
+        self._add_glass(stage, f"{root}/Glass_Front",
+                        (0.0, -half_l, c.height / 2.0), (c.width, 0.02, c.height))
+
+        # 뒷벽(+y, 창고 방향)은 가운데 door_w 를 비워 AMR 출입구를 낸다.
+        door_w = 3.0
+        pane_w = (c.width - door_w) / 2.0
+        for side, x in (("L", -(door_w + pane_w) / 2.0),
+                        ("R", (door_w + pane_w) / 2.0)):
+            self._add_glass(stage, f"{root}/Glass_Back_{side}",
+                            (x, half_l, c.height / 2.0),
+                            (pane_w, 0.02, c.height))
+        # 출입구 양옆 문틀 기둥 (골조와 같은 규격, 콜라이더 있음)
+        for side, x in (("L", -door_w / 2.0), ("R", door_w / 2.0)):
+            self._add_beam(stage, f"{root}/DoorPost_{side}",
+                           center=(x, half_l, c.height / 2.0),
+                           size=(t, t, c.height))
+
+    def _add_beam(self, stage: Usd.Stage, path: str,
+                  center: tuple[float, float, float],
+                  size: tuple[float, float, float]) -> None:
+        cube = UsdGeom.Cube.Define(stage, path)
+        cube.CreateSizeAttr(1.0)
+        cube.CreateDisplayColorAttr([Gf.Vec3f(*self._cfg.frame_color)])
+        xf = UsdGeom.Xformable(cube.GetPrim())
+        xf.AddTranslateOp().Set(Gf.Vec3d(*center))
+        xf.AddScaleOp().Set(Gf.Vec3f(*size))
+        physics.add_shape_collider(cube.GetPrim())
+
+    def _add_glass(self, stage: Usd.Stage, path: str,
+                   center: tuple[float, float, float],
+                   size: tuple[float, float, float]) -> None:
+        pane = UsdGeom.Cube.Define(stage, path)
+        pane.CreateSizeAttr(1.0)
+        pane.CreateDisplayColorAttr([Gf.Vec3f(0.72, 0.83, 0.90)])
+        pane.CreateDisplayOpacityAttr([0.06])   # RTX 에서 0.12 는 흰 벽처럼 보였다
+        xf = UsdGeom.Xformable(pane.GetPrim())
+        xf.AddTranslateOp().Set(Gf.Vec3d(*center))
+        xf.AddScaleOp().Set(Gf.Vec3f(*size))

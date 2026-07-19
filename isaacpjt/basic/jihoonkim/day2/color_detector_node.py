@@ -11,7 +11,7 @@ cv_bridge 는 쓰지 않고 np.frombuffer 로 직접 디코딩.
   묵은 프레임을 판정하게 된다. 최신 한 장만 보고 나머지는 버리는 게 맞다.
 
 실행:
-  export ROS_DOMAIN_ID=50            # PC A 와 동일해야 통신됨
+  export ROS_DOMAIN_ID=108          # PC A 와 동일해야 통신됨
   source /opt/ros/humble/setup.bash
   python3 color_detector_node.py
 """
