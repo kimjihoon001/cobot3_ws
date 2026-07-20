@@ -10,8 +10,10 @@ set -euo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DST="$HOME/cobot3_ws/isaacpjt"
 
+# main.py = 환경/골격, mm·iw·fork = 로봇 드라이버(플래그로 선택), robot_base = 공통 베이스
 rsync -av \
-    "$SRC/main.py" "$SRC/README.md" "$DST/"
+    "$SRC/main.py" "$SRC/mm.py" "$SRC/iw.py" "$SRC/fork.py" \
+    "$SRC/robot_base.py" "$SRC/README.md" "$DST/"
 rsync -av --exclude __pycache__ \
     "$SRC/pjt_config" "$SRC/pjt_utils" "$SRC/scene" "$SRC/tools" "$DST/"
 rsync -av --exclude __pycache__ --exclude stub_harvester.py \

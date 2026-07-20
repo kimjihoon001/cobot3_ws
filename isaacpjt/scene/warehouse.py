@@ -246,6 +246,10 @@ class Warehouse:
                 kprim = stage.GetPrimAtPath(kp)
                 set_ps(kprim, (ox, oy, kz), ident)          # 팔레트 로컬 프레임(부모가 회전·이동)
                 set_sc(kprim, klt_scale)                     # 실제 KLT 를 살짝 축소
+                # KLT 에셋(small_KLT.usd)은 자체 RigidBodyAPI 를 갖고 온다 → 팔레트 강체 밑에
+                # 중첩되어 "missing xformstack reset" 경고가 매 프레임 뜬다. 빈 장식이므로
+                # 물리를 꺼 순수 시각으로 만든다 → 팔레트 강체에 흡수(2026-07-20 GPU 실측).
+                physics.disable_physics(stage, kp)
                 # 에셋의 무거운 텍스처 머티리얼을 벗기고 displayColor 로 칠한다.
                 # 실제 KLT 를 텍스처째 넣으면 재질 예산이 밀려 식물 색이 죽었다(2026-07-20).
                 for m in Usd.PrimRange(kprim):

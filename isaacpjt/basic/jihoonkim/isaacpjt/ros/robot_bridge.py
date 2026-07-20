@@ -44,6 +44,10 @@ T = {
     "RtxLidar": "isaacsim.ros2.bridge.ROS2RtxLidarHelper",
     "RenderProduct": "isaacsim.core.nodes.IsaacCreateRenderProduct",
     "CamHelper": "isaacsim.ros2.bridge.ROS2CameraHelper",
+    # camera_info 는 CameraHelper 의 type 이 아니다(allowedTokens=rgb,depth,depth_pcl,…엔
+    # camera_info 없음). 주면 "type is not supported" 가 매 프레임 터진다(2026-07-20 GPU 실측).
+    # 전용 노드로 발행한다(Isaac 5.1 에 OgnROS2CameraInfoHelper 존재 확인).
+    "CamInfoHelper": "isaacsim.ros2.bridge.ROS2CameraInfoHelper",
 }
 
 
@@ -255,7 +259,8 @@ def build_camera(stage, graph_path: str, camera_prim: str, cam,
     """
     _edit(graph_path,
           [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("RP", T["RenderProduct"]),
-           ("Rgb", T["CamHelper"]), ("Depth", T["CamHelper"]), ("Info", T["CamHelper"])],
+           ("Rgb", T["CamHelper"]), ("Depth", T["CamHelper"]),
+           ("Info", T["CamInfoHelper"])],
           [("OnTick.outputs:tick", "RP.inputs:execIn"),
            ("RP.outputs:execOut", "Rgb.inputs:execIn"),
            ("RP.outputs:execOut", "Depth.inputs:execIn"),
@@ -276,7 +281,7 @@ def build_camera(stage, graph_path: str, camera_prim: str, cam,
            ("Depth.inputs:type", "depth"),
            ("Depth.inputs:topicName", cam.depth_topic),
            ("Depth.inputs:frameId", cam.frame_id),
-           ("Info.inputs:type", "camera_info"),
+           # Info = ROS2CameraInfoHelper (type 입력 없음 — 렌더프로덕트에서 내부파라미터 읽음)
            ("Info.inputs:topicName", cam.info_topic),
            ("Info.inputs:frameId", cam.frame_id)])
     _set_target(stage, f"{graph_path}/RP", "inputs:cameraPrim", camera_prim)

@@ -101,6 +101,33 @@ def set_kinematic(prim: Usd.Prim, kinematic: bool) -> None:
         rb.GetKinematicEnabledAttr().Set(kinematic)
 
 
+def disable_physics(stage: Usd.Stage, root_path: str) -> int:
+    """서브트리의 물리 잔재(강체·PhysX·콜라이더·아티큘레이션루트·내부 조인트)를 제거해
+    순수 시각 프림으로 만든다.
+
+    참조 에셋(예: KLT 빈 small_KLT.usd)이 자체 강체를 갖고 오면, 강체 프림 밑에 자식으로
+    넣을 때 PhysX 가 '중첩 강체(missing xformstack reset)' 경고를 매 프레임 낸다. 이 경고는
+    RigidBodyAPI 의 '존재'(계층 구조)를 보고 뜨므로 enabled=False 로는 안 사라진다 —
+    RemoveAPI 로 실제 제거해야 한다(harvester._add_camera_at 에서 검증된 방식). 참조로 온
+    API 도 RemoveAPI 는 컴포지션에 삭제를 얹어 먹는다(D455 에서 실측). 반환: 강체 제거 수.
+    """
+    n = 0
+    for p in Usd.PrimRange(stage.GetPrimAtPath(root_path)):
+        if p.IsA(UsdPhysics.Joint):                 # 에셋 내부 조인트 비활성
+            p.SetActive(False)
+            continue
+        if p.HasAPI(UsdPhysics.RigidBodyAPI):
+            p.RemoveAPI(UsdPhysics.RigidBodyAPI)
+            n += 1
+        if p.HasAPI(PhysxSchema.PhysxRigidBodyAPI):
+            p.RemoveAPI(PhysxSchema.PhysxRigidBodyAPI)
+        if p.HasAPI(UsdPhysics.CollisionAPI):
+            p.RemoveAPI(UsdPhysics.CollisionAPI)
+        if p.HasAPI(UsdPhysics.ArticulationRootAPI):
+            p.RemoveAPI(UsdPhysics.ArticulationRootAPI)
+    return n
+
+
 def create_physics_material(stage: Usd.Stage, path: str,
                             static_friction: float,
                             dynamic_friction: float,

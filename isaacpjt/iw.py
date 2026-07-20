@@ -1,0 +1,73 @@
+# -*- coding: utf-8 -*-
+"""운반 AMR 드라이버 (--iw) — iw.hub (차동 구동 + 승강). 데크에 팔레트+KLT+토마토 적재.
+
+로봇 모델은 robots/iwhub.py, ROS 브리지는 ros/robot_bridge.py. 이 파일은 배선만 한다.
+Nav2 브리지(cmd_vel→바퀴 / odom / scan)는 플래그로 켠 것만, 실패해도 씬은 유지(§5.6).
+"""
+from __future__ import annotations
+
+from robot_base import Driver, ros_fail
+from robots.iwhub import IwHub
+
+# 임시 배치 — 온실 앞마당(MM 옆). 물류 동선 확정 후 조정.
+POSE = (2.0, -12.0, 0.0)
+
+
+class IwDriver(Driver):
+    flag = "--iw"
+    name = "iw"
+    ns = "iwhub_0"
+    root = "/World/IwHub"
+
+    def __init__(self, cfg):
+        super().__init__()
+        self._cfg = cfg
+        self._iw = IwHub(cfg.robots)
+
+    def spawn(self, stage):
+        self._iw.spawn(stage, self.root, POSE)
+
+    def finalize(self, world, stage, opts):
+        # iw.hub 데크에 '적재된 세트'(팔레트+KLT 8 + 토마토 15개 꼭지포함·동적강체, 3칸 산포)
+        self._iw.load_cargo(stage, self._cfg.tomato_assets, self._cfg.physics)
+
+        if not opts.no_ros:
+            try:
+                from ros import robot_bridge as RB
+                RB.build_joint_bridge(stage, f"/World/RosBridge_{self.ns}",
+                                      self.ns, self.art)
+            except Exception:
+                ros_fail("iw.hub 조인트 브리지")
+            if opts.nav_drive or opts.nav_odom or opts.nav_scan:
+                build_nav(stage, self._iw, self.art,
+                          self._cfg.robots.iwhub_nav, opts)
+
+
+def build_nav(stage, iw, art_path: str, nav, opts) -> None:
+    """iw.hub 자율주행 그래프 — 플래그로 켠 것만 배선. 실패해도 씬은 유지(브리지와 동일 방침).
+
+    순서대로 GPU 검증: drive(/cmd_vel→바퀴) → odom(/odom+TF) → scan(라이다→/scan).
+    노드 타입명은 tools/nav2_node_probe.py 로 확정 후 robot_bridge.T 갱신할 것(§8).
+    """
+    from ros import robot_bridge as RB
+
+    base = f"{iw.root}/base_link"
+    chassis = base if stage.GetPrimAtPath(base).IsValid() else art_path
+    try:
+        if opts.nav_drive:
+            RB.build_diff_drive(stage, "/World/Nav_drive", art_path,
+                                iw.DRIVE_JOINTS, nav)
+        if opts.nav_odom:
+            RB.build_odometry(stage, "/World/Nav_odom", chassis, nav)
+        if opts.nav_scan:
+            lidar = iw.attach_lidar(stage, nav.lidar_offset)
+            if lidar:
+                RB.build_tf_sensor(stage, "/World/Nav_tf", chassis, lidar, nav)
+                RB.build_lidar_scan(stage, "/World/Nav_scan", lidar, nav)
+    except Exception:
+        import traceback
+        print("\n" + "=" * 64)
+        print("[Nav] 그래프 생성 실패 — 씬은 유지. tools/nav2_node_probe.py 로 노드명 확인.")
+        print("=" * 64)
+        traceback.print_exc()
+        print("=" * 64 + "\n")
