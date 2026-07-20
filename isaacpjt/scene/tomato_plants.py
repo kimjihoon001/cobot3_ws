@@ -162,8 +162,12 @@ class TomatoPlants:
         bed.CreateSizeAttr(1.0)
         bed.CreateDisplayColorAttr([Gf.Vec3f(0.90, 0.90, 0.87)])
         xf = UsdGeom.Xformable(bed.GetPrim())
-        xf.AddTranslateOp().Set(Gf.Vec3d(x, cy, 0.10))
-        xf.AddScaleOp().Set(Gf.Vec3f(0.42, length + 0.5, 0.20))
+        # 높이 0.40m — [2] 유도. harvester_nav.lidar_offset z=0.35(로컬, base_link=지면 기준)
+        # 보다 높여야 2D 라이다 스캔 평면이 베드를 가로질러 장애물로 잡는다(2026-07-20
+        # 사용자 요청 — 기존 0.20m 은 스캔 평면 아래라 라이다에 아예 안 보였다. 0.50m 은
+        # 과했다는 피드백으로 0.40m 로 낮춤 — 스캔 평면보다 0.05m 여유).
+        xf.AddTranslateOp().Set(Gf.Vec3d(x, cy, 0.20))
+        xf.AddScaleOp().Set(Gf.Vec3f(0.42, length + 0.5, 0.40))
         physics.add_shape_collider(bed.GetPrim())
 
     def _spawn_trellis_bar(self, stage: Usd.Stage, path: str,
