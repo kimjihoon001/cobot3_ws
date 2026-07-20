@@ -1,8 +1,16 @@
 # 수확 MM(Ridgeback) Nav2 실행 — nav2_bringup 을 config/harvester_nav2.yaml 로 띄운다.
 #
 # 사용:
-#   ros2 launch fleet_dispatch harvester_nav2.launch.py slam:=true          # 맵 만들며 주행
+#   ros2 launch fleet_dispatch harvester_nav2.launch.py slam:=true          # 맵 만들며 주행(수동)
+#   ros2 launch fleet_dispatch harvester_nav2.launch.py slam:=true explore:=true  # 자동 탐사 맵핑
 #   ros2 launch fleet_dispatch harvester_nav2.launch.py map:=/경로/farm.yaml  # 정적맵 + AMCL
+#
+# explore:=true 는 explore_lite(m-explore-ros2, src/m-explore-ros2) 를 같이 띄운다 —
+# slam_toolbox 는 들어오는 스캔으로 지도만 채울 뿐 로봇을 몰지 않으므로, 이게 없으면
+# slam:=true 여도 사람이 teleop 으로 돌아다녀야 한다. explore_lite 가 /harvester_0/map
+# 의 미탐사 경계(frontier)를 찾아 navigate_to_pose 액션으로 계속 목표를 보낸다.
+# 패키지 기본 파라미터(costmap_topic: map, robot_base_frame: base_link)가 이 프로젝트
+# 프레임/토픽 이름과 그대로 맞아 별도 params 파일 없이 씀.
 #
 # Isaac 쪽 짝: isaac_python main.py --mm --nav  (isaacpjt/mm.py::build_nav)
 #   /harvester_0/scan · /harvester_0/odom · TF 를 Isaac 이 발행하고,
@@ -109,6 +117,19 @@ def _bringup(context, *_args, **_kwargs):
     return actions
 
 
+def _explore(context, *_args, **_kwargs):
+    if _pybool(context, "explore") != "True":
+        return []
+    return [IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            get_package_share_directory("explore_lite"), "launch",
+            "explore.launch.py")),
+        launch_arguments={
+            "namespace": LaunchConfiguration("namespace").perform(context),
+            "use_sim_time": _pybool(context, "use_sim_time"),
+        }.items())]
+
+
 def generate_launch_description():
     default_params = os.path.join(
         get_package_share_directory("fleet_dispatch"), "config",
@@ -118,6 +139,7 @@ def generate_launch_description():
         # 파라미터의 프레임 이름은 네임스페이스를 안 따라가므로 바꾸려면 yaml 도 같이 고칠 것.
         DeclareLaunchArgument("namespace", default_value=""),
         DeclareLaunchArgument("slam", default_value="false"),
+        DeclareLaunchArgument("explore", default_value="false"),
         DeclareLaunchArgument("map", default_value=""),
         DeclareLaunchArgument("use_sim_time", default_value="true"),  # Isaac /clock
         DeclareLaunchArgument("params_file", default_value=default_params),
@@ -127,4 +149,5 @@ def generate_launch_description():
             get_package_share_directory("fleet_dispatch"), "rviz",
             "harvester_nav2.rviz")),
         OpaqueFunction(function=_bringup),
+        OpaqueFunction(function=_explore),
     ])
