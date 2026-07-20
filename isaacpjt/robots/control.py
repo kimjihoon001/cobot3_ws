@@ -146,6 +146,11 @@ class TransporterController:
         self._lift = float(q[self._lift_i])
         self._steer = float(q[self._steer_i[0]])
         self._drive_vel = 0.0
+        # ForkliftB 에셋은 구동 관절이 돌아도 접촉 마찰 상태에 따라 차체가 전혀
+        # 전진하지 않는 경우가 있다. main.py 제어에서는 바퀴 반지름/축거 기반의
+        # 평면 운동도 함께 적용해 터미널 명령이 차체 이동으로 확실히 이어지게 한다.
+        self._wheel_radius = 0.22
+        self._wheelbase = 2.05
 
     # ---- 명령 ----
     def set_fork(self, height: float) -> None:
@@ -165,7 +170,7 @@ class TransporterController:
         self._drive_vel = vel
 
     # ---- 반영 ----
-    def apply(self) -> None:
+    def apply(self, dt: float | None = None) -> None:
         # 위치(승강 1 + 조향 N)와 속도(구동 N)를 각각 건다. DC 의 pos-target·
         # vel-target 버퍼가 달라 두 액션이 공존한다.
         pos_i = [self._lift_i] + self._steer_i
@@ -175,6 +180,28 @@ class TransporterController:
         self._robot.apply_action(ArticulationAction(
             joint_velocities=np.full(len(self._drive_i), self._drive_vel),
             joint_indices=np.array(self._drive_i)))
+
+        # ForkliftB의 후륜 구동은 에셋/바닥 마찰에 따라 바퀴만 헛돌 수 있다.
+        # dt를 준 호출자(main.py)는 Ackermann 평면 운동을 병행한다. 정지 중에는
+        # pose를 건드리지 않아 물리 시뮬레이션과 충돌하지 않는다.
+        if dt is not None and abs(self._drive_vel) > 1e-6:
+            position, quat = self._robot.get_world_pose()
+            position = np.asarray(position, dtype=float)
+            quat = np.asarray(quat, dtype=float)  # Isaac Core: [w, x, y, z]
+            w, x, y, z = quat
+            yaw = np.arctan2(
+                2.0 * (w * z + x * y),
+                1.0 - 2.0 * (y * y + z * z),
+            )
+            linear = self._drive_vel * self._wheel_radius
+            yaw += linear / self._wheelbase * np.tan(self._steer) * dt
+            position[0] += linear * np.cos(yaw) * dt
+            position[1] += linear * np.sin(yaw) * dt
+            half = yaw * 0.5
+            self._robot.set_world_pose(
+                position=position,
+                orientation=np.array([np.cos(half), 0.0, 0.0, np.sin(half)]),
+            )
 
     def joint_report(self) -> str:
         q = np.asarray(self._robot.get_joint_positions(), dtype=float)
