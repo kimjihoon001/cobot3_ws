@@ -58,6 +58,17 @@ def _set_target(stage, node_path: str, attr: str, target: str) -> None:
     rel.SetTargets([target])
 
 
+def _tf_topic(nav) -> str:
+    """이 로봇의 TF 토픽명. nav.tf_namespace 가 있으면 /{ns}/tf, 없으면 전역 /tf.
+
+    nav2 는 네임스페이스를 쓰면 상대 이름 'tf' 를 구독한다 = /{ns}/tf. 전역 /tf 로
+    쏘면 nav2 가 못 듣는다(2026-07-20 실측). 절대 이름(앞 '/')으로 박아 nodeNamespace
+    합성 규칙에 기대지 않는다. getattr 인 이유 — IwHubNavConfig 엔 이 필드가 없다.
+    """
+    ns = getattr(nav, "tf_namespace", "")
+    return f"/{ns}/tf" if ns else "/tf"
+
+
 def _edit(graph_path: str, nodes, connects, values) -> None:
     keys = og.Controller.Keys
     og.Controller.edit(
@@ -229,7 +240,8 @@ def build_odometry(stage, graph_path: str, chassis_prim: str, nav,
            ("Pub.inputs:odomFrameId", nav.odom_frame),
            ("Pub.inputs:chassisFrameId", nav.base_frame),
            ("RawTf.inputs:parentFrameId", nav.odom_frame),
-           ("RawTf.inputs:childFrameId", nav.base_frame)])
+           ("RawTf.inputs:childFrameId", nav.base_frame),
+           ("RawTf.inputs:topicName", _tf_topic(nav))])
     _set_target(stage, f"{graph_path}/Odom", "inputs:chassisPrim", chassis_prim)
     log(f"[Nav] odometry: {nav.odom_topic} + TF "
         f"{nav.odom_frame}→{nav.base_frame} ({chassis_prim})")
@@ -238,17 +250,41 @@ def build_odometry(stage, graph_path: str, chassis_prim: str, nav,
 
 def build_tf_sensor(stage, graph_path: str, parent_prim: str, sensor_prim: str,
                     nav, domain_id: int = DOMAIN_ID, log=print) -> None:
-    """base_link→센서(라이다) 정적 TF 발행 (/tf). Nav2 가 스캔을 로봇에 붙이는 데 필요."""
+    """base_link→센서(라이다) TF 발행. Nav2 가 스캔을 로봇에 붙이는 데 필요.
+
+    ★ PubTf(ROS2PublishTransformTree)를 쓰면 안 된다 — 그 노드는 프레임 이름을
+      **prim 이름에서** 만든다. 그래서 'base_link → nav_lidar' 가 나오고
+      (2026-07-20 실측), 우리가 쓰는 'harvester_0/base_link → harvester_0/laser' 와
+      안 맞아 TF 트리가 두 조각으로 끊긴다. 스캔의 frame_id 에는 TF 가 아예 없게 된다.
+      RawTf 는 프레임 이름을 문자열로 받으므로 이걸 쓴다.
+    오프셋은 설정값이 아니라 **씬에서 실측**한다 — 에셋에 이미 달린 라이다를 쓰는
+    경우(iw.hub) 설정의 lidar_offset 과 실제 장착 위치가 다르기 때문.
+    """
+    from pxr import UsdGeom
+
+    cache = UsdGeom.XformCache()
+    m_p = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(parent_prim))
+    m_s = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(sensor_prim))
+    rel = m_s * m_p.GetInverse()
+    t = rel.ExtractTranslation()
+    # 회전은 기본값(단위)으로 둔다 — attach_lidar 가 단위 쿼터니언으로 붙이므로.
+    # 기울여 달면 여기서 rotation 도 넣어야 한다(입력 포맷 미실측 — 그때 probe 할 것).
+    q = rel.ExtractRotationQuat()
+    if abs(q.GetReal()) < 0.999:
+        log(f"[Nav] ⚠ 라이다가 기울어 장착됨(w={q.GetReal():.3f}) — "
+            "TF 회전은 단위로 나간다. 스캔이 틀어지면 rotation 입력을 채울 것.")
     _edit(graph_path,
           [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("SimTime", T["SimTime"]),
-           ("Tf", T["PubTf"])],
+           ("Tf", T["PubRawTf"])],
           [("OnTick.outputs:tick", "Tf.inputs:execIn"),
            ("Ctx.outputs:context", "Tf.inputs:context"),
            ("SimTime.outputs:simulationTime", "Tf.inputs:timeStamp")],
           [("Ctx.inputs:domain_id", domain_id),
-           ("Ctx.inputs:useDomainIDEnvVar", False)])
-    _set_target(stage, f"{graph_path}/Tf", "inputs:parentPrim", parent_prim)
-    _set_target(stage, f"{graph_path}/Tf", "inputs:targetPrims", sensor_prim)
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Tf.inputs:topicName", _tf_topic(nav)),
+           ("Tf.inputs:parentFrameId", nav.base_frame),
+           ("Tf.inputs:childFrameId", nav.lidar_frame),
+           ("Tf.inputs:translation", [t[0], t[1], t[2]])])
     log(f"[Nav] tf: {nav.base_frame}→{nav.lidar_frame} ({sensor_prim})")
 
 

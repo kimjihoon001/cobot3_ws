@@ -591,6 +591,12 @@ class HarvesterNavConfig:
     odom_frame: str = "harvester_0/odom"
     base_frame: str = "harvester_0/base_link"
     lidar_frame: str = "harvester_0/laser"
+    # ★ TF 는 **네임스페이스 안**으로 쏴야 한다 — nav2_bringup 은 네임스페이스를 쓰면
+    #   remappings=[('/tf','tf')] 를 걸어 /harvester_0/tf 를 구독한다(navigation_launch.py
+    #   L57 실측). Isaac 이 전역 /tf 로 쏘면 nav2 쪽 TF 트리가 텅 비어
+    #   'Invalid frame ID "harvester_0/odom" … frame does not exist' 가 난다(2026-07-20 실측).
+    #   빈 문자열로 두면 전역 /tf 로 발행한다(단일 로봇이면 그래도 된다).
+    tf_namespace: str = "harvester_0"
     cmd_vel_topic: str = "/harvester_0/cmd_vel"
     odom_topic: str = "/harvester_0/odom"
     scan_topic: str = "/harvester_0/scan"
