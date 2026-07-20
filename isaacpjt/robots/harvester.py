@@ -623,14 +623,40 @@ class HarvestMM:
             omni.kit.commands.execute(
                 "IsaacSensorCreateRtxLidar",
                 path=path, parent=None,
-                config="Example_Rotary_2D",
+                config="RPLIDAR_S2E",
                 translation=Gf.Vec3d(*offset),
                 orientation=Gf.Quatd(1.0, 0.0, 0.0, 0.0))
-            log(f"[Harvester] RTX 라이다 생성: {path} (오프셋 {offset})")
-            return path
+            sensor = self._rtx_sensor_prim(stage, path)
+            if sensor is None:
+                log(f"[Harvester] ⚠ {path} 아래에 센서 프림(OmniLidar/Camera) 없음 — "
+                    "이 config 는 렌더프로덕트를 못 붙인다")
+                return None
+            log(f"[Harvester] RTX 라이다 생성: {sensor} (오프셋 {offset})")
+            return sensor
         except Exception as e:
             log(f"[Harvester] ⚠ 라이다 생성 실패 — GPU 에서 RTX 라이다 API 확인 필요: {e}")
             return None
+
+    @staticmethod
+    def _rtx_sensor_prim(stage: Usd.Stage, root: str) -> str | None:
+        """생성된 라이다 트리에서 렌더프로덕트를 붙일 수 있는 프림을 찾는다.
+
+        왜 필요한가 (2026-07-20 실측) — 프로파일마다 만들어지는 모양이 다르다:
+          NVIDIA(Example_Rotary_2D) : 커맨드가 라이다 프림을 **직접** 만든다 → root 자신
+          벤더(RPLIDAR_S2E, SICK_*) : USD 에셋을 **참조**로 붙인다 → root 는 껍데기
+            Xform 이고 진짜 센서는 그 안쪽. 껍데기를 렌더프로덕트에 주면
+            "Render product not attached to RTX Lidar (Camera or OmniLidar prims are
+            required)" 경고만 반복되고 /scan 이 안 나온다.
+        그래서 root 부터 훑어 OmniLidar/Camera 를 찾고, 없으면 None.
+        """
+        prim = stage.GetPrimAtPath(root)
+        if not prim.IsValid():
+            return None
+        for p in Usd.PrimRange(prim):
+            tname = (p.GetTypeName() or "")
+            if "Lidar" in tname or p.IsA(UsdGeom.Camera):
+                return str(p.GetPath())
+        return None
 
     def _add_camera_at(self, stage: Usd.Stage, cam_pos, euler, log) -> None:
         """RealSense D455 를 그리퍼 base_link 자식으로 붙인다(팔 따라감) + 로컬 rotateXYZ

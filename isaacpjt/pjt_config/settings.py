@@ -588,18 +588,21 @@ class HarvesterNavConfig:
 
     # TF 프레임/토픽 — **네임스페이스를 붙인다**. iw.hub 도 Nav2 를 켜면 프레임이 충돌하기
     # 때문(map 만 공유, 로봇 프레임은 접두사 분리 = Nav2 다중로봇 표준 방식).
-    odom_frame: str = "harvester_0/odom"
-    base_frame: str = "harvester_0/base_link"
-    lidar_frame: str = "harvester_0/laser"
-    # ★ TF 는 **네임스페이스 안**으로 쏴야 한다 — nav2_bringup 은 네임스페이스를 쓰면
-    #   remappings=[('/tf','tf')] 를 걸어 /harvester_0/tf 를 구독한다(navigation_launch.py
-    #   L57 실측). Isaac 이 전역 /tf 로 쏘면 nav2 쪽 TF 트리가 텅 비어
-    #   'Invalid frame ID "harvester_0/odom" … frame does not exist' 가 난다(2026-07-20 실측).
-    #   빈 문자열로 두면 전역 /tf 로 발행한다(단일 로봇이면 그래도 된다).
-    tf_namespace: str = "harvester_0"
-    cmd_vel_topic: str = "/harvester_0/cmd_vel"
-    odom_topic: str = "/harvester_0/odom"
-    scan_topic: str = "/harvester_0/scan"
+    # ⚠ 지금은 **전역(네임스페이스 없음)** 으로 간다. 로봇이 한 대뿐이고, nav2_bringup 이
+    #   네임스페이스에서 일관되지 않기 때문 — navigation_launch.py 는 [('/tf','tf')] 리맵을
+    #   걸지만 slam_launch.py 는 안 건다(2026-07-20 실측). 그래서 네임스페이스를 쓰면
+    #   slam_toolbox 만 전역 /tf 로 map→odom 을 쏘고 costmap 은 /harvester_0/tf 를 봐서
+    #   'Invalid frame ID "map"' 이 난다. 두 번째 로봇에 nav2 를 얹을 때 다시 설계할 것
+    #   (그때는 slam_toolbox 를 bringup 대신 직접 띄우고 리맵을 걸어야 한다).
+    odom_frame: str = "odom"
+    base_frame: str = "base_link"
+    lidar_frame: str = "laser"
+    # tf_namespace: "" = 전역 /tf. "harvester_0" 로 두면 /harvester_0/tf 로 쏜다.
+    # 다중로봇으로 갈 때만 채울 것 — 그때는 slam_toolbox 리맵도 같이 해결해야 한다(위 주석).
+    tf_namespace: str = ""
+    cmd_vel_topic: str = "/cmd_vel"
+    odom_topic: str = "/odom"
+    scan_topic: str = "/scan"
 
 
 @dataclass

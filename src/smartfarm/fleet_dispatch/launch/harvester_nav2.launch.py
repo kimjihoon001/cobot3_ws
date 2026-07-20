@@ -33,6 +33,7 @@ from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
                             OpaqueFunction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 # Humble 표기 → Jazzy 이상 표기. 값에 '/' 가 들어가는 플러그인은 navfn 과 behaviors 뿐이고
 # (costmap·controller·smoother 플러그인은 Humble 도 이미 '::'), 키가 정확히 `plugin` 인
@@ -87,12 +88,25 @@ def _bringup(context, *_args, **_kwargs):
     # use_namespace 는 Humble 에만 있는 인자다 (Iron 에서 제거 — namespace 하나로 통합).
     # Jazzy 에 넘기면 "unknown launch argument" 로 죽는다.
     if distro == "humble":
-        args["use_namespace"] = "true"
-    return [IncludeLaunchDescription(
+        args["use_namespace"] = str(bool(args["namespace"]))
+    actions = [IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory("nav2_bringup"), "launch",
             "bringup_launch.py")),
         launch_arguments=args.items())]
+
+    # RViz 는 기본으로 같이 띄운다(rviz:=false 로 끌 수 있음).
+    # ★ use_sim_time 을 반드시 넘겨야 한다 — Isaac 은 타임스탬프를 시뮬 시간(수백 초)으로
+    #   찍는데 RViz 가 벽시계(17억 초)로 보면 모든 메시지를 '너무 오래됨' 으로 버려서
+    #   화면에 아무것도 안 나온다(2026-07-20 실사용 확인). 이건 실행 중 못 바꾸는 값이라
+    #   손으로 띄우면 매번 --ros-args -p use_sim_time:=true 를 붙여야 했다.
+    if _pybool(context, "rviz") == "True":
+        actions.append(Node(
+            package="rviz2", executable="rviz2", name="rviz2",
+            arguments=["-d", LaunchConfiguration("rviz_config").perform(context)],
+            parameters=[{"use_sim_time": args["use_sim_time"] == "True"}],
+            output="screen"))
+    return actions
 
 
 def generate_launch_description():
@@ -102,11 +116,15 @@ def generate_launch_description():
     return LaunchDescription([
         # 네임스페이스는 프레임 접두사(harvester_0/base_link)와 반드시 같아야 한다 —
         # 파라미터의 프레임 이름은 네임스페이스를 안 따라가므로 바꾸려면 yaml 도 같이 고칠 것.
-        DeclareLaunchArgument("namespace", default_value="harvester_0"),
+        DeclareLaunchArgument("namespace", default_value=""),
         DeclareLaunchArgument("slam", default_value="false"),
         DeclareLaunchArgument("map", default_value=""),
         DeclareLaunchArgument("use_sim_time", default_value="true"),  # Isaac /clock
         DeclareLaunchArgument("params_file", default_value=default_params),
         DeclareLaunchArgument("autostart", default_value="true"),
+        DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument("rviz_config", default_value=os.path.join(
+            get_package_share_directory("fleet_dispatch"), "rviz",
+            "harvester_nav2.rviz")),
         OpaqueFunction(function=_bringup),
     ])
