@@ -49,19 +49,20 @@ class GreenhouseTask(BaseTask):
         # 기본 지면의 파란 격자가 지평선에도 안 보이게 시야보다 훨씬 넉넉히 깐다.
         ground.spawn_hall(stage, center=(0.0, 1.5), size=(60.0, 60.0))
         Lighting(cfg.lighting).spawn(stage)
-        Greenhouse(g).spawn(stage)
+        Greenhouse(g).spawn(stage, back_wall=False)   # 뒷벽은 창고와 공유(벽 하나로 붙임)
 
         self._plants = TomatoPlants(cfg.plants, cfg.tomato_assets,
                                     g, cfg.physics, rng)
         self._plants.spawn(stage)
 
-        # 창고 랙 — 온실 뒤(+y) AMR 통로 끝. 랙 중심이 x=0 에 오게 slot0 을 왼쪽으로.
+        # 창고 방 — 온실 뒷벽에 **벽 하나로 붙인다**(gap 없음, 팀 피드백 2026-07-20).
+        # 방 중심 x=0, 방 앞벽(-y)이 온실 뒷벽(+y=length/2)과 겹쳐 공유 칸막이가 된다.
         wh_cfg = cfg.warehouse
         self._warehouse = Warehouse(wh_cfg, cfg.sectors.count)
-        origin_x = -(wh_cfg.sectors - 1) * wh_cfg.slot_pitch / 2.0
-        wh_origin = (origin_x, g.length / 2.0 + 2.5, 0.0)
-        self._warehouse.spawn(stage, origin=wh_origin)
-        self._warehouse.spawn_building(stage)   # 커스텀 창고 건물(랙 감쌈, 독립 모듈)
+        wh_origin = (0.0, g.length / 2.0 + wh_cfg.depth / 2.0, 0.0)
+        self._warehouse.spawn(stage, origin=wh_origin, room_w=g.width)
+        # 방 폭·높이는 재배 공간과 동일(팀 피드백 2026-07-19), 천장 없음
+        self._warehouse.spawn_building(stage, room_w=g.width, room_h=g.height)
         self._warehouse.load_crates(stage)      # 슬롯에 표준 컨테이너(시각)
 
     def get_observations(self) -> dict:

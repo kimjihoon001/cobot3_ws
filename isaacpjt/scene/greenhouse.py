@@ -16,7 +16,8 @@ class Greenhouse:
     def __init__(self, cfg: GreenhouseConfig):
         self._cfg = cfg
 
-    def spawn(self, stage: Usd.Stage, root: str = "/World/Greenhouse") -> None:
+    def spawn(self, stage: Usd.Stage, root: str = "/World/Greenhouse",
+              back_wall: bool = True) -> None:
         UsdGeom.Xform.Define(stage, root)
         c = self._cfg
         half_w, half_l = c.width / 2.0, c.length / 2.0
@@ -51,19 +52,21 @@ class Greenhouse:
         self._add_glass(stage, f"{root}/Glass_Front",
                         (0.0, -half_l, c.height / 2.0), (c.width, 0.02, c.height))
 
-        # 뒷벽(+y, 창고 방향)은 가운데 door_w 를 비워 AMR 출입구를 낸다.
-        door_w = 3.0
-        pane_w = (c.width - door_w) / 2.0
-        for side, x in (("L", -(door_w + pane_w) / 2.0),
-                        ("R", (door_w + pane_w) / 2.0)):
-            self._add_glass(stage, f"{root}/Glass_Back_{side}",
-                            (x, half_l, c.height / 2.0),
-                            (pane_w, 0.02, c.height))
-        # 출입구 양옆 문틀 기둥 (골조와 같은 규격, 콜라이더 있음)
-        for side, x in (("L", -door_w / 2.0), ("R", door_w / 2.0)):
-            self._add_beam(stage, f"{root}/DoorPost_{side}",
-                           center=(x, half_l, c.height / 2.0),
-                           size=(t, t, c.height))
+        # 뒷벽(+y, 창고 방향). 창고를 벽 하나로 붙이면(back_wall=False) 온실 뒷벽을 생략하고
+        # 창고 앞벽을 공유 칸막이로 쓴다(팀 피드백 2026-07-20: "창고와 재배공간 벽 하나 두고").
+        if back_wall:
+            door_w = 3.0
+            pane_w = (c.width - door_w) / 2.0
+            for side, x in (("L", -(door_w + pane_w) / 2.0),
+                            ("R", (door_w + pane_w) / 2.0)):
+                self._add_glass(stage, f"{root}/Glass_Back_{side}",
+                                (x, half_l, c.height / 2.0),
+                                (pane_w, 0.02, c.height))
+            # 출입구 양옆 문틀 기둥 (골조와 같은 규격, 콜라이더 있음)
+            for side, x in (("L", -door_w / 2.0), ("R", door_w / 2.0)):
+                self._add_beam(stage, f"{root}/DoorPost_{side}",
+                               center=(x, half_l, c.height / 2.0),
+                               size=(t, t, c.height))
 
     def _add_beam(self, stage: Usd.Stage, path: str,
                   center: tuple[float, float, float],
