@@ -29,6 +29,10 @@ from pjt_config.settings import RobotConfig
 from pjt_utils.xform import set_pose, set_translate
 from robots import assets
 
+# [3] 수확자세 — wrist_1(4번축) 각도[deg]. 기본자세(0°)면 커터·지그가 파지점 아래(뒤집힘),
+# +180° 라야 절단점이 파지점 위 5.3cm 로 온다(2026-07-19 GPU 실측, CAD 의도 그대로).
+WRIST1_HARVEST_DEG = 180.0
+
 CUTTER_COLOR = Gf.Vec3f(0.80, 0.82, 0.85)
 BLADE_COLOR = Gf.Vec3f(0.72, 0.76, 0.80)
 
@@ -145,6 +149,9 @@ class HarvestMM:
                       (0.0, 0.0, self._cfg.arm_mount_z))
         # 조인트는 "만들면 붙는" 게 아니다 — 프레임을 현재 상대 포즈로 맞춰야 한다(§8).
         self._mount_arm(stage, base_path, arm_path, log)
+        # 수확자세를 USD 에 굽는다. 그리퍼·지그는 이 뒤에 tool0 월드포즈 기준으로 붙으므로
+        # 순서가 중요하다 (먼저 팔을 돌려 놓고 → 그 자리에 그리퍼·지그).
+        self._preset_wrist1(stage, arm_path, WRIST1_HARVEST_DEG, log)
 
         # 그리퍼 — 팔 에셋이 제공하는 툴 소켓(ee_joint)에 물린다.
         gripper_url = assets.resolve(a.gripper, "그리퍼(Robotiq)")
@@ -196,6 +203,57 @@ class HarvestMM:
         rel = m_t * m_f.GetInverse()
         return (Gf.Vec3f(rel.ExtractTranslation()),
                 Gf.Quatf(rel.ExtractRotationQuat()))
+
+    def _preset_wrist1(self, stage: Usd.Stage, arm_path: str, deg: float,
+                       log) -> None:
+        """수확자세(wrist_1 +180°)를 USD 링크 트랜스폼에 굽는다.
+
+        왜 런타임 set_joints_default_state 로는 안 되나 (2026-07-20 사용자 지적):
+          정지 중엔 physics view 가 없어 `set_joint_positions` 가 경고만 내고 끝난다
+          (isaacsim/core/prims/impl/articulation.py). 그래서 +180° 는 PhysX 안에만
+          있고 USD 는 에셋 원본(0°) 그대로 → Stop=0° / Play=180° 로 180° 차이가 난다.
+          USD 조인트 초기각(JointStateAPI)만 써도 정지 뷰포트는 안 움직인다(physx
+          프로퍼티 위젯도 정지 중엔 joint state 입력을 비활성화한다).
+          → 링크 트랜스폼 자체를 돌려야 Play/Stop/Export 가 같은 자세가 된다.
+
+        UR10e 는 링크가 flat(형제) 구조라(탐침 2026-07-20: wrist_1/2/3_link, ee_link
+        전부 /Arm 바로 아래) wrist_1 하위 링크를 조인트 축 둘레로 직접 돌린다.
+        """
+        joint = stage.GetPrimAtPath(f"{arm_path}/joints/wrist_1_joint")
+        if not joint.IsValid():
+            log("[Harvester] ⚠ wrist_1_joint 없음 — 수확자세 프리셋 스킵(기본자세로 뜬다)")
+            return
+        j = UsdPhysics.Joint(joint)
+        parent = stage.GetPrimAtPath(str(j.GetBody0Rel().GetTargets()[0]))
+        cache = UsdGeom.XformCache()
+        l0 = Gf.Matrix4d()
+        l0.SetTransform(Gf.Rotation(Gf.Quatd(j.GetLocalRot0Attr().Get() or Gf.Quatf(1.0))),
+                        Gf.Vec3d(j.GetLocalPos0Attr().Get() or Gf.Vec3f(0.0)))
+        m_joint = l0 * cache.GetLocalToWorldTransform(parent)   # 조인트 프레임 월드포즈
+        axis = {"X": Gf.Vec3d(1, 0, 0), "Y": Gf.Vec3d(0, 1, 0),
+                "Z": Gf.Vec3d(0, 0, 1)}[
+            UsdPhysics.RevoluteJoint(joint).GetAxisAttr().Get() or "Z"]
+        p = m_joint.ExtractTranslation()
+        R = (Gf.Matrix4d().SetTranslate(-p)
+             * Gf.Matrix4d().SetRotate(Gf.Rotation(m_joint.TransformDir(axis), deg))
+             * Gf.Matrix4d().SetTranslate(p))
+
+        # 형제라 서로 영향이 없다 — 새 월드포즈를 먼저 다 구하고 나서 쓴다.
+        distal = [stage.GetPrimAtPath(f"{arm_path}/{n}")
+                  for n in ("wrist_1_link", "wrist_2_link", "wrist_3_link", "ee_link")]
+        new = [(pr, cache.GetLocalToWorldTransform(pr) * R
+                * cache.GetLocalToWorldTransform(pr.GetParent()).GetInverse())
+               for pr in distal if pr.IsValid()]
+        for pr, m in new:
+            set_pose(pr, m.ExtractTranslation(), m.ExtractRotationQuat())
+
+        # 조인트 초기각·드라이브 목표도 같은 값으로. 안 그러면 물리 시작 순간 드라이브가
+        # 목표 0° 로 되돌리려 든다(에셋 기본 target=0).
+        js = PhysxSchema.JointStateAPI.Apply(joint, "angular")
+        js.CreatePositionAttr().Set(float(deg))
+        js.CreateVelocityAttr().Set(0.0)
+        UsdPhysics.DriveAPI(joint, "angular").CreateTargetPositionAttr().Set(float(deg))
+        log(f"[Harvester] 수확자세 프리셋: wrist_1 {deg:+.0f}° — USD 에 고정(Play/Stop 동일)")
 
     def _mount_arm(self, stage: Usd.Stage, base_path: str, arm_path: str,
                    log) -> None:
