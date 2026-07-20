@@ -42,6 +42,8 @@ T = {
     "PubRawTf": "isaacsim.ros2.bridge.ROS2PublishRawTransformTree",
     "PubTf": "isaacsim.ros2.bridge.ROS2PublishTransformTree",
     "RtxLidar": "isaacsim.ros2.bridge.ROS2RtxLidarHelper",
+    "RenderProduct": "isaacsim.core.nodes.IsaacCreateRenderProduct",
+    "CamHelper": "isaacsim.ros2.bridge.ROS2CameraHelper",
 }
 
 
@@ -236,6 +238,51 @@ def build_lidar_scan(stage, graph_path: str, lidar_prim: str, nav,
     _set_target(stage, f"{graph_path}/Lidar", "inputs:lidarPrim", lidar_prim)
     log(f"[Nav] lidar_scan: {nav.scan_topic} (frame {nav.lidar_frame}, {lidar_prim})")
     return nav.scan_topic
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  카메라 브리지 (손끝 D455) — /rgb·/depth·/camera_info  (YOLO 파인튜닝용 시뮬 이미지)
+#  ⚠ GPU create-probe 미확정. main.py --camera 로 옵트인. §5.6: 발행만, 인식은 ROS2.
+# ══════════════════════════════════════════════════════════════════════════
+
+def build_camera(stage, graph_path: str, camera_prim: str, cam,
+                 domain_id: int = DOMAIN_ID, log=print) -> tuple[str, str]:
+    """D455 카메라 → /rgb + /depth + /camera_info 발행. 반환: (rgb, depth) 토픽.
+
+    렌더프로덕트 1개(카메라에서 width×height) → CameraHelper 3개(rgb/depth/camera_info).
+    cam: CameraBridgeConfig (§5.7 값은 settings). camera_prim: UsdGeom.Camera 경로
+    (harvester.camera_path). cameraPrim 은 relationship 이라 USD 로 건다.
+    """
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("RP", T["RenderProduct"]),
+           ("Rgb", T["CamHelper"]), ("Depth", T["CamHelper"]), ("Info", T["CamHelper"])],
+          [("OnTick.outputs:tick", "RP.inputs:execIn"),
+           ("RP.outputs:execOut", "Rgb.inputs:execIn"),
+           ("RP.outputs:execOut", "Depth.inputs:execIn"),
+           ("RP.outputs:execOut", "Info.inputs:execIn"),
+           ("Ctx.outputs:context", "Rgb.inputs:context"),
+           ("Ctx.outputs:context", "Depth.inputs:context"),
+           ("Ctx.outputs:context", "Info.inputs:context"),
+           ("RP.outputs:renderProductPath", "Rgb.inputs:renderProductPath"),
+           ("RP.outputs:renderProductPath", "Depth.inputs:renderProductPath"),
+           ("RP.outputs:renderProductPath", "Info.inputs:renderProductPath")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("RP.inputs:width", cam.width),
+           ("RP.inputs:height", cam.height),
+           ("Rgb.inputs:type", "rgb"),
+           ("Rgb.inputs:topicName", cam.rgb_topic),
+           ("Rgb.inputs:frameId", cam.frame_id),
+           ("Depth.inputs:type", "depth"),
+           ("Depth.inputs:topicName", cam.depth_topic),
+           ("Depth.inputs:frameId", cam.frame_id),
+           ("Info.inputs:type", "camera_info"),
+           ("Info.inputs:topicName", cam.info_topic),
+           ("Info.inputs:frameId", cam.frame_id)])
+    _set_target(stage, f"{graph_path}/RP", "inputs:cameraPrim", camera_prim)
+    log(f"[Camera] {cam.rgb_topic} + {cam.depth_topic} + {cam.info_topic} "
+        f"({cam.width}x{cam.height}, {camera_prim})")
+    return cam.rgb_topic, cam.depth_topic
 
 
 class StringPoller:

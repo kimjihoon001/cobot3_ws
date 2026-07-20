@@ -562,6 +562,21 @@ class IwHubNavConfig:
 
 
 @dataclass
+class CameraBridgeConfig:
+    """손끝 D455 → ROS2 발행 (시뮬 토마토 이미지로 YOLO 파인튜닝).
+
+    렌더프로덕트 1개 → CameraHelper 로 rgb/depth/camera_info 발행. §5.6: Isaac 은
+    센서 발행만, 인식(YOLO)은 ROS2(dev PC) vision_node. 노드 타입명은 GPU create-probe.
+    """
+    width: int = 640         # px  [4] 임의 — D455 컬러 관행 해상도. YOLO 입력에 맞게 조정.
+    height: int = 480        # px  [4]
+    rgb_topic: str = "/harvester/rgb"
+    depth_topic: str = "/harvester/depth"
+    info_topic: str = "/harvester/camera_info"
+    frame_id: str = "d455_color"
+
+
+@dataclass
 class RobotConfig:
     """로봇 2대. v3 6.1 B안(트레이 핸드오프) + 지게차형 하역.
 
@@ -582,6 +597,7 @@ class RobotConfig:
     end_effector: EndEffectorConfig = field(default_factory=EndEffectorConfig)
     assets: RobotAssetConfig = field(default_factory=RobotAssetConfig)
     iwhub_nav: IwHubNavConfig = field(default_factory=IwHubNavConfig)
+    camera: CameraBridgeConfig = field(default_factory=CameraBridgeConfig)
 
     # [2] 유도 — 팔은 베이스 위에 얹는다. Ridgeback 높이 0.30m (Clearpath 공식).
     #     TODO 실물 bbox 로 확인할 것 (spikes/03 이 재준다). 에셋이 다르면 여기만 고친다.

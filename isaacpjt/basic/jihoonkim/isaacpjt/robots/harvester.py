@@ -488,6 +488,23 @@ class HarvestMM:
         log(f"[Harvester] CAD 커터 지그 부착: {root} "
             f"(커플러 동축, 그리퍼 +{_COUPLER_T*1000:.0f}mm, 실물 D455)")
 
+    def camera_path(self, stage: Usd.Stage) -> str | None:
+        """D455 컬러 카메라 prim 경로 (ROS2 렌더프로덕트용). 없으면 None.
+
+        _add_camera_at 이 붙인 {grip_base}/D455/asset 아래 UsdGeom.Camera 중 'Color' 우선.
+        ROS2 카메라 브리지(ros/robot_bridge.build_camera)가 이 경로로 렌더프로덕트를 만든다.
+        """
+        if not self._grip_base:
+            return None
+        asset = stage.GetPrimAtPath(f"{self._grip_base}/D455/asset")
+        if not asset.IsValid():
+            return None
+        cams = [p for p in Usd.PrimRange(asset) if p.IsA(UsdGeom.Camera)]
+        if not cams:
+            return None
+        cam = next((p for p in cams if "Color" in p.GetName()), cams[0])
+        return str(cam.GetPath())
+
     def _add_camera_at(self, stage: Usd.Stage, cam_pos, euler, log) -> None:
         """RealSense D455 를 그리퍼 base_link 자식으로 붙인다(팔 따라감) + 로컬 rotateXYZ
         op 에 euler 를 리터럴로 박는다 — GUI 트랜스폼 패널이 이 값을 그대로 표시.

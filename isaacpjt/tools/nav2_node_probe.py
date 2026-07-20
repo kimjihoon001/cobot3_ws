@@ -85,6 +85,14 @@ CANDIDATES = {
         "isaacsim.ros2.bridge.ROS2PublishLaserScan",
         "omni.isaac.ros2_bridge.ROS2PublishLaserScan",
     ],
+    "RenderProduct (카메라 렌더프로덕트)": [
+        "isaacsim.core.nodes.IsaacCreateRenderProduct",
+        "omni.isaac.core_nodes.IsaacCreateRenderProduct",
+    ],
+    "ROS2CameraHelper (rgb/depth 발행)": [
+        "isaacsim.ros2.bridge.ROS2CameraHelper",
+        "omni.isaac.ros2_bridge.ROS2CameraHelper",
+    ],
 }
 
 

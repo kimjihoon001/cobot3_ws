@@ -11,6 +11,9 @@
   isaac_python main.py --nav-drive   (iw.hub Nav2 브리지 단계검증: /cmd_vel→바퀴. 순서대로:
                      --nav-odom(/odom+TF) → --nav-scan(라이다→/scan) → --nav(셋 다).
                      ⚠ 노드명 미확정 — tools/nav2_node_probe.py 로 먼저 실측할 것)
+  isaac_python main.py --camera      (손끝 D455 → /harvester/rgb·/depth·/camera_info 발행,
+                     YOLO 파인튜닝용. ⚠ 노드명 probe 미확정)
+  isaac_python main.py --teleop      (MM 키보드 텔레옵 — 팔·베이스·그리퍼·블레이드 직접 조작)
 
 로봇 3대 (물류 루프: MM 수확 → iw.hub 팔레트+KLT 운반 → 지게차 랙 적재):
   /World/Harvester   수확 MM (Ridgeback+UR10e+2F-85+커터지그+가동날+D455)
@@ -43,6 +46,10 @@ QUIET = "--quiet" in sys.argv
 NAV_DRIVE = "--nav-drive" in sys.argv or "--nav" in sys.argv
 NAV_ODOM = "--nav-odom" in sys.argv or "--nav" in sys.argv
 NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
+# 손끝 D455 → ROS2 rgb/depth 발행 (YOLO 파인튜닝용). ⚠ 노드명 probe 미확정, 기본 꺼짐.
+CAMERA = "--camera" in sys.argv
+# MM 키보드 텔레옵 (팔·베이스·그리퍼·블레이드 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
+TELEOP = "--teleop" in sys.argv
 
 from isaacsim import SimulationApp
 
@@ -151,6 +158,72 @@ def build_nav(stage, iw, art_path: str, nav) -> None:
         print("=" * 64 + "\n")
 
 
+def build_teleop(mm, mm_robot):
+    """MM 키보드 텔레옵 — 팔6·베이스·그리퍼·블레이드. 반환: step(is_playing) 콜백(실패 시 None).
+
+    글자키만 쓴다(방향키는 뷰포트가 가로챔 — spike05 실측). GUI 전용. mm_robot 이 물리
+    초기화(world.reset)된 뒤 호출할 것 — HarvesterController 가 현재 관절값에서 출발한다.
+    """
+    if not GUI:
+        print("[Teleop] --headless 라 키보드 입력 불가 — 텔레옵 비활성")
+        return None
+    import carb.input
+    import omni.appwindow
+
+    from robots.control import HarvesterController
+
+    ctrl = HarvesterController(mm_robot)
+    K = carb.input.KeyboardInput
+    pressed: set = set()
+    st = {"blade": 0.0}
+
+    def on_key(e, *_):
+        if e.type == carb.input.KeyboardEventType.KEY_PRESS:
+            pressed.add(e.input)
+        elif e.type == carb.input.KeyboardEventType.KEY_RELEASE:
+            pressed.discard(e.input)
+        return True
+
+    appwin = omni.appwindow.get_default_app_window()
+    carb.input.acquire_input_interface().subscribe_to_keyboard_events(
+        appwin.get_keyboard(), on_key)
+
+    DQ, DB, DYAW, DG, DBL = 0.02, 0.01, 0.02, 0.03, 2.0
+    ARM = [(K.Q, K.A), (K.W, K.S), (K.E, K.D),      # 1~6번 관절 ±
+           (K.R, K.F), (K.T, K.G), (K.Y, K.H)]
+    print("""
+[MM 텔레옵] 플레이 상태에서, 글자키만 (방향키는 뷰포트가 가로챔)
+  팔    Q/A W/S E/D R/F T/G Y/H = 1~6번 관절 ±
+  베이스 I/K 전후 · J/L 좌우 · U/O 회전
+  그리퍼 Z 열기 / X 닫기      블레이드 B 열기(0°) / N 닫기(절단)
+""")
+
+    def step(is_playing):
+        if not is_playing:
+            return
+        for i, (kp, km) in enumerate(ARM):
+            if kp in pressed:
+                ctrl.move_arm(i, DQ)
+            if km in pressed:
+                ctrl.move_arm(i, -DQ)
+        dx = (K.I in pressed) - (K.K in pressed)
+        dy = (K.J in pressed) - (K.L in pressed)
+        dyaw = (K.U in pressed) - (K.O in pressed)
+        if dx or dy or dyaw:
+            ctrl.move_base(dx * DB, dy * DB, dyaw * DYAW)
+        if K.Z in pressed:
+            ctrl.move_gripper(-DG)
+        if K.X in pressed:
+            ctrl.move_gripper(DG)
+        if K.B in pressed or K.N in pressed:
+            st["blade"] = max(0.0, min(35.0,
+                              st["blade"] + (DBL if K.N in pressed else -DBL)))
+            mm.set_blade_deg(st["blade"])
+        ctrl.apply()
+
+    return step
+
+
 def main() -> None:
     cfg = SceneConfig()
     world = World(stage_units_in_meters=1.0)
@@ -211,6 +284,18 @@ def main() -> None:
     poller = None if NO_ROS else build_ros_control(stage, arts)
     if not NO_ROS and (NAV_DRIVE or NAV_ODOM or NAV_SCAN):
         build_nav(stage, iw, arts[2][1], cfg.robots.iwhub_nav)
+    if not NO_ROS and CAMERA:
+        cam_prim = mm.camera_path(stage)
+        if cam_prim:
+            try:
+                from ros import robot_bridge as RB
+                RB.build_camera(stage, "/World/RosCamera", cam_prim, cfg.robots.camera)
+            except Exception:
+                import traceback
+                print("\n[Camera] 그래프 생성 실패 — 씬 유지. probe 로 노드명 확인.")
+                traceback.print_exc()
+        else:
+            print("[Camera] D455 카메라 prim 못 찾음 — rgb/depth 발행 스킵")
 
     obs = task.get_observations()
     fruits = obs["fruits"]
@@ -225,6 +310,8 @@ def main() -> None:
     if poller is not None:
         print("[RosBridge] 대기 중 — 토픽 목록은 파일 상단 docstring 참조 (domain 108)\n")
 
+    teleop = build_teleop(mm, mm_robot) if TELEOP else None
+
     # Play/Stop 반복 시 동일한 초기 상태에서 재시작 (재현성)
     was_playing = False
     while simulation_app.is_running():
@@ -233,6 +320,9 @@ def main() -> None:
         if is_playing and not was_playing:
             world.reset()
         was_playing = is_playing
+
+        if teleop is not None:                   # MM 키보드 텔레옵 (재생 중에만 적용)
+            teleop(is_playing)
 
         # MM JSON 명령 (블레이드·베이스) — 재생 중에만 적용
         if is_playing and poller is not None:

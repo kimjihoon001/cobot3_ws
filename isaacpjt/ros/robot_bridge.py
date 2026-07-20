@@ -42,6 +42,8 @@ T = {
     "PubRawTf": "isaacsim.ros2.bridge.ROS2PublishRawTransformTree",
     "PubTf": "isaacsim.ros2.bridge.ROS2PublishTransformTree",
     "RtxLidar": "isaacsim.ros2.bridge.ROS2RtxLidarHelper",
+    "RenderProduct": "isaacsim.core.nodes.IsaacCreateRenderProduct",
+    "CamHelper": "isaacsim.ros2.bridge.ROS2CameraHelper",
 }
 
 
@@ -75,8 +77,7 @@ def build_clock(graph_path: str = "/World/RosClock",
 
 
 def build_joint_bridge(stage, graph_path: str, ns: str, art_path: str,
-                       domain_id: int = DOMAIN_ID, log=print,
-                       apply_commands: bool = True) -> tuple[str, str]:
+                       domain_id: int = DOMAIN_ID, log=print) -> tuple[str, str]:
     """로봇 1대의 JointState 명령/상태 브리지. 반환: (명령 토픽, 상태 토픽).
 
     art_path: 아티큘레이션 루트 prim 경로. targetPrim 은 relationship 이라
@@ -84,35 +85,24 @@ def build_joint_bridge(stage, graph_path: str, ns: str, art_path: str,
     """
     cmd_topic = f"/{ns}/joint_command"
     states_topic = f"/{ns}/joint_states"
-    nodes = [
-        ("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
-        ("SimTime", T["SimTime"]), ("Sub", T["SubJS"]), ("Pub", T["PubJS"]),
-    ]
-    connects = [
-        ("OnTick.outputs:tick", "Sub.inputs:execIn"),
-        ("OnTick.outputs:tick", "Pub.inputs:execIn"),
-        ("Ctx.outputs:context", "Sub.inputs:context"),
-        ("Ctx.outputs:context", "Pub.inputs:context"),
-        ("SimTime.outputs:simulationTime", "Pub.inputs:timeStamp"),
-    ]
-    if apply_commands:
-        nodes.append(("Art", T["Art"]))
-        connects.extend([
-            ("OnTick.outputs:tick", "Art.inputs:execIn"),
-            ("Sub.outputs:jointNames", "Art.inputs:jointNames"),
-            ("Sub.outputs:positionCommand", "Art.inputs:positionCommand"),
-            ("Sub.outputs:velocityCommand", "Art.inputs:velocityCommand"),
-            ("Sub.outputs:effortCommand", "Art.inputs:effortCommand"),
-        ])
     _edit(graph_path,
-          nodes,
-          connects,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("SimTime", T["SimTime"]),
+           ("Sub", T["SubJS"]), ("Art", T["Art"]), ("Pub", T["PubJS"])],
+          [("OnTick.outputs:tick", "Sub.inputs:execIn"),
+           ("OnTick.outputs:tick", "Art.inputs:execIn"),
+           ("OnTick.outputs:tick", "Pub.inputs:execIn"),
+           ("Ctx.outputs:context", "Sub.inputs:context"),
+           ("Ctx.outputs:context", "Pub.inputs:context"),
+           ("SimTime.outputs:simulationTime", "Pub.inputs:timeStamp"),
+           ("Sub.outputs:jointNames", "Art.inputs:jointNames"),
+           ("Sub.outputs:positionCommand", "Art.inputs:positionCommand"),
+           ("Sub.outputs:velocityCommand", "Art.inputs:velocityCommand"),
+           ("Sub.outputs:effortCommand", "Art.inputs:effortCommand")],
           [("Ctx.inputs:domain_id", domain_id),
            ("Ctx.inputs:useDomainIDEnvVar", False),
            ("Sub.inputs:topicName", cmd_topic),
            ("Pub.inputs:topicName", states_topic)])
-    target_nodes = ("Art", "Pub") if apply_commands else ("Pub",)
-    for node in target_nodes:
+    for node in ("Art", "Pub"):
         prim = stage.GetPrimAtPath(f"{graph_path}/{node}")
         rel = prim.GetRelationship("inputs:targetPrim")
         if not rel:
@@ -250,6 +240,51 @@ def build_lidar_scan(stage, graph_path: str, lidar_prim: str, nav,
     return nav.scan_topic
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  카메라 브리지 (손끝 D455) — /rgb·/depth·/camera_info  (YOLO 파인튜닝용 시뮬 이미지)
+#  ⚠ GPU create-probe 미확정. main.py --camera 로 옵트인. §5.6: 발행만, 인식은 ROS2.
+# ══════════════════════════════════════════════════════════════════════════
+
+def build_camera(stage, graph_path: str, camera_prim: str, cam,
+                 domain_id: int = DOMAIN_ID, log=print) -> tuple[str, str]:
+    """D455 카메라 → /rgb + /depth + /camera_info 발행. 반환: (rgb, depth) 토픽.
+
+    렌더프로덕트 1개(카메라에서 width×height) → CameraHelper 3개(rgb/depth/camera_info).
+    cam: CameraBridgeConfig (§5.7 값은 settings). camera_prim: UsdGeom.Camera 경로
+    (harvester.camera_path). cameraPrim 은 relationship 이라 USD 로 건다.
+    """
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("RP", T["RenderProduct"]),
+           ("Rgb", T["CamHelper"]), ("Depth", T["CamHelper"]), ("Info", T["CamHelper"])],
+          [("OnTick.outputs:tick", "RP.inputs:execIn"),
+           ("RP.outputs:execOut", "Rgb.inputs:execIn"),
+           ("RP.outputs:execOut", "Depth.inputs:execIn"),
+           ("RP.outputs:execOut", "Info.inputs:execIn"),
+           ("Ctx.outputs:context", "Rgb.inputs:context"),
+           ("Ctx.outputs:context", "Depth.inputs:context"),
+           ("Ctx.outputs:context", "Info.inputs:context"),
+           ("RP.outputs:renderProductPath", "Rgb.inputs:renderProductPath"),
+           ("RP.outputs:renderProductPath", "Depth.inputs:renderProductPath"),
+           ("RP.outputs:renderProductPath", "Info.inputs:renderProductPath")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("RP.inputs:width", cam.width),
+           ("RP.inputs:height", cam.height),
+           ("Rgb.inputs:type", "rgb"),
+           ("Rgb.inputs:topicName", cam.rgb_topic),
+           ("Rgb.inputs:frameId", cam.frame_id),
+           ("Depth.inputs:type", "depth"),
+           ("Depth.inputs:topicName", cam.depth_topic),
+           ("Depth.inputs:frameId", cam.frame_id),
+           ("Info.inputs:type", "camera_info"),
+           ("Info.inputs:topicName", cam.info_topic),
+           ("Info.inputs:frameId", cam.frame_id)])
+    _set_target(stage, f"{graph_path}/RP", "inputs:cameraPrim", camera_prim)
+    log(f"[Camera] {cam.rgb_topic} + {cam.depth_topic} + {cam.info_topic} "
+        f"({cam.width}x{cam.height}, {camera_prim})")
+    return cam.rgb_topic, cam.depth_topic
+
+
 class StringPoller:
     """제네릭 String Sub 의 outputs:data 폴링 — 새 메시지 원문만 돌려준다.
 
@@ -273,31 +308,3 @@ class StringPoller:
             self._last = raw
             return str(raw)
         return None
-
-
-class JointCommandPoller:
-    """ROS2SubscribeJointState의 최신 명령 출력을 Python 제어기에 전달한다."""
-
-    def __init__(self, node_path: str):
-        self._path = node_path
-        self._attrs = None
-
-    def poll(self):
-        if self._attrs is None:
-            try:
-                self._attrs = tuple(
-                    og.Controller.attribute(name, self._path)
-                    for name in (
-                        "outputs:jointNames",
-                        "outputs:positionCommand",
-                        "outputs:velocityCommand",
-                    )
-                )
-            except Exception:
-                return None
-        names, positions, velocities = (
-            og.Controller.get(attr) for attr in self._attrs
-        )
-        if not names:
-            return None
-        return list(names), list(positions), list(velocities)
