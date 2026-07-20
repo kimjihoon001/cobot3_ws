@@ -117,7 +117,6 @@ from isaacsim.core.api.robots import Robot
 from pxr import Usd, UsdPhysics
 
 from pjt_config.settings import SceneConfig
-from robots.control import TransporterController
 from robots.harvester import HarvestMM
 from robots.iwhub import IwHub
 from robots.transporter import TransporterAMR
@@ -145,24 +144,15 @@ def build_ros_control(stage, arts: list[tuple[str, str]]):
     """로봇 3대 조인트 브리지 + /clock + MM JSON 명령 구독.
 
     실패해도 씬은 계속 띄운다 (기존 방침 — 실패 지점만 분명히 알린다).
-    반환: (MM StringPoller, 지게차 JointCommandPoller) 튜플.
+    반환: MM cmd 의 StringPoller (실패 시 None).
     """
     try:
         from ros import robot_bridge as RB
         RB.build_clock()
         for ns, art in arts:
-            RB.build_joint_bridge(
-                stage,
-                f"/World/RosBridge_{ns}",
-                ns,
-                art,
-                apply_commands=ns != "forklift_0",
-            )
-        mm_sub = RB.build_string_sub("/World/RosCmd_harvester_0", "/harvester_0/cmd")
-        forklift_sub = RB.JointCommandPoller(
-            "/World/RosBridge_forklift_0/Sub"
-        )
-        return RB.StringPoller(mm_sub), forklift_sub
+            RB.build_joint_bridge(stage, f"/World/RosBridge_{ns}", ns, art)
+        sub = RB.build_string_sub("/World/RosCmd_harvester_0", "/harvester_0/cmd")
+        return RB.StringPoller(sub)
     except Exception:
         import traceback
         print("\n" + "=" * 64)
@@ -171,7 +161,7 @@ def build_ros_control(stage, arts: list[tuple[str, str]]):
         print("=" * 64)
         traceback.print_exc()
         print("=" * 64 + "\n")
-        return None, None
+        return None
 
 
 def build_nav(stage, iw, art_path: str, nav) -> None:
@@ -369,7 +359,7 @@ def main() -> None:
         if art is None:
             raise RuntimeError(f"{ns} 아티큘레이션 루트를 못 찾음 — 에셋 확인")
     mm_robot = world.scene.add(Robot(prim_path=arts[0][1], name="mm"))
-    fk_robot = world.scene.add(Robot(prim_path=arts[1][1], name="fk"))
+    world.scene.add(Robot(prim_path=arts[1][1], name="fk"))
     world.scene.add(Robot(prim_path=arts[2][1], name="iw"))
     world.reset()                                # 로봇 물리 초기화
 
@@ -393,8 +383,6 @@ def main() -> None:
     for _ in range(5):
         world.step(render=False)
 
-    forklift_controller = TransporterController(fk_robot)
-
     # MM 키네마틱 베이스 인덱스 (JSON base 명령용 — 텔레포트만 먹는다, 2026-07-18 실측)
     base_idx = np.array([list(mm_robot.dof_names).index(n) for n in MM_BASE_JOINTS])
 
@@ -404,9 +392,7 @@ def main() -> None:
         set_camera_view(eye=[g.width * 0.9, -g.length * 0.8, 12.0],
                         target=[0.0, 2.0, 0.5])
 
-    mm_poller, forklift_poller = (
-        (None, None) if NO_ROS else build_ros_control(stage, arts)
-    )
+    poller = None if NO_ROS else build_ros_control(stage, arts)
     if not NO_ROS and (NAV_DRIVE or NAV_ODOM or NAV_SCAN):
         build_nav(stage, iw, arts[2][1], cfg.robots.iwhub_nav)
     if not NO_ROS and CAMERA:
@@ -432,11 +418,8 @@ def main() -> None:
         print("  %-11s %4d" % (name, counts[name]))
     print("  수확 대상(ripe) %d개 / 제거 대상(spoiled) %d개\n"
           % (counts.get("ripe", 0), counts.get("spoiled", 0)))
-    if mm_poller is not None:
-        print("[RosBridge] 대기 중 — ROS_DOMAIN_ID=108")
-        print("[RosBridge] /forklift_0/joint_command 수신 / "
-              "/forklift_0/joint_states 발행")
-        print("[RosBridge] 타임라인이 Play 상태일 때만 토픽과 로봇 제어가 동작합니다.\n")
+    if poller is not None:
+        print("[RosBridge] 대기 중 — 토픽 목록은 파일 상단 docstring 참조 (domain 108)\n")
 
     if EXPORT:
         ok = stage.Export(EXPORT)
@@ -449,24 +432,19 @@ def main() -> None:
 
     # Play/Stop 반복 시 동일한 초기 상태에서 재시작 (재현성)
     was_playing = False
-    last_forklift_motion = None
     while simulation_app.is_running():
         world.step(render=True)
         is_playing = world.is_playing()
         if is_playing and not was_playing:
             world.reset()
-            if mm_poller is not None:
-                print("[RosBridge] 타임라인 Play — ROS2 통신 동작 중 (domain 108)")
-        elif not is_playing and was_playing and mm_poller is not None:
-            print("[RosBridge] 타임라인 Stop — ROS2 토픽 처리가 일시 정지됩니다.")
         was_playing = is_playing
 
         if teleop is not None:                   # MM 키보드 텔레옵 (재생 중에만 적용)
             teleop(is_playing)
 
         # MM JSON 명령 (블레이드·베이스) — 재생 중에만 적용
-        if is_playing and mm_poller is not None:
-            raw = mm_poller.poll()
+        if is_playing and poller is not None:
+            raw = poller.poll()
             if raw:
                 try:
                     cmd = json.loads(raw)
@@ -480,33 +458,6 @@ def main() -> None:
                         if len(b) == 3:
                             mm_robot.set_joint_positions(
                                 np.array(b), joint_indices=base_idx)
-
-        # OmniGraph 구독 출력은 읽되, ForkliftB 명령 적용은 위치/속도를 분리한다.
-        if is_playing and forklift_poller is not None:
-            cmd = forklift_poller.poll()
-            if cmd:
-                names, positions, velocities = cmd
-                for name, value in zip(names, positions):
-                    if not np.isfinite(value):
-                        continue
-                    if name == "lift_joint":
-                        forklift_controller.set_fork(float(value))
-                    elif name == "back_wheel_swivel":
-                        forklift_controller.set_steer(float(value))
-                for name, value in zip(names, velocities):
-                    if name == "back_wheel_drive" and np.isfinite(value):
-                        forklift_controller.set_drive(float(value))
-                motion = (
-                    round(forklift_controller._drive_vel, 2),
-                    round(float(forklift_controller._steer), 3),
-                )
-                if motion != last_forklift_motion:
-                    print(f"[Forklift RX] drive={motion[0]:.2f} rad/s  "
-                          f"steer={np.degrees(motion[1]):.1f} deg")
-                    last_forklift_motion = motion
-            # ForkliftB는 후륜 관절만 돌고 차체가 헛도는 경우가 있어, 물리 관절
-            # 명령과 함께 60 Hz 평면 차량 운동을 적용한다.
-            forklift_controller.apply(dt=1.0 / 60.0)
 
 
 main()
