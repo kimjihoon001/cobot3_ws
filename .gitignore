@@ -28,10 +28,7 @@ isaacpjt/M0609/
 # Replicator 데이터셋 출력
 isaacpjt/tomatest/tomato_dataset/
 
-# 학습 가중치
-*.onnx
-*.pt
-*.pth
+
 
 # 개인 문서 — 나만 씀
 CLAUDE.md
