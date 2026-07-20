@@ -48,18 +48,21 @@ class TransporterAMR:
 
     def spawn(self, stage: Usd.Stage, root: str = "/World/Transporter",
               position: tuple[float, float, float] = (0.0, 0.0, 0.0),
-              log=print, asset_candidates: tuple[str, ...] | None = None) -> str:
+              log=print, asset_candidates: tuple[str, ...] | None = None,
+              yaw_deg: float = 0.0) -> str:
         from isaacsim.core.utils.stage import add_reference_to_stage
 
         self._root = root
         UsdGeom.Xform.Define(stage, root)
-        UsdGeom.Xformable(stage.GetPrimAtPath(root)).AddTranslateOp().Set(
-            Gf.Vec3d(*position))
+        root_xf = UsdGeom.Xformable(stage.GetPrimAtPath(root))
+        root_xf.AddTranslateOp().Set(Gf.Vec3d(*position))
+        if yaw_deg:
+            root_xf.AddRotateZOp().Set(float(yaw_deg))
 
         # 기본은 설정의 forklift 후보(B 우선). 다른 지게차를 놓으려면 넘긴다(예: C).
         url = assets.resolve(asset_candidates or self._cfg.assets.forklift,
                              "운반 AMR(지게차)")
-        log(f"[Transporter] 지게차 {url}")
+        log(f"[Transporter] 지게차 {url} @ {position}, yaw={yaw_deg:.1f}deg")
         body = f"{root}/Body"
         add_reference_to_stage(url, body)
 

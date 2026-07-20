@@ -81,7 +81,8 @@ def build_clock(graph_path: str = "/World/RosClock",
 
 
 def build_joint_bridge(stage, graph_path: str, ns: str, art_path: str,
-                       domain_id: int = DOMAIN_ID, log=print) -> tuple[str, str]:
+                       domain_id: int = DOMAIN_ID, log=print,
+                       apply_commands: bool = True) -> tuple[str, str]:
     """로봇 1대의 JointState 명령/상태 브리지. 반환: (명령 토픽, 상태 토픽).
 
     art_path: 아티큘레이션 루트 prim 경로. targetPrim 은 relationship 이라
@@ -89,30 +90,38 @@ def build_joint_bridge(stage, graph_path: str, ns: str, art_path: str,
     """
     cmd_topic = f"/{ns}/joint_command"
     states_topic = f"/{ns}/joint_states"
-    _edit(graph_path,
-          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("SimTime", T["SimTime"]),
-           ("Sub", T["SubJS"]), ("Art", T["Art"]), ("Pub", T["PubJS"])],
-          [("OnTick.outputs:tick", "Sub.inputs:execIn"),
-           ("OnTick.outputs:tick", "Art.inputs:execIn"),
-           ("OnTick.outputs:tick", "Pub.inputs:execIn"),
-           ("Ctx.outputs:context", "Sub.inputs:context"),
-           ("Ctx.outputs:context", "Pub.inputs:context"),
-           ("SimTime.outputs:simulationTime", "Pub.inputs:timeStamp"),
-           ("Sub.outputs:jointNames", "Art.inputs:jointNames"),
-           ("Sub.outputs:positionCommand", "Art.inputs:positionCommand"),
-           ("Sub.outputs:velocityCommand", "Art.inputs:velocityCommand"),
-           ("Sub.outputs:effortCommand", "Art.inputs:effortCommand")],
+    nodes = [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
+             ("SimTime", T["SimTime"]), ("Sub", T["SubJS"]),
+             ("Pub", T["PubJS"])]
+    connects = [("OnTick.outputs:tick", "Sub.inputs:execIn"),
+                ("OnTick.outputs:tick", "Pub.inputs:execIn"),
+                ("Ctx.outputs:context", "Sub.inputs:context"),
+                ("Ctx.outputs:context", "Pub.inputs:context"),
+                ("SimTime.outputs:simulationTime", "Pub.inputs:timeStamp")]
+    if apply_commands:
+        nodes.append(("Art", T["Art"]))
+        connects += [
+            ("OnTick.outputs:tick", "Art.inputs:execIn"),
+            ("Sub.outputs:jointNames", "Art.inputs:jointNames"),
+            ("Sub.outputs:positionCommand", "Art.inputs:positionCommand"),
+            ("Sub.outputs:velocityCommand", "Art.inputs:velocityCommand"),
+            ("Sub.outputs:effortCommand", "Art.inputs:effortCommand"),
+        ]
+    _edit(graph_path, nodes, connects,
           [("Ctx.inputs:domain_id", domain_id),
            ("Ctx.inputs:useDomainIDEnvVar", False),
            ("Sub.inputs:topicName", cmd_topic),
            ("Pub.inputs:topicName", states_topic)])
-    for node in ("Art", "Pub"):
+    target_nodes = ("Art", "Pub") if apply_commands else ("Pub",)
+    for node in target_nodes:
         prim = stage.GetPrimAtPath(f"{graph_path}/{node}")
         rel = prim.GetRelationship("inputs:targetPrim")
         if not rel:
             rel = prim.CreateRelationship("inputs:targetPrim")
         rel.SetTargets([art_path])
-    log(f"[RosBridge] {ns}: {cmd_topic} 수신 / {states_topic} 발행  ({art_path})")
+    mode = "직접 적용" if apply_commands else "Python 제어기로 전달"
+    log(f"[RosBridge] {ns}: {cmd_topic} 수신 / {states_topic} 발행  "
+        f"({art_path}, {mode})")
     return cmd_topic, states_topic
 
 
@@ -222,7 +231,8 @@ def build_odometry(stage, graph_path: str, chassis_prim: str, nav,
            ("RawTf.inputs:parentFrameId", nav.odom_frame),
            ("RawTf.inputs:childFrameId", nav.base_frame)])
     _set_target(stage, f"{graph_path}/Odom", "inputs:chassisPrim", chassis_prim)
-    log(f"[Nav] odometry: {nav.odom_topic} + TF {nav.odom_frame}→{nav.base_frame} ({chassis_prim})")
+    log(f"[Nav] odometry: {nav.odom_topic} + TF "
+        f"{nav.odom_frame}→{nav.base_frame} ({chassis_prim})")
     return nav.odom_topic
 
 
@@ -361,3 +371,48 @@ class StringPoller:
             self._last = raw
             return str(raw)
         return None
+
+
+class JointCommandPoller:
+    """ROS2SubscribeJointState 출력값을 Python 제어기에 전달한다.
+
+    ForkliftB는 위치 명령(포크·조향)과 속도 명령(구동)을 별도
+    ``ArticulationAction``으로 적용해야 해서 OmniGraph ArtController에 직접 연결하지
+    않고 main.py가 이 값을 폴링한다. 같은 명령도 매 프레임 반환해 마지막 목표가
+    물리 제어기에 계속 적용되도록 한다.
+    """
+
+    def __init__(self, node_path: str):
+        self._path = node_path
+        self._names = None
+        self._positions = None
+        self._velocities = None
+
+    def _resolve(self) -> bool:
+        if self._names is not None:
+            return True
+        try:
+            self._names = og.Controller.attribute("outputs:jointNames", self._path)
+            self._positions = og.Controller.attribute(
+                "outputs:positionCommand", self._path
+            )
+            self._velocities = og.Controller.attribute(
+                "outputs:velocityCommand", self._path
+            )
+        except Exception:
+            self._names = None
+            return False
+        return True
+
+    def poll(self) -> tuple[list[str], list[float], list[float]] | None:
+        if not self._resolve():
+            return None
+        raw_names = og.Controller.get(self._names)
+        names = [] if raw_names is None else list(raw_names)
+        if not names:
+            return None
+        raw_positions = og.Controller.get(self._positions)
+        raw_velocities = og.Controller.get(self._velocities)
+        positions = [] if raw_positions is None else list(raw_positions)
+        velocities = [] if raw_velocities is None else list(raw_velocities)
+        return names, positions, velocities

@@ -8,7 +8,7 @@ setup(
     packages=[package_name],
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
-        ("share/" + package_name, ["package.xml"]),
+        ("share/" + package_name, ["package.xml", "resource/1st_learn.pt"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -22,6 +22,7 @@ setup(
             "vision_node = harvest_vision.vision_node:main",
             "harvest_fsm_node = harvest_vision.harvest_fsm_node:main",
             "tray_manager_node = harvest_vision.tray_manager_node:main",
+            "vision_debug_view = harvest_vision.vision_debug_view:main",
         ],
     },
 )

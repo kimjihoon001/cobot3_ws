@@ -1,4 +1,7 @@
+import os
+
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
@@ -15,13 +18,11 @@ class VisionNode(Node):
         """eye-in-hand RGB-D에서 토마토를 검출해 /vision/tomato_detections로 발행 (초안: 검출 로직 TODO)"""
         super().__init__("vision_node")
 
-        # [4] 임의: isaacpjt/ros/robot_bridge.py에는 아직 harvester_0 카메라 브리지가
-        # 없음(joint_command/joint_states/String만 배선됨) — /rgb,/depth는 팀이 day1~2에서
-        # 검증한 이름을 그대로 기본값으로 둠. 카메라 그래프가 실제로 붙을 때
-        # /harvester_0/rgb 처럼 네임스페이스가 바뀔 수 있어 파라미터로 뺐다.
+        default_model_path = os.path.join(get_package_share_directory("harvest_vision"), "1st_learn.pt")
+
         self.declare_parameter("rgb_topic", "/rgb")
         self.declare_parameter("depth_topic", "/depth")
-        self.declare_parameter("model_path", "")  # YOLO 학습 가중치(.pt) 경로
+        self.declare_parameter("model_path", default_model_path)  # YOLO 학습 가중치(.pt) 경로, 파라미터로 덮어쓰기 가능
 
         self._rgb_topic = self.get_parameter("rgb_topic").value
         self._depth_topic = self.get_parameter("depth_topic").value
