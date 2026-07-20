@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>color_detector</name>
+  <version>0.0.1</version>
+  <description>Isaac Sim /rgb 를 받아 HSV 로 파랑/초록 큐브를 판별해 /color_id(1/2) 발행</description>
+  <maintainer email="kimjihoon001@gmail.com">jihoonkim</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

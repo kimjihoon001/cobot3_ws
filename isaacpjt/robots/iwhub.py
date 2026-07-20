@@ -14,10 +14,13 @@
 """
 from __future__ import annotations
 
-from pxr import Usd, UsdGeom
+import os
+import random
+
+from pxr import Gf, Usd, UsdGeom
 
 from pjt_config.settings import RobotConfig
-from pjt_utils.xform import set_translate
+from pjt_utils.xform import set_pose, set_scale, set_translate
 from robots import assets
 
 
@@ -50,3 +53,156 @@ class IwHub:
         self._root = root
         log(f"[IwHub] 배치 완료: {root} @ {tuple(round(v, 2) for v in position)}")
         return root
+
+    def load_cargo(self, stage: Usd.Stage, tomato_cfg, phys_cfg,
+                   deck_z: float = 0.25, log=print) -> int:
+        """iw.hub 데크에 '적재된 세트' — 팔레트 + KLT 8개 + 3칸에 토마토 5개씩(15개, 꼭지 포함).
+
+        ★ 물리 구조 (사용자 정정 2026-07-20 "토마토도 강체로 / 가지런히 놓을 필요 없어"):
+          · 채운 KLT 3칸 = **static 오목 콜라이더(그릇)** — 토마토를 담아 흘리지 않는다.
+          · 토마토 = **동적 강체**(몸통 콜라이더 + 마찰) → 흩뿌려 떨어뜨리면 자연스럽게 쌓인다.
+          · 팔레트·빈 KLT = 시각 전용(콜라이더 없음).
+          아티큘레이션(iw.hub) 밑에 강체를 중첩하면 꼬이므로(§8류) 세트는 iw.hub 데크
+          **월드 위치에 독립 배치**한다 — 지금은 로봇이 정지 상태라 무방. 주행 연동은 추후
+          루프에서 포즈 동기화(TODO). 꼭지(calyx)는 몸통의 자식(장식, 콜라이더 없음).
+        deck_z: 데크 높이(base_link 기준 오프셋). [4] 임의 — GPU 에서 iw.hub 데크 실측 보정.
+        반환: 얹은 토마토 수(0이면 에셋 없음).
+        """
+        from isaacsim.core.utils.stage import add_reference_to_stage
+
+        from pjt_utils import ripeness
+        from scene import physics                          # 물리 헬퍼 재사용(읽기)
+        from scene.warehouse import KLT_SIZE, PALLET_SIZE  # 프랍 치수 재사용(§5.7)
+
+        if not self._root:
+            return 0
+        try:
+            pallet_url = assets.resolve(self._cfg.assets.pallet, "팔레트")
+            klt_url = assets.resolve(self._cfg.assets.klt_bin, "KLT 빈")
+        except Exception as e:
+            log(f"[IwHub] 적재 장식 스킵 — 프랍 에셋 없음: {e}")
+            return 0
+        # 익은 토마토 (몸통, 꼭지) 쌍
+        d = tomato_cfg.usd_dir
+        ripe = []
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if (f.startswith("tomato_ripe_") and f.endswith(".usd")
+                        and not f.endswith("_calyx.usd")):
+                    calyx = os.path.join(d, f[:-4] + "_calyx.usd")
+                    ripe.append((os.path.join(d, f),
+                                 calyx if os.path.exists(calyx) else None))
+
+        # iw.hub 데크 월드 포즈 — 세트를 아티큘레이션 밖 독립 프림으로 여기에 놓는다.
+        src = f"{self._root}/base_link"
+        if not stage.GetPrimAtPath(src).IsValid():
+            src = self._root
+        bp = UsdGeom.Xformable(stage.GetPrimAtPath(src)).ComputeLocalToWorldTransform(
+            Usd.TimeCode.Default()).ExtractTranslation()
+        root = "/World/IwHubCargo"
+        UsdGeom.Xform.Define(stage, root)
+        set_translate(stage.GetPrimAtPath(root), (bp[0], bp[1], bp[2] + deck_z))
+        ident = Gf.Quatd(1.0, 0.0, 0.0, 0.0)
+        rng = random.Random(7)
+
+        add_reference_to_stage(pallet_url, f"{root}/Pallet")   # 팔레트(시각)
+        set_pose(stage.GetPrimAtPath(f"{root}/Pallet"), (0.0, 0.0, 0.0), ident)
+
+        klt_scale = 0.85
+        kz = PALLET_SIZE[2] + KLT_SIZE[2] * klt_scale / 2.0
+        nx, ny, pitx, pity = 4, 2, 0.31, 0.25
+        filled = {(0, 0), (1, 1), (3, 0)}                  # 토마토 넣을 3칸
+        tz0 = PALLET_SIZE[2] + 0.045                        # 첫 토마토 높이(팔레트 윗면 위)
+        tmat = physics.create_physics_material(
+            stage, f"{root}/PhysMat/tomato",
+            phys_cfg.fruit_static_friction, phys_cfg.fruit_dynamic_friction)
+        tgroup = f"{root}/Tomatoes"
+        UsdGeom.Xform.Define(stage, tgroup)
+        ripeness.bind_matte_material(stage, tgroup)        # 무광 — displayColor(익은색) 읽게
+        n_tom = 0
+        for ix in range(nx):
+            for iy in range(ny):
+                ox = (ix - (nx - 1) / 2.0) * pitx
+                oy = (iy - (ny - 1) / 2.0) * pity
+                kp = f"{root}/KLT_{ix}{iy}"
+                add_reference_to_stage(klt_url, kp)
+                set_pose(stage.GetPrimAtPath(kp), (ox, oy, kz), ident)
+                set_scale(stage.GetPrimAtPath(kp), klt_scale)
+                if (ix, iy) not in filled or not ripe:
+                    continue
+                physics.add_convex_decomposition_colliders(stage, kp)   # 그릇(static)
+                for k in range(5):                         # 토마토 5개 — 흩뿌려 떨어뜨림
+                    body, calyx = rng.choice(ripe)
+                    jx = ox + rng.uniform(-0.06, 0.06)     # 격자 아닌 랜덤 산포
+                    jy = oy + rng.uniform(-0.035, 0.035)
+                    tz = tz0 + k * 0.05                     # 높이 엇갈려 떨어뜨려 자연스럽게 쌓임
+                    tp = f"{tgroup}/T_{ix}{iy}_{k}"
+                    tprim = UsdGeom.Xform.Define(stage, tp).GetPrim()
+                    set_pose(tprim, (jx, jy, tz), ident)
+                    set_scale(tprim, tomato_cfg.scale)
+                    add_reference_to_stage(body, tp + "/Body")
+                    ripeness.apply_ripeness_color(stage, tp + "/Body", "ripe", rng)
+                    if calyx:                              # 꼭지(장식 — 콜라이더 없음)
+                        add_reference_to_stage(calyx, tp + "/Calyx")
+                        ripeness.apply_flat_color(stage, tp + "/Calyx", ripeness.GREEN)
+                    # 동적 강체: 몸통에만 콜라이더(꼭지는 장식) → 흩뿌리면 쌓인다
+                    physics.add_mesh_colliders(stage, tp + "/Body",
+                                               phys_cfg.fruit_approximation)
+                    physics.add_rigid_body(tprim, phys_cfg.fruit_density,
+                                           kinematic=False)
+                    physics.bind_physics_material(tprim, tmat)
+                    n_tom += 1
+        log(f"[IwHub] 데크 적재: 팔레트+KLT 8 + 토마토 {n_tom}개(꼭지 포함, 동적강체, 3칸 산포). "
+            f"KLT 3칸 static 그릇. deck_z={deck_z} [4] GPU 보정 요")
+        return n_tom
+
+    # 에셋에 이미 있을 법한 라이다 프림 이름/타입 키워드 (Idealworks iw.hub 는 실물 AMR).
+    _LIDAR_KEYS = ("lidar", "laser", "scan")
+
+    def find_lidar(self, stage: Usd.Stage) -> str | None:
+        """에셋 트리에서 이미 달린 라이다 프림을 찾는다. 없으면 None.
+
+        iw.hub 는 실물 AMR 이라 에셋에 라이다가 이미 있을 수 있다(사용자 지적 2026-07-20).
+        있으면 새로 만들 필요 없이 그 경로를 브리지(build_lidar_scan)에 넘긴다.
+        실제 프림 경로는 tools/nav2_node_probe.py 의 '에셋 센서 스캔'으로 확인할 것.
+        """
+        if not self._root:
+            return None
+        for p in Usd.PrimRange(stage.GetPrimAtPath(self._root)):
+            tname = (p.GetTypeName() or "").lower()
+            pname = p.GetName().lower()
+            if any(k in tname for k in self._LIDAR_KEYS) or \
+               any(k in pname for k in self._LIDAR_KEYS):
+                return str(p.GetPath())
+        return None
+
+    def attach_lidar(self, stage: Usd.Stage, offset: tuple[float, float, float],
+                     log=print) -> str | None:
+        """라이다 경로를 돌려준다 — **먼저 에셋에서 찾고, 없을 때만 RTX 라이다를 만든다.**
+
+        ⚠ GPU 반복 필요: RTX 라이다 생성 API(omni.kit.commands 'IsaacSensorCreateRtxLidar')
+          와 프로파일 이름은 Isaac 5.1 에서 실측 확인해야 한다(추측 금지, §8). 에셋에 이미
+          있으면 이 생성 경로는 아예 안 탄다 — probe 로 먼저 확인.
+        """
+        found = self.find_lidar(stage)
+        if found:
+            log(f"[IwHub] 에셋 내장 라이다 사용: {found}")
+            return found
+
+        # 없을 때만 생성. base_link 아래에 RTX 라이다를 offset 위치로.
+        parent = f"{self._root}/base_link"
+        if not stage.GetPrimAtPath(parent).IsValid():
+            parent = self._root                      # base_link 이름이 다르면 루트에
+        path = f"{parent}/nav_lidar"
+        try:
+            import omni.kit.commands
+            omni.kit.commands.execute(
+                "IsaacSensorCreateRtxLidar",
+                path=path, parent=None,
+                config="Example_Rotary",              # TODO GPU 실측 — 실제 프로파일명 확인
+                translation=offset, orientation=(1.0, 0.0, 0.0, 0.0))
+            log(f"[IwHub] RTX 라이다 생성: {path} (에셋에 없어 직접 만듦)")
+            return path
+        except Exception as e:
+            log(f"[IwHub] ⚠ 라이다 생성 실패 — GPU 에서 RTX 라이다 API 확인 필요: {e}")
+            return None

@@ -339,6 +339,26 @@ class SectorConfig:
 
 
 @dataclass
+class PalletPhysicsConfig:
+    """나무 팔레트(EUR) 물리 — 지게차로 실제로 드는지 스파이크 06 에서 실측 확인(2026-07-20).
+
+    ★핵심은 콜라이더 근사다. 단일 convexHull 은 팔레트를 통짜로 감싸 옆면 포크 슬롯을
+      메워 포크가 못 들어간다. convexDecomposition(여러 볼록덩이)으로 데크·블록을 조각내면
+      그 사이 포크 채널이 빈 공간으로 남아 포크가 들어간다. 리프트는 주로 포크가 형상으로
+      받치므로 마찰은 2차(미끄러짐 방지).
+    """
+    mass: float = 25.0             # kg [1] EPAL EUR 팔레트 규격. 밀도 아님 — 속이 비어
+                                   #    부피기반 밀도는 과대. MassAPI 로 질량 직접 지정.
+    static_friction: float = 0.5   # [3] 목재-강철 엔지니어링 마찰표 (필요시 스윕)
+    dynamic_friction: float = 0.35 # [3] 동일
+    # [2] 유도 — 포크 슬롯 보존이 요구사항이라 convexDecomposition 을 쓴다(헬퍼가 강제).
+    #   아래 파라미터는 얇은 채널까지 살리려 세밀하게 준다.
+    max_convex_hulls: int = 64          # 조각 많이 → 포크 채널 보존
+    voxel_resolution: int = 500000      # 세밀 복셀화
+    error_percentage: float = 1.0
+
+
+@dataclass
 class WarehouseConfig:
     """창고 — AMR 이 포크로 트레이를 지정 슬롯에 올린다."""
     # [2] 유도. 개수 자체가 아니라 **1:1 매핑**이 정당화된다:
@@ -351,6 +371,9 @@ class WarehouseConfig:
     #     고른 이유(v3 팀 결정)와 맞물린다. 안 그러면 포크가 장식이 된다.
     sectors: int = 3
     levels: int = 2
+
+    # 랙에 얹는 나무 팔레트를 진짜 물리 객체로(지게차 리프트용). 스파이크 06 실측 검증.
+    pallet_physics: PalletPhysicsConfig = field(default_factory=PalletPhysicsConfig)
 
     # 제약은 [2] 실측 — ForkliftB lift_joint 을 GPU 에서 읽음 (2026-07-18, RESULTS.md):
     #   prismatic Z, limits (-0.15, 2.0) m → 최상단 선반(base_z + level_height)이
@@ -513,6 +536,32 @@ class RobotAssetConfig:
 
 
 @dataclass
+class IwHubNavConfig:
+    """iw.hub 자율주행(Nav2) 파라미터 — 차동구동·오도메트리·라이다.
+
+    §5.6: Nav2 판단은 dev PC(ROS2), Isaac 은 /cmd_vel 실행 + /odom·/scan·/tf 발행만.
+    ⚠ 아래 치수는 전부 [4] 임의 — GPU 실측 전이다. 노드 타입명·정확 배선은
+      tools/nav2_node_probe.py 로 GPU 에서 create-probe 해 확정할 것(추측 금지, §8 graph.py 교훈).
+    """
+    # 차동구동(DifferentialController). 틀리면 주행속도·회전이 스케일만 어긋난다(움직이긴 함)
+    #   → odom 정확도에 직접 영향. iw.hub 바퀴를 GPU 에서 재서 [3]/[2] 로 올릴 것.
+    wheel_radius: float = 0.1        # m   TODO 근거 없음 — iw.hub 구동륜 반지름 실측
+    wheel_base: float = 0.5          # m   TODO 근거 없음 — 좌우 구동륜 간격(트랙폭) 실측
+    max_linear_speed: float = 1.0    # m/s   [4] 임의 (안전 상한)
+    max_angular_speed: float = 1.5   # rad/s [4] 임의
+
+    # 라이다 마운트 (base_link 로컬). [4] 임의 — 차체 앞 상단 가정. GPU 에서 실측.
+    lidar_offset: tuple[float, float, float] = (0.3, 0.0, 0.3)  # m TODO 근거 없음
+    # TF 프레임/토픽 (단일 로봇이라 네임스페이스 없이 Nav2 기본명)
+    odom_frame: str = "odom"
+    base_frame: str = "base_link"
+    lidar_frame: str = "laser"
+    cmd_vel_topic: str = "/cmd_vel"
+    odom_topic: str = "/odom"
+    scan_topic: str = "/scan"
+
+
+@dataclass
 class RobotConfig:
     """로봇 2대. v3 6.1 B안(트레이 핸드오프) + 지게차형 하역.
 
@@ -532,6 +581,7 @@ class RobotConfig:
 
     end_effector: EndEffectorConfig = field(default_factory=EndEffectorConfig)
     assets: RobotAssetConfig = field(default_factory=RobotAssetConfig)
+    iwhub_nav: IwHubNavConfig = field(default_factory=IwHubNavConfig)
 
     # [2] 유도 — 팔은 베이스 위에 얹는다. Ridgeback 높이 0.30m (Clearpath 공식).
     #     TODO 실물 bbox 로 확인할 것 (spikes/03 이 재준다). 에셋이 다르면 여기만 고친다.

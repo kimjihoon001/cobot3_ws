@@ -1,6 +1,6 @@
 
 import os
-os.environ["ROS_DOMAIN_ID"] = "109"   # PC B(color_detector.py)와 동일해야 통신됨
+os.environ["ROS_DOMAIN_ID"] = "108"   # PC B(color_detector_node.py)와 동일해야 통신됨
 
 from isaacsim import SimulationApp
 
@@ -24,6 +24,7 @@ from isaacsim.core.api.objects import DynamicCuboid, VisualCuboid
 from isaacsim.core.api.tasks import BaseTask
 from isaacsim.core.api.materials.physics_material import PhysicsMaterial
 from isaacsim.core.prims import SingleGeometryPrim
+from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.robot.manipulators.grippers import ParallelGripper
 from isaacsim.robot.manipulators.manipulators import SingleManipulator
 from isaacsim.sensors.camera import Camera
@@ -31,6 +32,7 @@ import isaacsim.core.utils.numpy.rotations as rot_utils
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Int32
 
@@ -86,25 +88,41 @@ COLORS = ["blue", "green"]
 COLOR_ID = {"blue": 1, "green": 2}
 ID_TO_COLOR = {v: k for k, v in COLOR_ID.items()}
 
-# 대기(standby) 위치 — 파랑/초록 큐브가 처음부터 놓여 있는 곳
-STANDBY_POS = {
-    "blue":  (0.15,  0.30),
-    "green": (0.15, -0.30),
-}
-# pick 영역 — 랜덤으로 선택된 큐브가 이동하는 위치
-PICK_POS = (0.35, 0.0, CUBE_CENTER_Z)
-# 선택 안 된 큐브를 치워두는 위치 — wrist camera 시야 밖(작업공간과 멀리 떨어진 곳)
-PARK_POS = (5.0, 5.0, -5.0)
-
 CUBE_RGB = {
     "blue":  np.array([0.0, 0.0, 1.0]),
     "green": np.array([0.0, 1.0, 0.0]),
 }
-# 같은 색 마커 위치 (color_id 수신 후 place할 목적지)
-MARKER_POS = {
-    "blue":  np.array([0.58,  0.30, 0.0]),
-    "green": np.array([0.58, -0.30, 0.0]),
+
+# 공중 대기(standby) — 대기 중인 큐브는 '자기 비콘 위 공중'에 떠 있는다(kinematic).
+# ★ 중앙 pick 영역에서 좌우로 벗어나 있어(±0.40) detector 의 중앙 ROI 에는 안 잡힌다.
+#   그래도 화면에 크게 들어와 오검출되면 더 옆으로(±0.50) 빼거나 ROI_FRAC 을 줄일 것.
+STANDBY_AIR_POS = {
+    "blue":  np.array([0.35,  0.40, 0.30]),
+    "green": np.array([0.35, -0.40, 0.30]),
 }
+
+# pick 영역 — 선택된 큐브가 공중에서 낙하할 랜덤 (x, y).
+# ★ 관찰 포즈(home)의 손목 카메라 화각 '안'이어야 한다. GPU에서 튜닝.
+PICK_AREA_CENTER = np.array([0.35, 0.0])   # 화각 중심
+PICK_AREA_RADIUS = 0.06                    # 이 반경 안에서만 랜덤 → 항상 시야 안
+DROP_HEIGHT      = 0.20                     # 낙하 시작 높이(공중)
+SETTLE_STEPS     = 60                       # 낙하 후 안착 대기 스텝 수 (≈1초)
+
+# 선택 안 된(빨간) USD 소품을 치워두는 위치 — 카메라 시야 밖
+PARK_POS = (5.0, 5.0, -5.0)
+
+# 같은 색 마커(비콘) 위치 (color_id 수신 후 place할 목적지)
+# ★ 0.58 은 너무 멀어 RMPFlow 가 경계에서 꼬여 큐브를 쳐버렸다. pick 영역(0.35,0)
+#   '바로 좌우'로 당겨 팔은 옆으로만 옮기게 하고, 카메라 정면 화각에서도 빠지게 한다.
+MARKER_POS = {
+    "blue":  np.array([0.35,  0.40, 0.0]),
+    "green": np.array([0.35, -0.40, 0.0]),
+}
+
+# ── 관찰 포즈 (팔 6축) — 손목 카메라가 pick 영역을 내려다보는 자세 ──
+# ★ home 포즈를 관찰 포즈로 재사용. 손목캠이 pick 영역을 못 보면 여기서 튜닝.
+ARM_JOINT_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+OBSERVE_ARM_DEG = [0, 0, 90, 0, 90, 0]
 
 # ── Wrist 카메라 (EE 링크에 종속 → 로봇을 따라 움직임) ─────────
 CAM_LOCAL_POS   = np.array([0.0, 0.0, 0.05])   # EE 기준 로컬 오프셋
@@ -127,6 +145,15 @@ def find_prim_path_by_name(root_path: str, name: str):
     return None
 
 
+def observe_joint_positions(robot):
+    """관찰 포즈(팔은 OBSERVE_ARM_DEG, 그리퍼는 열림)의 전체 DOF 벡터."""
+    jp = np.zeros(robot.num_dof)
+    dof_names = list(robot.dof_names)
+    for name, deg in zip(ARM_JOINT_NAMES, OBSERVE_ARM_DEG):
+        jp[dof_names.index(name)] = np.deg2rad(deg)
+    return jp
+
+
 def initialize_robot(robot, world):
     robot.initialize()
     robot.gripper.initialize(
@@ -136,17 +163,11 @@ def initialize_robot(robot, world):
         set_joint_positions_func=robot.set_joint_positions,
         dof_names=robot.dof_names,
     )
-    joint_positions = np.zeros(robot.num_dof)
-    arm_joint_names = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
-    arm_joint_deg = [0, 0, 90, 0, 90, 0]
-    dof_names = list(robot.dof_names)
-    for name, deg in zip(arm_joint_names, arm_joint_deg):
-        joint_positions[dof_names.index(name)] = np.deg2rad(deg)
-    robot.set_joint_positions(joint_positions)
+    robot.set_joint_positions(observe_joint_positions(robot))
 
 
 # ============================================================
-# ROS2 연동 (PC B의 color_detector.py 와 짝을 이룸)
+# ROS2 연동 (PC B의 color_detector_node.py 와 짝을 이룸)
 #   - /rgb (sensor_msgs/Image) 발행
 #   - /color_id (std_msgs/Int32, 1=blue/2=green) 구독
 # ============================================================
@@ -167,9 +188,15 @@ class ColorBridgeNode(Node):
 
     def __init__(self):
         super().__init__("isaac_color_bridge")
-        self.rgb_pub = self.create_publisher(Image, "/rgb", 10)
+        # ★ QoS: 밀림(백로그) 방지. /rgb 는 최신 프레임만(BEST_EFFORT depth1),
+        #   /color_id 는 최신 판정만 확실히(RELIABLE depth1). 묵은 값이 안 쌓인다.
+        rgb_qos = QoSProfile(depth=1, history=QoSHistoryPolicy.KEEP_LAST,
+                             reliability=QoSReliabilityPolicy.BEST_EFFORT)
+        cid_qos = QoSProfile(depth=1, history=QoSHistoryPolicy.KEEP_LAST,
+                             reliability=QoSReliabilityPolicy.RELIABLE)
+        self.rgb_pub = self.create_publisher(Image, "/rgb", rgb_qos)
         self.color_id_sub = self.create_subscription(
-            Int32, "/color_id", self._on_color_id, 10
+            Int32, "/color_id", self._on_color_id, cid_qos
         )
         self.received_color_id = None
 
@@ -275,7 +302,7 @@ class M0609Task(BaseTask):
         print(f"  [OK] SingleManipulator: {ROBOT_PRIM_PATH}")
 
     def _create_scene(self, scene):
-        print("\n[5.SCENE] 파랑/초록 큐브 + 마커 구성")
+        print("\n[5.SCENE] 파랑/초록 큐브(공중 대기) + 마커 구성")
         cube_material = PhysicsMaterial(
             prim_path="/World/Physics_Materials/cube_material",
             static_friction=CUBE_STATIC,
@@ -283,19 +310,19 @@ class M0609Task(BaseTask):
             restitution=0.0,
         )
         for color in COLORS:
-            x, y = STANDBY_POS[color]
-            pos = np.array([x, y, CUBE_CENTER_Z])
             self._cubes[color] = scene.add(
                 DynamicCuboid(
                     prim_path=f"/World/cube_{color}",
                     name=f"cube_{color}",
-                    position=pos,
+                    position=STANDBY_AIR_POS[color],
                     scale=np.array([CUBE_SIZE, CUBE_SIZE, CUBE_SIZE]),
                     color=CUBE_RGB[color],
                     mass=0.05,
                     physics_material=cube_material,
                 )
             )
+            # 공중 대기: 물리 정지(kinematic)로 떠 있게 한다. 낙하는 라운드 시작 때만.
+            self.set_cube_kinematic(color, True)
             # 같은 색 마커 (얇은 판)
             scene.add(
                 VisualCuboid(
@@ -306,7 +333,7 @@ class M0609Task(BaseTask):
                     color=CUBE_RGB[color],
                 )
             )
-            print(f"  [OK] {color:<5} cube standby @ ({x}, {y})  marker @ {MARKER_POS[color][:2]}")
+            print(f"  [OK] {color:<5} 공중 대기 @ {STANDBY_AIR_POS[color]}  marker @ {MARKER_POS[color][:2]}")
 
         # 그리퍼 손가락 마찰
         finger_material = PhysicsMaterial(
@@ -347,13 +374,26 @@ class M0609Task(BaseTask):
             self._robot.gripper.joint_opened_positions
         )
 
-    def teleport_cube(self, color, xyz):
-        self._cubes[color].set_world_pose(position=np.array(xyz))
+    # ── 큐브 물리/포즈 제어 ─────────────────────────────────────
+    def set_cube_kinematic(self, color, flag):
+        """공중 부양(kinematic=True) / 낙하(False) 전환. (scene/physics.py 패턴)"""
+        rb = UsdPhysics.RigidBodyAPI.Apply(self._cubes[color].prim)
+        rb.CreateKinematicEnabledAttr().Set(bool(flag))
+
+    def set_cube_pose(self, color, xyz):
+        self._cubes[color].set_world_pose(position=np.array(xyz, dtype=float))
+
+    def cube_position(self, color):
+        pos, _ = self._cubes[color].get_world_pose()
+        return np.array(pos)
 
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  C. 메인                                                        ║
 # ╚══════════════════════════════════════════════════════════════╝
+PHASE_SETTLE, PHASE_DETECT, PHASE_PICKPLACE, PHASE_RETURN = 0, 1, 2, 3
+
+
 def main():
     my_world = World(stage_units_in_meters=1.0)
     task = M0609Task(name="m0609_color_task")
@@ -368,7 +408,7 @@ def main():
     for _ in range(30):
         my_world.step(render=True)
 
-    # ROS2 노드 생성 (PC B의 color_detector.py 와 /rgb, /color_id 로 통신)
+    # ROS2 노드 생성 (PC B의 color_detector_node.py 와 /rgb, /color_id 로 통신)
     rclpy.init()
     ros_node = ColorBridgeNode()
     print("  [OK] ROS2 노드 생성: /rgb 발행, /color_id 구독")
@@ -388,31 +428,52 @@ def main():
     )
     print("  [OK] Controller 생성 완료")
 
-    print("\n[ROS2 색상 감지 Pick & Place 시작]  (Play 버튼을 누르세요)\n")
-    was_playing = False
-    selected_color = None      # 이번 라운드에 pick 영역으로 이동한 큐브 색
-    picking_position = None
-    placing_position = None
-    pick_started = False
+    # 관찰 포즈("첫 위치")를 유지/복귀하는 hold 액션 + 복귀 판정용 관절값
+    observe_full = observe_joint_positions(robot)
+    hold_action = ArticulationAction(joint_positions=observe_full)
+    dof_names = list(robot.dof_names)
+    arm_idx = [dof_names.index(n) for n in ARM_JOINT_NAMES]
+    observe_arm = observe_full[arm_idx]
+    RETURN_TOL = np.deg2rad(3.0)     # 첫 위치 복귀 허용 오차
+    RETURN_DURATION = 90             # 첫 위치까지 부드럽게 보간하는 스텝 수(≈1.5s)
+    RETURN_MAX_STEPS = 400           # 복귀 타임아웃(안전장치)
+
+    # 라운드 상태
+    state = {"phase": PHASE_SETTLE, "settle": 0, "return_steps": 0, "return_from": None,
+             "selected": None, "picking": None, "placing": None}
     step_count = 0
+    was_playing = False
 
     def start_new_round():
-        nonlocal selected_color, picking_position, placing_position, pick_started, step_count
-        initialize_robot(robot, my_world)
+        """무한 반복: 팔을 관찰 포즈로, 두 큐브를 공중 대기로 되돌린 뒤
+        랜덤 색 하나만 pick 영역 위 랜덤 위치에서 낙하시킨다."""
+        nonlocal step_count
+        # 팔은 이미 첫 위치(관찰 포즈)에 있다 — 순간이동시키지 않는다.
+        # (첫 라운드는 Play 직후 1회 세팅, 이후 라운드는 RETURN 단계가 복귀시킴)
         controller.reset()
 
-        selected_color = random.choice(COLORS)
-        other_color = [c for c in COLORS if c != selected_color][0]
-        task.teleport_cube(selected_color, PICK_POS)
-        task.teleport_cube(other_color, PARK_POS)   # 카메라 오검출 방지: 시야 밖으로 이동
-        print(f"\n[SETUP] '{selected_color}' 큐브 → pick 영역 {PICK_POS} 이동, "
-              f"'{other_color}' 큐브 → 시야 밖 대기")
+        # 두 큐브 모두 공중 대기(kinematic)로 복귀 (지난 라운드에 놓인 것도 회수)
+        for c in COLORS:
+            task.set_cube_kinematic(c, True)
+            task.set_cube_pose(c, STANDBY_AIR_POS[c])
+
+        # 랜덤 색 + 화각 안 랜덤 낙하 위치
+        selected = random.choice(COLORS)
+        theta = random.uniform(0.0, 2.0 * np.pi)
+        r = PICK_AREA_RADIUS * np.sqrt(random.uniform(0.0, 1.0))
+        drop_x = float(PICK_AREA_CENTER[0] + r * np.cos(theta))
+        drop_y = float(PICK_AREA_CENTER[1] + r * np.sin(theta))
+        # 공중(kinematic)에서 낙하 지점 위로 옮긴 뒤 물리를 켜서 떨어뜨림
+        task.set_cube_pose(selected, np.array([drop_x, drop_y, DROP_HEIGHT]))
+        task.set_cube_kinematic(selected, False)
+        print(f"\n[SETUP] '{selected}' 큐브 공중 스폰 → 낙하 @ ({drop_x:.3f}, {drop_y:.3f})")
 
         ros_node.received_color_id = None
-        picking_position = None
-        placing_position = None
-        pick_started = False
+        state.update(phase=PHASE_SETTLE, settle=0,
+                     selected=selected, picking=None, placing=None)
         step_count = 0
+
+    print("\n[ROS2 색상 감지 Pick & Place 시작]  (Play 버튼을 누르세요)\n")
 
     while simulation_app.is_running():
         my_world.step(render=True)
@@ -420,47 +481,83 @@ def main():
         rclpy.spin_once(ros_node, timeout_sec=0.0)
         is_playing = my_world.is_playing()
 
-        # Play 시작 감지 → 리셋 + 랜덤 큐브를 pick 영역으로 이동
+        # Play 시작 감지 → 리셋 + 첫 라운드 시작
         if is_playing and not was_playing:
             my_world.reset()
+            initialize_robot(robot, my_world)   # 시작 1회만 첫 위치로 세팅(허용)
             start_new_round()
 
         if is_playing:
             step_count += 1
+            phase = state["phase"]
 
-            # ── (1) wrist camera 프레임을 /rgb 로 주기적 발행 (색 판정 전까지만) ──
-            if not pick_started and step_count % RGB_PUBLISH_EVERY_N_STEPS == 0:
-                rgba = task.camera.get_rgba()
-                if rgba is not None and rgba.size > 0:
-                    ros_node.publish_rgb(rgba)
-
-            # ── (2) /color_id 수신되면 pick/place 목표 확정 ──
-            if not pick_started and ros_node.received_color_id is not None:
-                color = ID_TO_COLOR.get(ros_node.received_color_id)
-                if color is None:
-                    print(f"  [경고] 알 수 없는 color_id={ros_node.received_color_id}")
+            # ── (SETTLE) 큐브가 낙하·안착할 때까지 팔을 관찰 포즈로 고정 ──
+            if phase == PHASE_SETTLE:
+                robot.apply_action(hold_action)
+                state["settle"] += 1
+                if state["settle"] >= SETTLE_STEPS:
+                    state["phase"] = PHASE_DETECT
+                    # ★ 직전 라운드에 버퍼에 남아 SETTLE 중 다시 채워진 묵은
+                    #   color_id 를 폐기. 이제부터 새 rgb 에 대한 응답만 받는다.
                     ros_node.received_color_id = None
-                else:
-                    picking_position = np.array(PICK_POS)
-                    placing_position = MARKER_POS[color]
-                    pick_started = True
-                    print(f"  [OK] color_id={COLOR_ID[color]}({color}) 수신 → pick&place 시작")
+                    print("  [안착] 큐브 정지 → 관찰 포즈에서 /rgb 발행 시작")
 
-            # ── (3) pick & place 진행 ──
-            if pick_started:
+            # ── (DETECT) ★첫 위치(관찰 포즈)에서만 /rgb 발행 → color_id 대기 ──
+            #    큐브 잡으러 가거나(PICKPLACE) 드는 동안엔 발행하지 않는다:
+            #    손목캠이 파란/초록 비콘을 잡아 오검출되는 걸 막기 위함.
+            elif phase == PHASE_DETECT:
+                robot.apply_action(hold_action)     # 관찰 포즈 유지(카메라가 큐브를 봄)
+                if step_count % RGB_PUBLISH_EVERY_N_STEPS == 0:
+                    rgba = task.camera.get_rgba()
+                    if rgba is not None and rgba.size > 0:
+                        ros_node.publish_rgb(rgba)
+
+                if ros_node.received_color_id is not None:
+                    color = ID_TO_COLOR.get(ros_node.received_color_id)
+                    if color is None:
+                        print(f"  [경고] 알 수 없는 color_id={ros_node.received_color_id}")
+                        ros_node.received_color_id = None
+                    else:
+                        cube_pos = task.cube_position(state["selected"])
+                        state["picking"] = np.array([cube_pos[0], cube_pos[1], CUBE_CENTER_Z])
+                        mk = MARKER_POS[color]
+                        state["placing"] = np.array([mk[0], mk[1], CUBE_CENTER_Z])
+                        state["phase"] = PHASE_PICKPLACE
+                        print(f"  [OK] color_id={COLOR_ID[color]}({color}) 수신 "
+                              f"→ pick ({cube_pos[0]:.3f}, {cube_pos[1]:.3f}) → {color} 마커")
+
+            # ── (PICKPLACE) 큐브를 집어 같은 색 마커로 place ──
+            elif phase == PHASE_PICKPLACE:
                 current_joints = robot.get_joint_positions()
                 actions = controller.forward(
-                    picking_position=picking_position,
-                    placing_position=placing_position,
+                    picking_position=state["picking"],
+                    placing_position=state["placing"],
                     current_joint_positions=current_joints,
                     end_effector_offset=EE_OFFSET,
                 )
                 robot.apply_action(actions)
 
                 if controller.is_done():
-                    print(f"\n[완료] {selected_color} 큐브 → {selected_color} 마커")
-                    my_world.reset()
-                    start_new_round()   # 다음 라운드: 새 큐브 랜덤 배치 후 반복
+                    print(f"\n[완료] {state['selected']} 큐브 → 마커. 첫 위치로 복귀 중…")
+                    state["phase"] = PHASE_RETURN
+                    state["return_steps"] = 0
+                    state["return_from"] = robot.get_joint_positions().copy()
+
+            # ── (RETURN) 첫 위치(관찰 포즈)로 '천천히' 복귀 (순간이동/스냅 X) ──
+            #    복귀 동안엔 rgb 발행 안 함. 홈에 도착해야 다음 큐브를 스폰한다.
+            elif phase == PHASE_RETURN:
+                state["return_steps"] += 1
+                # 현재 자세 → 관찰 포즈 선형 보간 → 하드 스냅/이상 자세 방지
+                alpha = min(1.0, state["return_steps"] / RETURN_DURATION)
+                target = (1.0 - alpha) * state["return_from"] + alpha * observe_full
+                robot.apply_action(ArticulationAction(joint_positions=target))
+
+                arm_now = robot.get_joint_positions()[arm_idx]
+                reached = alpha >= 1.0 and np.max(np.abs(arm_now - observe_arm)) < RETURN_TOL
+                if reached or state["return_steps"] >= RETURN_MAX_STEPS:
+                    print(f"  [복귀] 첫 위치 도착 → 큐브 스폰 "
+                          f"({'ok' if reached else 'timeout'})")
+                    start_new_round()               # 홈 도착 후에만 스폰 + 발행 재개(다음 DETECT)
 
         was_playing = is_playing
 

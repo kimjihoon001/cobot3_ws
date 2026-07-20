@@ -11,7 +11,7 @@
   수확 순간에만 kinematic 을 꺼서 dynamic 으로 전환한다 (= 줄기에서 분리).
   -> 트라이앵글 메시 충돌 금지. 콜라이더는 convexHull 로 근사.
 """
-from pxr import Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 
 
 def add_shape_collider(prim: Usd.Prim) -> None:
@@ -41,6 +41,35 @@ def add_mesh_colliders(stage: Usd.Stage, root_path: str,
             UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr(
                 approximation)
             n += 1
+    return n
+
+
+def add_convex_decomposition_colliders(
+        stage: Usd.Stage, root_path: str,
+        max_convex_hulls: int = 64, voxel_resolution: int = 500000,
+        error_percentage: float = 1.0) -> int:
+    """root_path 아래 모든 Mesh 에 convexDecomposition 콜라이더 부여. 오목 형상용.
+
+    단일 convexHull 은 오목한 구멍(팔레트 포크 슬롯 등)을 메운다. 분해근사는 형상을
+    여러 볼록덩이로 쪼개 그 사이 빈 공간을 살린다. 조각 수·복셀 해상도를 올려 얇은
+    채널까지 보존한다. PhysX 세부 파라미터 API 는 버전마다 다를 수 있어 실패해도 안 죽게 감쌈.
+    반환: 콜라이더를 붙인 메시 개수. (스파이크 06 실측 검증 — 포크 진입·리프트 성공)
+    """
+    n = 0
+    for m in Usd.PrimRange(stage.GetPrimAtPath(root_path)):
+        if not m.IsA(UsdGeom.Mesh):
+            continue
+        UsdPhysics.CollisionAPI.Apply(m)
+        UsdPhysics.MeshCollisionAPI.Apply(m).CreateApproximationAttr(
+            "convexDecomposition")
+        try:
+            cd = PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(m)
+            cd.CreateMaxConvexHullsAttr(max_convex_hulls)
+            cd.CreateVoxelResolutionAttr(voxel_resolution)
+            cd.CreateErrorPercentageAttr(error_percentage)
+        except Exception as ex:
+            print(f"  [collider] 세부 파라미터 생략(기본 분해 사용): {ex}")
+        n += 1
     return n
 
 

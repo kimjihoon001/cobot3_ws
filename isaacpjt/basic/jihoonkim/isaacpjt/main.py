@@ -8,6 +8,9 @@
   isaac_python main.py --no-ros   (씬+로봇만)
   isaac_python main.py --headless
   isaac_python main.py --quiet    (metricsAssembler 스팸 끔 — omni.usd 경고도 같이 숨음 주의)
+  isaac_python main.py --nav-drive   (iw.hub Nav2 브리지 단계검증: /cmd_vel→바퀴. 순서대로:
+                     --nav-odom(/odom+TF) → --nav-scan(라이다→/scan) → --nav(셋 다).
+                     ⚠ 노드명 미확정 — tools/nav2_node_probe.py 로 먼저 실측할 것)
 
 로봇 3대 (물류 루프: MM 수확 → iw.hub 팔레트+KLT 운반 → 지게차 랙 적재):
   /World/Harvester   수확 MM (Ridgeback+UR10e+2F-85+커터지그+가동날+D455)
@@ -35,6 +38,11 @@ import sys
 GUI = "--headless" not in sys.argv
 NO_ROS = "--no-ros" in sys.argv
 QUIET = "--quiet" in sys.argv
+# iw.hub Nav2 브리지 — 하나씩 켜며 GPU 검증(순서 drive→odom→scan). --nav 는 셋 다.
+# ⚠ 노드 타입명 미확정(tools/nav2_node_probe.py 로 먼저 실측). 기본 꺼짐이라 씬엔 영향 없음.
+NAV_DRIVE = "--nav-drive" in sys.argv or "--nav" in sys.argv
+NAV_ODOM = "--nav-odom" in sys.argv or "--nav" in sys.argv
+NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
 
 from isaacsim import SimulationApp
 
@@ -113,6 +121,36 @@ def build_ros_control(stage, arts: list[tuple[str, str]]):
         return None
 
 
+def build_nav(stage, iw, art_path: str, nav) -> None:
+    """iw.hub 자율주행 그래프 — 플래그로 켠 것만 배선. 실패해도 씬은 유지(브리지와 동일 방침).
+
+    순서대로 GPU 검증: drive(/cmd_vel→바퀴) → odom(/odom+TF) → scan(라이다→/scan).
+    노드 타입명은 tools/nav2_node_probe.py 로 확정 후 robot_bridge.T 갱신할 것(§8).
+    """
+    from ros import robot_bridge as RB
+
+    base = f"{iw.root}/base_link"
+    chassis = base if stage.GetPrimAtPath(base).IsValid() else art_path
+    try:
+        if NAV_DRIVE:
+            RB.build_diff_drive(stage, "/World/Nav_drive", art_path,
+                                iw.DRIVE_JOINTS, nav)
+        if NAV_ODOM:
+            RB.build_odometry(stage, "/World/Nav_odom", chassis, nav)
+        if NAV_SCAN:
+            lidar = iw.attach_lidar(stage, nav.lidar_offset)
+            if lidar:
+                RB.build_tf_sensor(stage, "/World/Nav_tf", chassis, lidar, nav)
+                RB.build_lidar_scan(stage, "/World/Nav_scan", lidar, nav)
+    except Exception:
+        import traceback
+        print("\n" + "=" * 64)
+        print("[Nav] 그래프 생성 실패 — 씬은 유지. tools/nav2_node_probe.py 로 노드명 확인.")
+        print("=" * 64)
+        traceback.print_exc()
+        print("=" * 64 + "\n")
+
+
 def main() -> None:
     cfg = SceneConfig()
     world = World(stage_units_in_meters=1.0)
@@ -127,7 +165,8 @@ def main() -> None:
     mm.spawn(stage, "/World/Harvester", ROBOT_POSE["harvester"])
     TransporterAMR(cfg.robots, cfg.warehouse).spawn(
         stage, "/World/Forklift", ROBOT_POSE["forklift"])
-    IwHub(cfg.robots).spawn(stage, "/World/IwHub", ROBOT_POSE["iwhub"])
+    iw = IwHub(cfg.robots)
+    iw.spawn(stage, "/World/IwHub", ROBOT_POSE["iwhub"])
 
     arts = [("harvester_0", art_root(stage, "/World/Harvester")),
             ("forklift_0", art_root(stage, "/World/Forklift")),
@@ -140,6 +179,9 @@ def main() -> None:
     world.scene.add(Robot(prim_path=arts[2][1], name="iw"))
     world.reset()                                # 로봇 물리 초기화
 
+    # iw.hub 데크에 '적재된 세트' (팔레트+KLT 8 + 토마토 15개 꼭지포함·동적강체, 3칸 산포)
+    iw.load_cargo(stage, cfg.tomato_assets, cfg.physics)
+
     # ── MM 수확자세: wrist_1(4번축) +180° 를 스폰 기본자세로 ──
     # 기본자세면 커터·지그가 파지점 아래(뒤집힘). +180° 라야 절단점이 파지점 위 5.3cm
     # (2026-07-19 실측 — CAD 의도 그대로). default_state 라 Play/Stop 리셋에도 유지.
@@ -150,6 +192,12 @@ def main() -> None:
     for _ in range(15):                          # 자세 정착(§8 — 안 하면 옛 자세 읽음)
         world.step(render=False)
     mm.attach_blade_hinge(stage)                 # 가동날(서보 힌지) — 정착된 자세 기준
+    # 힌지 강체·조인트는 위 reset 뒤에 추가돼 아직 물리 뷰에 없다 → 여기서 한 번 더 reset 해
+    # 미리 초기화·정착시킨다. 안 하면 플레이 순간 첫 reset 에서 날·브라켓이 물리 자리로 스냅해
+    # "플레이하면 장착 브라켓이 생기는" 것처럼 보인다(2026-07-20 사용자 지적).
+    world.reset()
+    for _ in range(5):
+        world.step(render=False)
 
     # MM 키네마틱 베이스 인덱스 (JSON base 명령용 — 텔레포트만 먹는다, 2026-07-18 실측)
     base_idx = np.array([list(mm_robot.dof_names).index(n) for n in MM_BASE_JOINTS])
@@ -161,6 +209,8 @@ def main() -> None:
                         target=[0.0, 2.0, 0.5])
 
     poller = None if NO_ROS else build_ros_control(stage, arts)
+    if not NO_ROS and (NAV_DRIVE or NAV_ODOM or NAV_SCAN):
+        build_nav(stage, iw, arts[2][1], cfg.robots.iwhub_nav)
 
     obs = task.get_observations()
     fruits = obs["fruits"]

@@ -36,7 +36,7 @@ class Greenhouse:
         # 상단 보(TopBeam)·크로스 보(CrossBeam) 제거 — 위에서 내려다볼 때 시야를 가려
         # 안 보기 좋음(사용자 요청 2026-07-20). 기둥+유리벽만 남긴다(구조·충돌 유지).
 
-        # 유리 패널 — 시각 전용 (콜라이더 없음. 로봇 차단은 골조/베드가 담당)
+        # 유리 패널 — 반투명 벽 + static 콜라이더 (로봇이 뚫고 나가지 못하게, 2026-07-20)
         # 지붕은 안 덮는다 — 시연을 위에서 내려다보는 게 우선 (사용자 결정 2026-07-18).
         self._add_glass(stage, f"{root}/Glass_L",
                         (-half_w, 0.0, c.height / 2.0), (0.02, c.length, c.height))
@@ -82,3 +82,4 @@ class Greenhouse:
         xf = UsdGeom.Xformable(pane.GetPrim())
         xf.AddTranslateOp().Set(Gf.Vec3d(*center))
         xf.AddScaleOp().Set(Gf.Vec3f(*size))
+        physics.add_shape_collider(pane.GetPrim())   # 로봇이 유리를 뚫고 나가지 못하게(static)

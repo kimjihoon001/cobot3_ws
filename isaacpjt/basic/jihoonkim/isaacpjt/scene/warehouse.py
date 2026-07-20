@@ -17,9 +17,7 @@ TODO 배경 선반에 슬롯을 맞추려면 GPU 에서 선반 좌표를 재서 
 """
 from __future__ import annotations
 
-import math
-
-from pxr import Gf, Usd, UsdGeom, UsdShade
+from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from pjt_config.settings import WarehouseConfig
 from scene import physics
@@ -192,46 +190,61 @@ class Warehouse:
             klt_url = assets.resolve(CRATE_USD, "KLT 빈")
         except FileNotFoundError:
             klt_url = None      # 팔레트만 얹는다
+        # 팔레트 마찰 재질은 한 번만 만들어 전 팔레트가 공유한다(§5.7 값은 settings 에서).
+        pp = self._cfg.pallet_physics
+        pmat = physics.create_physics_material(
+            stage, f"{self._root}/PhysMat/pallet",
+            pp.static_friction, pp.dynamic_friction)
         for s in self._slots:                    # 활성 슬롯(뒷벽): 팔레트 + 실제 KLT 빈
             self._place_pallet(stage, add_reference_to_stage, set_pose, set_scale,
                                f"{self._root}/Pallet_{s['index']:02d}", s["local"],
-                               pallet_url, klt_url, yaw=0.0)
+                               pallet_url, klt_url, pmat, yaw=0.0)
         for j, (dx, dy, dz, dyaw) in enumerate(self._decor):   # 장식(뒷벽+좌우벽)
             self._place_pallet(stage, add_reference_to_stage, set_pose, set_scale,
                                f"{self._root}/Decor_{j:02d}", (dx, dy, dz),
-                               pallet_url, klt_url, yaw=dyaw)
+                               pallet_url, klt_url, pmat, yaw=dyaw)
         log(f"[Warehouse] 팔레트 {len(self._slots) + len(self._decor)}개 + 실제 KLT 8/팔레트 "
             f"(활성 {len(self._slots)}+장식 {len(self._decor)}, 3면 랙 — 할당은 ROS2)")
 
     def _place_pallet(self, stage, add_ref, set_ps, set_sc, path, local,
-                      pallet_url, klt_url, yaw: float = 0.0) -> None:
-        """선반 로컬 좌표에 나무 팔레트(USD) 1개 + 위에 실제 KLT 빈 8개(4×2, 간격 벌림).
+                      pallet_url, klt_url, pmat, yaw: float = 0.0) -> None:
+        """선반 로컬 좌표에 나무 팔레트(USD) 1개 + 그 위(자식)에 KLT 빈 8개(4×2) = 한 세트.
+
+        팔레트는 진짜 물리 객체다(질량·마찰·convexDecomposition 콜라이더 → 다이내믹) —
+        지게차가 형상으로 실제로 들 수 있게(스파이크 06 검증). pmat 은 공유 마찰 재질.
+
+        ★ KLT 는 팔레트 prim 의 **자식**으로 넣는다 → PhysX 가 팔레트 강체 하나에 흡수해
+          팔레트가 움직이면 KLT 도 계층으로 같이 딸려 간다(IW 운반·지게차 리프트 시 한 덩어리).
+          KLT 에 강체(RigidBodyAPI)를 **주지 않는다** — 따로 강체로 만들면 리프트·주행 때
+          미끄러지고 튕겨 개판이 된다(사용자 우려 2026-07-20). 계층 결합이라 고정조인트도 불필요.
+          자식이라 회전은 팔레트가 갖고, KLT 로컬 op 엔 회전 안 뺀 격자 오프셋만 쓴다(§8 규칙).
+          ※ MM 이 토마토를 담는 '활성 세트'에서는 KLT 안이 비어야 하므로(담김) 그때 KLT 벽에
+            오목 콜라이더(convexDecomposition)를 따로 준다 — 지금 랙 세트는 빈 장식이라 생략.
 
         KLT 는 실제 에셋(빈 모양)이되 텍스처 머티리얼을 벗기고 displayColor 로 칠한다 —
-        텍스처째 넣으면 재질 예산이 밀려 식물 색이 죽었다(2026-07-20). yaw 로 팔레트·KLT 를
-        같이 눕힌다(측벽 90°). 높이: 팔레트는 지지면 위(피벗=바닥), KLT 는 팔레트 윗면
-        (피벗=중심 → 반높이 올림).
+        텍스처째 넣으면 재질 예산이 밀려 식물 색이 죽었다(2026-07-20). yaw 로 세트를 눕힌다(측벽 90°).
         """
         lx, ly, lz = local
         support = lz - SLOT_SIZE[2] / 2.0 + 0.002            # 랙 선반 윗면 = 팔레트가 직접 앉는 면
         quat = self._yaw_quat(yaw)
         add_ref(pallet_url, path)
         set_ps(stage.GetPrimAtPath(path), (lx, ly, support + PALLET_PIVOT_Z), quat)
+        self._apply_pallet_physics(stage, path, pmat)
         if not klt_url:
             return
         klt_scale = 0.85                                     # 살짝 줄여 8개가 붙지 않고 구분되게
-        kz = support + PALLET_SIZE[2] + KLT_SIZE[2] * klt_scale / 2.0   # 팔레트 윗면에 앉게
+        kz = PALLET_SIZE[2] + KLT_SIZE[2] * klt_scale / 2.0  # 팔레트 로컬: 윗면 위(부모가 support)
+        ident = self._yaw_quat(0.0)                          # 회전은 부모(팔레트)가 가짐
         nx, ny = 4, 2                                        # 4×2 = 8개
         pitx, pity = 0.31, 0.25                              # 간격 벌려 붙어보이지 않게(길이 4·폭 2)
-        c, s = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
         for ix in range(nx):
             for iy in range(ny):
-                ox = (ix - (nx - 1) / 2.0) * pitx            # 팔레트 로컬 격자 오프셋
+                ox = (ix - (nx - 1) / 2.0) * pitx            # 팔레트 로컬 격자 오프셋(회전 전)
                 oy = (iy - (ny - 1) / 2.0) * pity
-                kp = f"{path}_KLT_{ix}{iy}"
+                kp = f"{path}/KLT_{ix}{iy}"                  # ★ 팔레트의 자식 → 강체에 흡수
                 add_ref(klt_url, kp)
                 kprim = stage.GetPrimAtPath(kp)
-                set_ps(kprim, (lx + ox * c - oy * s, ly + ox * s + oy * c, kz), quat)
+                set_ps(kprim, (ox, oy, kz), ident)          # 팔레트 로컬 프레임(부모가 회전·이동)
                 set_sc(kprim, klt_scale)                     # 실제 KLT 를 살짝 축소
                 # 에셋의 무거운 텍스처 머티리얼을 벗기고 displayColor 로 칠한다.
                 # 실제 KLT 를 텍스처째 넣으면 재질 예산이 밀려 식물 색이 죽었다(2026-07-20).
@@ -239,6 +252,21 @@ class Warehouse:
                     if m.IsA(UsdGeom.Mesh):
                         UsdShade.MaterialBindingAPI(m).UnbindAllBindings()
                         UsdGeom.Gprim(m).CreateDisplayColorAttr([KLT_COLOR])
+
+    def _apply_pallet_physics(self, stage: Usd.Stage, path: str, pmat) -> None:
+        """팔레트 1개를 물리 객체로 — convexDecomposition 콜라이더 + 다이내믹 + 질량 + 마찰.
+
+        스파이크 06 실측 검증(2026-07-20): 콜라이더가 포크 슬롯을 살려 지게차가 형상으로
+        실제로 든다. 값·근거는 settings.PalletPhysicsConfig (§5.7).
+        """
+        pp = self._cfg.pallet_physics
+        physics.add_convex_decomposition_colliders(
+            stage, path, pp.max_convex_hulls, pp.voxel_resolution,
+            pp.error_percentage)
+        prim = stage.GetPrimAtPath(path)
+        UsdPhysics.RigidBodyAPI.Apply(prim).CreateKinematicEnabledAttr(False)  # 다이내믹
+        UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(pp.mass)                 # 질량 직접
+        physics.bind_physics_material(prim, pmat)
 
     @staticmethod
     def _yaw_quat(deg: float) -> Gf.Quatd:

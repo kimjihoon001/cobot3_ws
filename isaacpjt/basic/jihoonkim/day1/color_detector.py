@@ -33,8 +33,10 @@ HSV_RANGES = {
     "blue":  {"id": 1, "lower": (100, 80, 50), "upper": (130, 255, 255)},
     "green": {"id": 2, "lower": (40, 80, 50),  "upper": (80, 255, 255)},
 }
-MIN_BLOB_RATIO = 0.01   # 전체 픽셀 대비 이 비율 미만이면 미검출로 간주
+MIN_BLOB_RATIO = 0.01   # ROI 픽셀 대비 이 비율 미만이면 미검출로 간주
 CONFIRM_FRAMES = 5      # 노이즈로 인한 플리커 방지: 같은 색이 연속 N프레임 나와야 발행
+ROI_FRAC = 0.4          # 중앙 40% x 40% 만 판정 → 가장자리 비콘 배제
+FRAME_GAP_NS = 500_000_000  # 0.5s 이상 프레임이 끊기면 새 관찰로 보고 재무장
 
 
 def imgmsg_to_rgb(msg):
@@ -64,12 +66,24 @@ class ColorDetector(Node):
         self.pub = self.create_publisher(Int32, "/color_id", 10)
         self._candidate_id = None
         self._candidate_streak = 0
+        self._last_ns = None
         self.get_logger().info("color_detector 시작 → /rgb 구독, /color_id 발행")
 
     def on_image(self, msg):
+        # 프레임이 한동안 끊기면(팔이 잡으러 갔다 첫 위치로 복귀) 스트릭 재무장
+        now = self.get_clock().now().nanoseconds
+        if self._last_ns is not None and (now - self._last_ns) > FRAME_GAP_NS:
+            self._candidate_id = None
+            self._candidate_streak = 0
+        self._last_ns = now
+
         rgb = imgmsg_to_rgb(msg)
         hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-        total_px = msg.width * msg.height
+        # 화면 중앙 ROI 만 판정 → 가장자리 비콘 배제
+        h, w = hsv.shape[:2]
+        ry, rx = int(h * ROI_FRAC / 2), int(w * ROI_FRAC / 2)
+        hsv = hsv[h // 2 - ry:h // 2 + ry, w // 2 - rx:w // 2 + rx]
+        total_px = hsv.shape[0] * hsv.shape[1]
 
         best_color = None
         best_count = 0
