@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import random
 
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom, UsdShade
 
 from pjt_config.settings import RobotConfig
 from pjt_utils.xform import set_pose, set_scale, set_translate
@@ -30,6 +30,13 @@ class IwHub:
     # 실측 DOF 이름 (2026-07-19) — ROS2 JointState 의 name 필드에 이대로 쓴다.
     DRIVE_JOINTS = ("left_wheel_joint", "right_wheel_joint")   # 속도 명령(차동)
     LIFT_JOINT = "lift_joint"                                   # 위치 명령(승강)
+
+    # 실측 에셋 치수. iw.hub 상판에 빈 KLT 팔레트를 초기 적재할 때 사용한다.
+    DECK_Z = 0.235                         # AMR 로컬 원점 기준 상판 바로 위
+    PALLET_HEIGHT = 0.143
+    KLT_HEIGHT = 0.146
+    KLT_SCALE = 0.85
+    KLT_COLOR = Gf.Vec3f(0.60, 0.28, 0.62)
 
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
@@ -206,3 +213,50 @@ class IwHub:
         except Exception as e:
             log(f"[IwHub] ⚠ 라이다 생성 실패 — GPU 에서 RTX 라이다 API 확인 필요: {e}")
             return None
+
+    def spawn_empty_pallet(self, stage: Usd.Stage, log=print) -> str:
+        """AMR 상판에 나무 팔레트 1개와 빈 KLT 8개(4×2)를 초기 적재한다.
+
+        적재물은 ``{root}/Load`` 아래에 두므로 AMR이 주행하면 함께 이동한다.
+        KLT는 비어 있는 실제 small_KLT 에셋이며, 팔레트 윗면에 겹치지 않게 놓는다.
+        반환값은 적재 루트 prim 경로다.
+        """
+        if self._root is None:
+            raise RuntimeError("iw.hub를 spawn한 뒤 팔레트를 적재해야 합니다.")
+
+        from isaacsim.core.utils.stage import add_reference_to_stage
+
+        from pjt_utils.xform import set_pose, set_scale, set_translate
+
+        pallet_url = assets.resolve(self._cfg.assets.pallet, "iw.hub 적재 팔레트")
+        klt_url = assets.resolve(self._cfg.assets.klt_bin, "iw.hub 빈 KLT")
+
+        load_root = f"{self._root}/Load"
+        UsdGeom.Xform.Define(stage, load_root)
+        set_translate(stage.GetPrimAtPath(load_root), (0.0, 0.0, self.DECK_Z))
+
+        identity = Gf.Quatd(1.0, Gf.Vec3d(0.0, 0.0, 0.0))
+        pallet_path = f"{load_root}/Pallet"
+        add_reference_to_stage(pallet_url, pallet_path)
+        # 팔레트 USD 원점은 바닥이므로 Load 원점에 그대로 둔다.
+        set_pose(stage.GetPrimAtPath(pallet_path), (0.0, 0.0, 0.0), identity)
+
+        # 팔레트 1.213×0.802m 안에 빈 KLT 8개를 여유 있게 4×2 배치한다.
+        klt_z = self.PALLET_HEIGHT + self.KLT_HEIGHT * self.KLT_SCALE / 2.0
+        for ix in range(4):
+            for iy in range(2):
+                x = (ix - 1.5) * 0.31
+                y = (iy - 0.5) * 0.25
+                path = f"{load_root}/KLT_{ix}_{iy}"
+                add_reference_to_stage(klt_url, path)
+                prim = stage.GetPrimAtPath(path)
+                set_pose(prim, (x, y, klt_z), identity)
+                set_scale(prim, self.KLT_SCALE)
+                # 창고의 KLT와 같은 보라색으로 표시하고 무거운 재질 바인딩은 제거한다.
+                for child in Usd.PrimRange(prim):
+                    if child.IsA(UsdGeom.Mesh):
+                        UsdShade.MaterialBindingAPI(child).UnbindAllBindings()
+                        UsdGeom.Gprim(child).CreateDisplayColorAttr([self.KLT_COLOR])
+
+        log(f"[IwHub] 빈 KLT 팔레트 적재 완료: {pallet_path} (KLT 8개)")
+        return load_root
