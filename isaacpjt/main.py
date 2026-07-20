@@ -11,9 +11,14 @@
   isaac_python main.py --nav-drive   (iw.hub Nav2 브리지 단계검증: /cmd_vel→바퀴. 순서대로:
                      --nav-odom(/odom+TF) → --nav-scan(라이다→/scan) → --nav(셋 다).
                      ⚠ 노드명 미확정 — tools/nav2_node_probe.py 로 먼저 실측할 것)
-  isaac_python main.py --camera      (손끝 D455 → /harvester/rgb·/depth·/camera_info 발행,
-                     YOLO 파인튜닝용. ⚠ 노드명 probe 미확정)
+  (카메라는 기본 자동 발행 — 손끝 D455 → /harvester/rgb·/depth·/camera_info, YOLO 파인튜닝용.
+   ROS 켤 때 자동. 끄려면 --no-camera. ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로)
   isaac_python main.py --teleop      (MM 키보드 텔레옵 — 팔·베이스·그리퍼·블레이드 직접 조작)
+  isaac_python main.py --export --headless   (조립한 씬을 USD 로 저장하고 종료. 기본
+                     ~/cobot3_ws/scene.usd. 이름/경로 지정 가능: --export mm.usda (→
+                     ~/cobot3_ws/mm.usda). 참조형 — 절대경로로 에셋 참조, 같은 GPU 에서 열림)
+  isaac_python main.py --load --teleop --no-ros   (기존 USD 를 열어 실행 — 씬 재조립 안 함.
+                     기본 ~/cobot3_ws/scene.usd, --load 다른.usd 로 지정. 텔레옵 됨)
 
 로봇 3대 (물류 루프: MM 수확 → iw.hub 팔레트+KLT 운반 → 지게차 랙 적재):
   /World/Harvester   수확 MM (Ridgeback+UR10e+2F-85+커터지그+가동날+D455)
@@ -36,6 +41,7 @@ ROS2 토픽 (§5.6: 판단은 ROS2 = dev 머신, 실행만 여기. domain 108):
   ros2 topic pub -1 /harvester_0/cmd std_msgs/String '{data: "{\\"blade\\": 35}"}'
 """
 import json
+import os
 import sys
 
 GUI = "--headless" not in sys.argv
@@ -46,10 +52,40 @@ QUIET = "--quiet" in sys.argv
 NAV_DRIVE = "--nav-drive" in sys.argv or "--nav" in sys.argv
 NAV_ODOM = "--nav-odom" in sys.argv or "--nav" in sys.argv
 NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
-# 손끝 D455 → ROS2 rgb/depth 발행 (YOLO 파인튜닝용). ⚠ 노드명 probe 미확정, 기본 꺼짐.
-CAMERA = "--camera" in sys.argv
+# 손끝 D455 → ROS2 rgb/depth 발행 (YOLO 파인튜닝용). 기본 켜짐(ROS 켤 때 자동). --no-camera 로 끔.
+# ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로(main 이 예외 잡음).
+CAMERA = "--no-camera" not in sys.argv
 # MM 키보드 텔레옵 (팔·베이스·그리퍼·블레이드 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
 TELEOP = "--teleop" in sys.argv
+
+
+def _arg_value(name: str, default=None):
+    """--name <값> 형태 인자 파싱 (다음 토큰이 또 --플래그면 값 없음으로 본다)."""
+    if name in sys.argv:
+        i = sys.argv.index(name)
+        if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("--"):
+            return sys.argv[i + 1]
+    return default
+
+
+# 씬 조립 후 USD 로 저장. --export <이름|경로> 주면 저장한다. 참조형 — Nucleus·로컬 에셋을
+# 절대경로로 참조하므로 같은 GPU 셋업에서 열린다. --headless 와 같이 주면 저장만 하고 종료.
+#   기본 저장 폴더 = ~/cobot3_ws. 파일명·상대경로는 여기에 붙는다(절대경로면 그대로).
+#   --export 만 주면 scene.usd. 예) --export → ~/cobot3_ws/scene.usd
+_EXPORT_DIR = os.path.expanduser("~/cobot3_ws")
+if "--export" in sys.argv:
+    _ename = _arg_value("--export", "scene.usd")
+    EXPORT = _ename if os.path.isabs(_ename) else os.path.join(_EXPORT_DIR, _ename)
+else:
+    EXPORT = None
+
+# 기존 USD 를 열어 그대로 실행(씬 재조립 안 함). --load <이름|경로>, 생략 시 scene.usd.
+#   기본 폴더 ~/cobot3_ws. 텔레옵은 --teleop 와 같이. 예) --load --teleop --no-ros
+if "--load" in sys.argv:
+    _lname = _arg_value("--load", "scene.usd")
+    LOAD = _lname if os.path.isabs(_lname) else os.path.join(_EXPORT_DIR, _lname)
+else:
+    LOAD = None
 
 from isaacsim import SimulationApp
 
@@ -62,14 +98,14 @@ if QUIET:
     import carb.settings
     carb.settings.get_settings().set("/log/channels/omni.usd", "error")
 
-import os
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if not NO_ROS:
     # 브리지 확장은 그래프 생성 전에 켜야 한다 (tools/iwhub_bridge_check.py 검증 순서)
+    # omni.graph.bundle/window.action = OmniGraph 액션 노드 안정화(팀원 hyeonminlee 확인, 2026-07-20)
     from isaacsim.core.utils.extensions import enable_extension
-    for _ext in ("isaacsim.core.nodes", "isaacsim.ros2.bridge"):
+    for _ext in ("isaacsim.core.nodes", "isaacsim.ros2.bridge",
+                 "omni.graph.bundle.action", "omni.graph.window.action"):
         enable_extension(_ext)
     for _ in range(20):
         simulation_app.update()
@@ -158,11 +194,12 @@ def build_nav(stage, iw, art_path: str, nav) -> None:
         print("=" * 64 + "\n")
 
 
-def build_teleop(mm, mm_robot):
+def build_teleop(mm_robot, set_blade):
     """MM 키보드 텔레옵 — 팔6·베이스·그리퍼·블레이드. 반환: step(is_playing) 콜백(실패 시 None).
 
     글자키만 쓴다(방향키는 뷰포트가 가로챔 — spike05 실측). GUI 전용. mm_robot 이 물리
     초기화(world.reset)된 뒤 호출할 것 — HarvesterController 가 현재 관절값에서 출발한다.
+    set_blade: 가동날 각도[deg] setter 콜백 (조립모드=mm.set_blade_deg / 로드모드=드라이브 attr).
     """
     if not GUI:
         print("[Teleop] --headless 라 키보드 입력 불가 — 텔레옵 비활성")
@@ -176,10 +213,16 @@ def build_teleop(mm, mm_robot):
     K = carb.input.KeyboardInput
     pressed: set = set()
     st = {"blade": 0.0}
+    active = {"joint": 0}                           # 번호키로 선택된 팔 관절(0~5)
+    ARM_SEL = [K.KEY_1, K.KEY_2, K.KEY_3, K.KEY_4, K.KEY_5, K.KEY_6]
 
     def on_key(e, *_):
         if e.type == carb.input.KeyboardEventType.KEY_PRESS:
-            pressed.add(e.input)
+            if e.input in ARM_SEL:                   # 번호키 = 조작할 관절 선택(엣지)
+                active["joint"] = ARM_SEL.index(e.input)
+                print(f"[Teleop] 활성 관절 = {active['joint'] + 1}번")
+            else:
+                pressed.add(e.input)
         elif e.type == carb.input.KeyboardEventType.KEY_RELEASE:
             pressed.discard(e.input)
         return True
@@ -189,11 +232,9 @@ def build_teleop(mm, mm_robot):
         appwin.get_keyboard(), on_key)
 
     DQ, DB, DYAW, DG, DBL = 0.02, 0.01, 0.02, 0.03, 2.0
-    ARM = [(K.Q, K.A), (K.W, K.S), (K.E, K.D),      # 1~6번 관절 ±
-           (K.R, K.F), (K.T, K.G), (K.Y, K.H)]
     print("""
-[MM 텔레옵] 플레이 상태에서, 글자키만 (방향키는 뷰포트가 가로챔)
-  팔    Q/A W/S E/D R/F T/G Y/H = 1~6번 관절 ±
+[MM 텔레옵] 플레이 상태에서 (방향키는 뷰포트가 가로챔 — 숫자/글자키만)
+  팔    숫자 1~6 으로 관절 선택 → , 반시계 / . 시계 로 그 관절 회전
   베이스 I/K 전후 · J/L 좌우 · U/O 회전
   그리퍼 Z 열기 / X 닫기      블레이드 B 열기(0°) / N 닫기(절단)
 """)
@@ -201,11 +242,11 @@ def build_teleop(mm, mm_robot):
     def step(is_playing):
         if not is_playing:
             return
-        for i, (kp, km) in enumerate(ARM):
-            if kp in pressed:
-                ctrl.move_arm(i, DQ)
-            if km in pressed:
-                ctrl.move_arm(i, -DQ)
+        j = active["joint"]                         # 선택된 관절만 회전
+        if K.COMMA in pressed:                       # , = 반시계(CCW, +)
+            ctrl.move_arm(j, DQ)
+        if K.PERIOD in pressed:                      # . = 시계(CW, −)
+            ctrl.move_arm(j, -DQ)
         dx = (K.I in pressed) - (K.K in pressed)
         dy = (K.J in pressed) - (K.L in pressed)
         dyaw = (K.U in pressed) - (K.O in pressed)
@@ -218,13 +259,83 @@ def build_teleop(mm, mm_robot):
         if K.B in pressed or K.N in pressed:
             st["blade"] = max(0.0, min(35.0,
                               st["blade"] + (DBL if K.N in pressed else -DBL)))
-            mm.set_blade_deg(st["blade"])
+            set_blade(st["blade"])
         ctrl.apply()
 
     return step
 
 
+def _find_blade_setter(stage):
+    """로드된 USD 의 가동날 ServoJoint 드라이브 타깃 attr → 각도 setter. 없으면 no-op."""
+    from pxr import UsdPhysics
+    sj = stage.GetPrimAtPath("/World/Harvester_CutterBlade/ServoJoint")
+    if sj and sj.IsValid():
+        attr = UsdPhysics.DriveAPI(sj, "angular").GetTargetPositionAttr()
+        if attr and attr.IsValid():
+            return lambda deg: attr.Set(float(deg))
+    return lambda deg: None
+
+
+def run_loaded(path: str) -> None:
+    """기존 USD 를 열어 그대로 실행(씬 재조립 없음) + MM 텔레옵.
+
+    ★ 수확자세 재설정이 필요한 이유: 아티큘레이션 '조인트 각도 상태'는 USD 에 안 실린다.
+      로드 시 wrist_1 이 0 으로 초기화돼 플레이하면 그리퍼가 0 자세로 떨어진다(사용자 지적
+      2026-07-20). build 경로와 똑같이 wrist_1 +180° 를 default_state 로 다시 잡아 고정한다.
+      (이 USD 가 이미 수확자세 상태를 담고 있었다면 이 +180° 는 빼야 함 — GPU 에서 확인.)
+    """
+    from isaacsim.core.utils.stage import open_stage
+
+    if not os.path.isfile(path):
+        print(f"[Load] USD 없음: {path}\n  --export 로 먼저 저장하거나 경로를 확인하세요.")
+        return
+    print(f"[Load] USD 로드: {path}")
+    open_stage(path)
+    world = World(stage_units_in_meters=1.0)
+    stage = omni.usd.get_context().get_stage()
+
+    mm_robot = None
+    for nm, root in (("mm", "/World/Harvester"), ("fk", "/World/Forklift"),
+                     ("iw", "/World/IwHub")):
+        art = art_root(stage, root)
+        if art:
+            r = world.scene.add(Robot(prim_path=art, name=nm))
+            if nm == "mm":
+                mm_robot = r
+    world.reset()
+
+    teleop = None
+    if mm_robot is not None:
+        q0 = np.asarray(mm_robot.get_joint_positions(), dtype=float)
+        q0[list(mm_robot.dof_names).index("wrist_1_joint")] += np.pi   # 수확자세 복원
+        mm_robot.set_joints_default_state(positions=q0)
+        world.reset()
+        for _ in range(15):
+            world.step(render=False)
+        if TELEOP:
+            teleop = build_teleop(mm_robot, _find_blade_setter(stage))
+    else:
+        print("[Load] Harvester 아티큘레이션을 못 찾음 — 텔레옵 불가.")
+
+    if GUI:
+        from isaacsim.core.utils.viewports import set_camera_view
+        set_camera_view(eye=[10.0, -18.0, 12.0], target=[0.0, 2.0, 0.5])
+
+    was_playing = False
+    while simulation_app.is_running():
+        world.step(render=True)
+        is_playing = world.is_playing()
+        if is_playing and not was_playing:
+            world.reset()
+        was_playing = is_playing
+        if teleop is not None:
+            teleop(is_playing)
+
+
 def main() -> None:
+    if LOAD:                                          # USD 로드 모드 (씬 재조립 안 함)
+        run_loaded(LOAD)
+        return
     cfg = SceneConfig()
     world = World(stage_units_in_meters=1.0)
 
@@ -310,7 +421,14 @@ def main() -> None:
     if poller is not None:
         print("[RosBridge] 대기 중 — 토픽 목록은 파일 상단 docstring 참조 (domain 108)\n")
 
-    teleop = build_teleop(mm, mm_robot) if TELEOP else None
+    if EXPORT:
+        ok = stage.Export(EXPORT)
+        print(f"\n[Export] 씬 USD 저장 → {EXPORT}  ({'성공' if ok else '실패'})")
+        print("  ※ 참조형(절대경로) — Isaac GUI 로 열면 같은 씬. Nucleus 접속 필요.")
+        if not GUI:
+            return                               # 헤드리스면 저장만 하고 종료(아래 close)
+
+    teleop = build_teleop(mm_robot, mm.set_blade_deg) if TELEOP else None
 
     # Play/Stop 반복 시 동일한 초기 상태에서 재시작 (재현성)
     was_playing = False
