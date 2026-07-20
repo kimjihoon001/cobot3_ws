@@ -562,6 +562,41 @@ class IwHubNavConfig:
 
 
 @dataclass
+class HarvesterNavConfig:
+    """수확 MM(Ridgeback) 자율주행(Nav2) 파라미터 — 홀로노믹 베이스·오도메트리·라이다.
+
+    왜 IwHubNavConfig 를 재사용하지 않는가 — 구동 방식 자체가 다르다:
+      iw.hub    = 차동구동(v, ω)      → DifferentialController 로 좌우 바퀴 속도
+      Ridgeback = 홀로노믹(vx, vy, ω) → 바퀴 조인트가 아니라 **키네마틱 더미 3축**
+        (dummy_base_prismatic_x/y, dummy_base_revolute_z)을 파이썬이 적분해 텔레포트한다.
+        이 베이스는 위치/속도 드라이브를 무시하고 텔레포트만 먹는다(2026-07-18 실측, mm.py).
+        → OmniGraph 홀로노믹 컨트롤러 노드가 필요 없다. 미확정 노드 타입이 하나 줄어든다.
+
+    Nav2 쪽(dev PC)에서 이 값과 짝이 되는 파일:
+      src/smartfarm/fleet_dispatch/config/harvester_nav2.yaml (프레임·토픽·속도상한 일치 필수)
+    """
+    # [1] Clearpath Ridgeback 공식 사양: 0.96 × 0.793 × 0.296 m, 최고 1.1 m/s, 적재 100 kg.
+    # [4] 아래 상한은 사양이 아니라 **온실 통로 안전 상한** — 통로 1.5m 에서 1.1m/s 는 과하다.
+    max_vx: float = 0.5              # m/s   전후
+    max_vy: float = 0.4              # m/s   좌우(게걸음). 측면은 시야가 없어 더 낮춘다
+    max_wz: float = 1.0              # rad/s 제자리 회전
+
+    # 라이다 마운트 (Base/base_link 로컬). [2] 유도 — 차체 길이 0.96m 의 앞 끝(+0.45),
+    # 높이는 차체 상면(0.30m) 바로 위. 팔이 접힌 상태에서 전방 시야를 가리지 않는 최소 높이.
+    # ⚠ 팔이 앞으로 뻗으면 스캔에 자기 팔이 잡힌다 — GPU 에서 확인 후 오프셋/각도 보정할 것.
+    lidar_offset: tuple[float, float, float] = (0.45, 0.0, 0.35)  # m
+
+    # TF 프레임/토픽 — **네임스페이스를 붙인다**. iw.hub 도 Nav2 를 켜면 프레임이 충돌하기
+    # 때문(map 만 공유, 로봇 프레임은 접두사 분리 = Nav2 다중로봇 표준 방식).
+    odom_frame: str = "harvester_0/odom"
+    base_frame: str = "harvester_0/base_link"
+    lidar_frame: str = "harvester_0/laser"
+    cmd_vel_topic: str = "/harvester_0/cmd_vel"
+    odom_topic: str = "/harvester_0/odom"
+    scan_topic: str = "/harvester_0/scan"
+
+
+@dataclass
 class CameraBridgeConfig:
     """손끝 D455 → ROS2 발행 (시뮬 토마토 이미지로 YOLO 파인튜닝).
 
@@ -597,6 +632,7 @@ class RobotConfig:
     end_effector: EndEffectorConfig = field(default_factory=EndEffectorConfig)
     assets: RobotAssetConfig = field(default_factory=RobotAssetConfig)
     iwhub_nav: IwHubNavConfig = field(default_factory=IwHubNavConfig)
+    harvester_nav: HarvesterNavConfig = field(default_factory=HarvesterNavConfig)
     camera: CameraBridgeConfig = field(default_factory=CameraBridgeConfig)
 
     # [2] 유도 — 팔은 베이스 위에 얹는다. Ridgeback 높이 0.30m (Clearpath 공식).

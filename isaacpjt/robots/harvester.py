@@ -33,6 +33,22 @@ from robots import assets
 # +180° 라야 절단점이 파지점 위 5.3cm 로 온다(2026-07-19 GPU 실측, CAD 의도 그대로).
 WRIST1_HARVEST_DEG = 180.0
 
+# [4] 시작 자세 — 에셋 기본(0°) 기준 **절대각**[deg]. USD 에 구워 Play/Stop 이 같게 한다.
+# 1번(shoulder_pan) 0 · 2번(shoulder_lift) 270 · 3번(elbow) 90 · 5번(wrist_2) −90
+# = 사용자 지정(2026-07-20).
+# 순서는 근위→원위로 둘 것 — 원위 링크를 통째로 돌리므로 순서가 바뀌면 결과가 달라진다.
+HOME_POSE_DEG = (("shoulder_pan_joint", 0.0),
+                 ("shoulder_lift_joint", 225.0),
+                 ("elbow_joint", 135.0),
+                 ("wrist_1_joint", WRIST1_HARVEST_DEG),
+                 ("wrist_2_joint", -90.0))
+# UR10e 링크 사슬(근위→원위). 조인트를 돌릴 때 그 아래 원위 링크를 전부 같이 돌린다.
+_UR_LINKS = ("shoulder_link", "upper_arm_link", "forearm_link",
+             "wrist_1_link", "wrist_2_link", "wrist_3_link", "ee_link")
+_UR_DISTAL_FROM = {"shoulder_pan_joint": 0, "shoulder_lift_joint": 1,
+                   "elbow_joint": 2, "wrist_1_joint": 3,
+                   "wrist_2_joint": 4, "wrist_3_joint": 5}
+
 CUTTER_COLOR = Gf.Vec3f(0.80, 0.82, 0.85)
 BLADE_COLOR = Gf.Vec3f(0.72, 0.76, 0.80)
 
@@ -112,6 +128,7 @@ class HarvestMM:
         self._tool0_m: Gf.Matrix4d | None = None   # 툴0(플랜지) 월드 포즈 — CAD 지그 부착 기준
         self._blade_target_attr = None             # 가동날 드라이브 목표각 attr (§5.6 ROS2 제어점)
         self._blade_shaft_w: Gf.Vec3d | None = None  # 가동날 절단점(서보축) 월드좌표 (줄기 배치용)
+        self._blade_rel: Gf.Matrix4d | None = None   # 날 사본 ← grip_base 상대포즈 (정지 중 재배치용)
 
     @property
     def root(self) -> str | None:
@@ -149,9 +166,9 @@ class HarvestMM:
                       (0.0, 0.0, self._cfg.arm_mount_z))
         # 조인트는 "만들면 붙는" 게 아니다 — 프레임을 현재 상대 포즈로 맞춰야 한다(§8).
         self._mount_arm(stage, base_path, arm_path, log)
-        # 수확자세를 USD 에 굽는다. 그리퍼·지그는 이 뒤에 tool0 월드포즈 기준으로 붙으므로
+        # 시작자세를 USD 에 굽는다. 그리퍼·지그는 이 뒤에 tool0 월드포즈 기준으로 붙으므로
         # 순서가 중요하다 (먼저 팔을 돌려 놓고 → 그 자리에 그리퍼·지그).
-        self._preset_wrist1(stage, arm_path, WRIST1_HARVEST_DEG, log)
+        self._preset_pose(stage, arm_path, log)
 
         # 그리퍼 — 팔 에셋이 제공하는 툴 소켓(ee_joint)에 물린다.
         gripper_url = assets.resolve(a.gripper, "그리퍼(Robotiq)")
@@ -204,9 +221,14 @@ class HarvestMM:
         return (Gf.Vec3f(rel.ExtractTranslation()),
                 Gf.Quatf(rel.ExtractRotationQuat()))
 
-    def _preset_wrist1(self, stage: Usd.Stage, arm_path: str, deg: float,
-                       log) -> None:
-        """수확자세(wrist_1 +180°)를 USD 링크 트랜스폼에 굽는다.
+    def _preset_pose(self, stage: Usd.Stage, arm_path: str, log) -> None:
+        """시작 자세(HOME_POSE_DEG)를 근위→원위 순서로 하나씩 굽는다."""
+        for jname, deg in HOME_POSE_DEG:
+            self._preset_joint(stage, arm_path, jname, deg, log)
+
+    def _preset_joint(self, stage: Usd.Stage, arm_path: str, jname: str,
+                      deg: float, log) -> None:
+        """조인트 하나의 각도를 USD 링크 트랜스폼에 굽는다.
 
         왜 런타임 set_joints_default_state 로는 안 되나 (2026-07-20 사용자 지적):
           정지 중엔 physics view 가 없어 `set_joint_positions` 가 경고만 내고 끝난다
@@ -217,11 +239,17 @@ class HarvestMM:
           → 링크 트랜스폼 자체를 돌려야 Play/Stop/Export 가 같은 자세가 된다.
 
         UR10e 는 링크가 flat(형제) 구조라(탐침 2026-07-20: wrist_1/2/3_link, ee_link
-        전부 /Arm 바로 아래) wrist_1 하위 링크를 조인트 축 둘레로 직접 돌린다.
+        전부 /Arm 바로 아래) 그 조인트의 원위 링크들을 조인트 축 둘레로 직접 돌린다.
         """
-        joint = stage.GetPrimAtPath(f"{arm_path}/joints/wrist_1_joint")
+        joint = stage.GetPrimAtPath(f"{arm_path}/joints/{jname}")
         if not joint.IsValid():
-            log("[Harvester] ⚠ wrist_1_joint 없음 — 수확자세 프리셋 스킵(기본자세로 뜬다)")
+            log(f"[Harvester] ⚠ {jname} 없음 — 시작자세 프리셋 스킵(기본자세로 뜬다)")
+            return
+        names = _UR_LINKS[_UR_DISTAL_FROM[jname]:]
+        distal = [stage.GetPrimAtPath(f"{arm_path}/{n}") for n in names]
+        missing = [n for n, pr in zip(names, distal) if not pr.IsValid()]
+        if missing:   # 일부만 돌리면 팔이 끊겨 보인다 — 통째로 스킵
+            log(f"[Harvester] ⚠ 링크 없음 {missing} — {jname} 프리셋 스킵")
             return
         j = UsdPhysics.Joint(joint)
         parent = stage.GetPrimAtPath(str(j.GetBody0Rel().GetTargets()[0]))
@@ -239,11 +267,9 @@ class HarvestMM:
              * Gf.Matrix4d().SetTranslate(p))
 
         # 형제라 서로 영향이 없다 — 새 월드포즈를 먼저 다 구하고 나서 쓴다.
-        distal = [stage.GetPrimAtPath(f"{arm_path}/{n}")
-                  for n in ("wrist_1_link", "wrist_2_link", "wrist_3_link", "ee_link")]
         new = [(pr, cache.GetLocalToWorldTransform(pr) * R
                 * cache.GetLocalToWorldTransform(pr.GetParent()).GetInverse())
-               for pr in distal if pr.IsValid()]
+               for pr in distal]
         for pr, m in new:
             set_pose(pr, m.ExtractTranslation(), m.ExtractRotationQuat())
 
@@ -253,7 +279,7 @@ class HarvestMM:
         js.CreatePositionAttr().Set(float(deg))
         js.CreateVelocityAttr().Set(0.0)
         UsdPhysics.DriveAPI(joint, "angular").CreateTargetPositionAttr().Set(float(deg))
-        log(f"[Harvester] 수확자세 프리셋: wrist_1 {deg:+.0f}° — USD 에 고정(Play/Stop 동일)")
+        log(f"[Harvester] 시작자세 프리셋: {jname} {deg:+.0f}° — USD 에 고정(Play/Stop 동일)")
 
     def _mount_arm(self, stage: Usd.Stage, base_path: str, arm_path: str,
                    log) -> None:
@@ -563,6 +589,45 @@ class HarvestMM:
         cam = next((p for p in cams if "Color" in p.GetName()), cams[0])
         return str(cam.GetPath())
 
+    @property
+    def chassis_path(self) -> str | None:
+        """오도메트리 기준 강체 = Ridgeback 섀시(Base/base_link). 없으면 None."""
+        return f"{self._root}/Base/base_link" if self._root else None
+
+    def attach_lidar(self, stage: Usd.Stage, offset: tuple[float, float, float],
+                     log=print) -> str | None:
+        """섀시에 2D 라이다를 붙이고 경로를 돌려준다. 실패하면 None.
+
+        iw.hub 와 달리 **찾아보지 않고 바로 만든다** — RidgebackUr 스톡 에셋에는 라이다가
+        없다(2026-07-18 Clearpath 폴더 전수 확인, settings.RobotAssetConfig 주석). 실물
+        Ridgeback 도 라이다는 옵션 장비지 기본 탑재가 아니다.
+        ★ orientation 은 **튜플이 아니라 Gf.Quatd** 여야 한다. 커맨드 내부가
+          `Gf.Rotation(orientation)` 을 호출하는데 튜플 오버로드가 없어 Boost.Python
+          ArgumentError 로 죽는다 (2026-07-20 GPU 실측). 이 함수는 예외를 삼키므로
+          틀리면 '조용히 라이다 없음' 이 된다 — 그래서 타입을 여기서 못 박는다.
+        config 는 Example_Rotary 로 생성 성공 확인(2026-07-20). 같은 날 실측으로
+          SICK_picoScan150 · RPLIDAR_S2E · OS1_REV6_128ch10hz1024res 도 생성되고,
+          Hesai_XT32_SD10 · Velodyne_VLS128 은 커맨드는 True 지만 prim 이 안 생긴다.
+        """
+        chassis = self.chassis_path
+        if not chassis or not stage.GetPrimAtPath(chassis).IsValid():
+            log("[Harvester] ⚠ 섀시(base_link) 없음 — 라이다 부착 실패")
+            return None
+        path = f"{chassis}/nav_lidar"
+        try:
+            import omni.kit.commands
+            omni.kit.commands.execute(
+                "IsaacSensorCreateRtxLidar",
+                path=path, parent=None,
+                config="Example_Rotary",
+                translation=Gf.Vec3d(*offset),
+                orientation=Gf.Quatd(1.0, 0.0, 0.0, 0.0))
+            log(f"[Harvester] RTX 라이다 생성: {path} (오프셋 {offset})")
+            return path
+        except Exception as e:
+            log(f"[Harvester] ⚠ 라이다 생성 실패 — GPU 에서 RTX 라이다 API 확인 필요: {e}")
+            return None
+
     def _add_camera_at(self, stage: Usd.Stage, cam_pos, euler, log) -> None:
         """RealSense D455 를 그리퍼 base_link 자식으로 붙인다(팔 따라감) + 로컬 rotateXYZ
         op 에 euler 를 리터럴로 박는다 — GUI 트랜스폼 패널이 이 값을 그대로 표시.
@@ -785,6 +850,9 @@ class HarvestMM:
             return Gf.Matrix4d(M.ExtractRotationMatrix().GetOrthonormalized(),
                                M.ExtractTranslation())
         M_gb = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(self._grip_base))
+        # 정지 중 재배치용 상대포즈 — sync_blade_pose() 가 매 정지 프레임 이걸로 다시 놓는다.
+        self._blade_rel = (cache.GetLocalToWorldTransform(stage.GetPrimAtPath(hinge))
+                           * M_gb.GetInverse())
         M_bl_s = cache.GetLocalToWorldTransform(asset)      # 스케일 포함(위치용)
         M_bl_r = _rigid(M_bl_s)                             # 스케일 벗김(회전용)
         J0 = Jw * M_gb.GetInverse()
@@ -810,6 +878,25 @@ class HarvestMM:
         log(f"[Harvester] 가동날 서보 힌지 부착: {hinge} (축 Y, 피벗 (0,53,132), "
             f"열림 {self.BLADE_OPEN_DEG:.0f}°~닫힘 {self.BLADE_CLOSED_DEG:.0f}°)")
         return True
+
+    def sync_blade_pose(self, stage: Usd.Stage) -> None:
+        """정지 중 가동날 사본을 현재 그리퍼 자세에 맞춰 다시 놓는다 (부착 시 상대포즈 유지).
+
+        왜 필요한가 (사용자 지적 2026-07-20): 날 사본은 강체 중첩(§8)을 피하려고 grip_base
+        **밖** 최상위에 두는데, 정지 중에는 조인트가 안 걸려 USD 에 적힌 자리에 그대로 그려진다.
+        그 자리는 attach_blade_hinge() 시점(정착 자세) 값이라, 이후 reset 으로 팔이 default_state
+        로 돌아가면 날만 남아 떠 보이고 → Play 하면 조인트가 끌어와 붙는다.
+        CadJig·D455 는 grip_base 자식이라 이 문제가 없다 — 날 사본만 손으로 따라가게 한다.
+        """
+        if self._blade_rel is None or not self._grip_base:
+            return
+        hp = stage.GetPrimAtPath(f"{self._root}_CutterBlade")
+        if not hp.IsValid():
+            return
+        cache = UsdGeom.XformCache()
+        M_gb = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(self._grip_base))
+        M_par = cache.GetParentToWorldTransform(hp)
+        _set_full_pose(hp, self._blade_rel * M_gb * M_par.GetInverse())
 
     def set_blade_deg(self, deg: float) -> None:
         """가동날 각도 명령 [deg]. ★§5.6: 나중에 ROS2 노드가 토픽 받아 이 메서드를 부른다.

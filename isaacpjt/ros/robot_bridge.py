@@ -31,9 +31,9 @@ T = {
     "SimTime": "isaacsim.core.nodes.IsaacReadSimulationTime",
     "Clock": "isaacsim.ros2.bridge.ROS2PublishClock",
     "SubStr": "isaacsim.ros2.bridge.ROS2Subscriber",       # 제네릭(String) — GPU 확인
-    # ── Nav2 노드 (⚠ 아래 타입명·속성명은 아직 create-probe 미확정) ──────────────
-    # tools/nav2_node_probe.py 를 GPU 에서 돌려 첫 [OK] 값으로 갱신할 것. graph.py 처럼
-    # 추측으로 두면 Play 때 터진다(§8). 그때까지 이 브리지는 main.py 플래그로 옵트인만.
+    # ── Nav2 노드 (2026-07-20 create-probe 로 전부 확정 — tools/nav2_node_probe.py) ──
+    # 아래 8개는 GPU 에서 실제 생성 성공한 이름이다. 같은 날 ROS2SubscribeTwist 의
+    # 출력 속성도 실측했다: outputs:linearVelocity / outputs:angularVelocity (TwistPoller).
     "SubTwist": "isaacsim.ros2.bridge.ROS2SubscribeTwist",
     "DiffCtrl": "isaacsim.robot.wheeled_robots.DifferentialController",
     "Break3": "omni.graph.nodes.BreakVector3",
@@ -173,6 +173,25 @@ def build_diff_drive(stage, graph_path: str, art_path: str,
     return nav.cmd_vel_topic
 
 
+def build_twist_sub(graph_path: str, topic: str,
+                    domain_id: int = DOMAIN_ID, log=print) -> str:
+    """/cmd_vel(Twist) 구독만 하는 그래프. 반환: Sub 노드 경로 (TwistPoller 에 넣는다).
+
+    왜 컨트롤러 노드를 안 붙이나 — Ridgeback 홀로노믹 베이스는 바퀴 조인트가 아니라
+    키네마틱 더미 3축(텔레포트)이라 DifferentialController 같은 실행 노드를 못 쓴다.
+    속도를 파이썬이 받아 적분한다(mm.py). 미확정 OmniGraph 노드도 하나 줄어든다.
+    """
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("Sub", T["SubTwist"])],
+          [("OnTick.outputs:tick", "Sub.inputs:execIn"),
+           ("Ctx.outputs:context", "Sub.inputs:context")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Sub.inputs:topicName", topic)])
+    log(f"[Nav] Twist 구독: {topic} ({graph_path}/Sub)")
+    return f"{graph_path}/Sub"
+
+
 def build_odometry(stage, graph_path: str, chassis_prim: str, nav,
                    domain_id: int = DOMAIN_ID, log=print) -> str:
     """섀시 오도메트리 → /odom 발행 + odom→base_link TF(raw). 반환: odom 토픽.
@@ -288,6 +307,35 @@ def build_camera(stage, graph_path: str, camera_prim: str, cam,
     log(f"[Camera] {cam.rgb_topic} + {cam.depth_topic} + {cam.info_topic} "
         f"({cam.width}x{cam.height}, {camera_prim})")
     return cam.rgb_topic, cam.depth_topic
+
+
+class TwistPoller:
+    """ROS2SubscribeTwist 출력 폴링 → (vx, vy, wz). 홀로노믹 베이스(Ridgeback)용.
+
+    StringPoller 와 달리 '바뀔 때만' 이 아니라 **매 프레임 현재값**을 준다 —
+    속도 명령은 상태라서, 마지막 값을 계속 적분해야 Nav2 가 의도한 궤적이 나온다.
+    ⚠ 그래서 **퍼블리셔가 죽으면 마지막 속도로 계속 흘러간다.** Nav2 는 목표 도달·취소
+    시 0 을 보내므로 정상 흐름에선 문제없지만, dev PC 쪽이 강제종료되면 Stop 을 눌러야 한다.
+    (수신 시각을 주는 출력이 없어 타임아웃 워치독을 못 단다 — GPU probe 때 확인할 것.)
+    """
+
+    def __init__(self, node_path: str):
+        self._path = node_path
+        self._lin = None
+        self._ang = None
+
+    def poll(self) -> tuple[float, float, float]:
+        if self._lin is None:
+            try:
+                self._lin = og.Controller.attribute("outputs:linearVelocity", self._path)
+                self._ang = og.Controller.attribute("outputs:angularVelocity", self._path)
+            except Exception:
+                return (0.0, 0.0, 0.0)
+        lin = og.Controller.get(self._lin)
+        ang = og.Controller.get(self._ang)
+        if lin is None or ang is None:
+            return (0.0, 0.0, 0.0)
+        return (float(lin[0]), float(lin[1]), float(ang[2]))
 
 
 class StringPoller:

@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import json
+import math
 
 import numpy as np
 
 from robot_base import Driver, ros_fail
-from robots.harvester import HarvestMM
+from robots.harvester import HOME_POSE_DEG, HarvestMM
 
 # 임시 배치 — 온실 앞마당(빈 홀 바닥, 온실 y −10 앞). 물류 동선 확정 후 조정.
 POSE = (0.0, -12.0, 0.0)
@@ -34,20 +35,27 @@ class MMDriver(Driver):
         self._base_idx = None
         self._poller = None
         self._teleop = None
+        self._stage = None
+        self._twist = None                    # /cmd_vel 폴러 (Nav2 주행)
+        self._dt = 1.0 / 60.0                 # finalize 에서 월드 실제 물리 dt 로 덮어씀
 
     def spawn(self, stage):
         self._mm.spawn(stage, self.root, POSE)
 
     def configure(self, world):
-        # 수확자세: wrist_1(4번축) +180° 를 스폰 기본자세로.
-        # 기본자세면 커터·지그가 파지점 아래(뒤집힘). +180° 라야 절단점이 파지점 위 5.3cm
-        # (2026-07-19 실측 — CAD 의도 그대로). default_state 라 Play/Stop 리셋에도 유지.
+        # 시작자세(HOME_POSE_DEG)를 아티큘레이션 기본자세로도 박는다 — Play/Stop 리셋에도 유지.
+        # ★ 대입(=)이지 누적(+=)이 아니다: spawn 의 _preset_pose 가 이미 USD 에 같은 각을
+        #   구워놨다. 거기에 또 더하면 wrist_1 이 360°(≡0°) 가 돼 Play 순간 팔이 0° 로
+        #   떨어진다(사용자 지적 2026-07-20).
         r = self.robot
         q0 = np.asarray(r.get_joint_positions(), dtype=float)
-        q0[list(r.dof_names).index("wrist_1_joint")] += np.pi
+        names = list(r.dof_names)
+        for jname, deg in HOME_POSE_DEG:
+            q0[names.index(jname)] = np.radians(deg)
         r.set_joints_default_state(positions=q0)
 
     def finalize(self, world, stage, opts):
+        self._stage = stage                      # update() 의 가동날 재배치용
         # 가동날(서보 힌지) — main 이 configure 뒤 reset+settle 했으므로 정착된 자세 기준.
         # 힌지 강체·조인트는 이 뒤 main 의 reset 에서 물리 뷰에 올라가 미리 정착한다(§8).
         self._mm.attach_blade_hinge(stage)
@@ -68,6 +76,10 @@ class MMDriver(Driver):
                 ros_fail("MM 조인트/명령 브리지")
             if opts.camera:
                 self._build_camera(stage)
+            if opts.nav_drive or opts.nav_odom or opts.nav_scan:
+                self._dt = world.get_physics_dt()
+                self._twist = build_nav(stage, self._mm,
+                                        self._cfg.robots.harvester_nav, opts)
 
         if opts.teleop:
             self._teleop = build_teleop(r, self._mm.set_blade_deg, opts.gui)
@@ -87,8 +99,13 @@ class MMDriver(Driver):
             traceback.print_exc()
 
     def update(self, is_playing):
+        if not is_playing and self._stage is not None:
+            # 정지 중엔 조인트가 안 걸린다 — 가동날 사본을 그리퍼에 손으로 붙여둔다.
+            self._mm.sync_blade_pose(self._stage)
         if self._teleop is not None:                 # 키보드 텔레옵 (재생 중에만 적용)
             self._teleop(is_playing)
+        if is_playing and self._twist is not None:   # Nav2 /cmd_vel → 홀로노믹 베이스
+            self._drive_base()
         # MM JSON 명령 (블레이드·베이스) — 재생 중에만 적용
         if is_playing and self._poller is not None:
             raw = self._poller.poll()
@@ -105,6 +122,69 @@ class MMDriver(Driver):
                         if len(b) == 3:
                             self.robot.set_joint_positions(
                                 np.array(b), joint_indices=self._base_idx)
+
+    def _drive_base(self) -> None:
+        """/cmd_vel(vx, vy, wz) 을 더미 3축에 적분해 넣는다 — 홀로노믹 베이스의 '주행'.
+
+        왜 적분인가 — 이 베이스는 속도/위치 드라이브를 무시하고 텔레포트만 먹는다
+        (2026-07-18 실측). 그래서 Isaac 이 속도를 위치로 바꿔 매 프레임 새 포즈를 찍는다.
+        vx/vy 는 **로봇 기준**(Twist 규약)이라 yaw 로 월드에 회전시켜 더한다.
+        적분 상태를 따로 안 들고 매 프레임 조인트를 읽는 이유 — Play/Stop 리셋이나 JSON
+        base 텔레포트로 조인트가 바뀌어도 자동으로 그 자리에서 이어간다(상태 두 벌 금지).
+        """
+        vx, vy, wz = self._twist.poll()
+        nav = self._cfg.robots.harvester_nav
+        vx = max(-nav.max_vx, min(nav.max_vx, vx))   # Nav2 가 상한을 어겨도 여기서 막는다
+        vy = max(-nav.max_vy, min(nav.max_vy, vy))
+        wz = max(-nav.max_wz, min(nav.max_wz, wz))
+        if vx == 0.0 and vy == 0.0 and wz == 0.0:
+            return
+        x, y, yaw = np.asarray(
+            self.robot.get_joint_positions(), dtype=float)[self._base_idx]
+        c, s = math.cos(yaw), math.sin(yaw)
+        self.robot.set_joint_positions(
+            np.array([x + (vx * c - vy * s) * self._dt,
+                      y + (vx * s + vy * c) * self._dt,
+                      yaw + wz * self._dt]),
+            joint_indices=self._base_idx)
+
+
+def build_nav(stage, mm, nav, opts):
+    """수확 MM 자율주행 그래프 — 플래그로 켠 것만. 실패해도 씬은 유지(iw.py 와 동일 방침).
+
+    반환: /cmd_vel 폴러 (nav_drive 를 안 켰으면 None).
+      drive : /harvester_0/cmd_vel 구독만. 실행(적분)은 MMDriver._drive_base 가 한다.
+      odom  : /harvester_0/odom + TF harvester_0/odom→harvester_0/base_link.
+              ⚠ 섀시가 키네마틱이라 IsaacComputeOdometry 의 **속도**는 0 으로 나올 수 있다.
+                AMCL/Nav2 가 실제로 쓰는 건 TF·위치라 주행 자체엔 문제없지만, odom twist 를
+                보고 판단하는 노드를 붙일 땐 확인할 것.
+      scan  : RTX 라이다 → /harvester_0/scan + base_link→laser TF.
+    """
+    from ros import robot_bridge as RB
+
+    poller = None
+    chassis = mm.chassis_path
+    if not chassis or not stage.GetPrimAtPath(chassis).IsValid():
+        chassis = mm.root
+    try:
+        if opts.nav_drive:
+            sub = RB.build_twist_sub("/World/HarvNav_drive", nav.cmd_vel_topic)
+            poller = RB.TwistPoller(sub)
+        if opts.nav_odom:
+            RB.build_odometry(stage, "/World/HarvNav_odom", chassis, nav)
+        if opts.nav_scan:
+            lidar = mm.attach_lidar(stage, nav.lidar_offset)
+            if lidar:
+                RB.build_tf_sensor(stage, "/World/HarvNav_tf", chassis, lidar, nav)
+                RB.build_lidar_scan(stage, "/World/HarvNav_scan", lidar, nav)
+    except Exception:
+        import traceback
+        print("\n" + "=" * 64)
+        print("[Nav] MM 그래프 생성 실패 — 씬은 유지. tools/nav2_node_probe.py 로 노드명 확인.")
+        print("=" * 64)
+        traceback.print_exc()
+        print("=" * 64 + "\n")
+    return poller
 
 
 def build_teleop(mm_robot, set_blade, gui: bool):
