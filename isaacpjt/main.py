@@ -74,7 +74,7 @@ from scene.greenhouse_task import GreenhouseTask
 # 로봇 임시 배치 — 온실 앞마당(빈 홀 바닥, 온실 y −10 앞). 물류 동선 확정 후 조정.
 ROBOT_POSE = {
     "harvester": (0.0, -12.0, 0.0),
-    "forklift": (-2.5, -12.0, 0.0),
+    "forklift": (0.0, 15.5, 0.0),    # 창고 안(입구 지나 개활부) — 랙 적재 담당 (2026-07-20)
     "iwhub": (2.0, -12.0, 0.0),
 }
 MM_BASE_JOINTS = ("dummy_base_prismatic_x_joint",

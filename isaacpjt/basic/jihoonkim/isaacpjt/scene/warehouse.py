@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom, UsdShade
 
 from pjt_config.settings import WarehouseConfig
 from scene import physics
@@ -28,6 +28,7 @@ SLOT_COLOR = Gf.Vec3f(0.30, 0.45, 0.70)
 GUIDE_COLOR = Gf.Vec3f(0.85, 0.65, 0.15)
 FRAME_COLOR = Gf.Vec3f(0.82, 0.82, 0.84)    # 랙 골조 (밝은 회백)
 SHELF_COLOR = Gf.Vec3f(0.55, 0.56, 0.58)    # 선반 (강판 회색)
+KLT_COLOR = Gf.Vec3f(0.60, 0.28, 0.62)      # KLT 크레이트 색 박스(무거운 USD 대체) — 보라(원래 KLT 색)
 
 # 슬롯(선반 한 칸) 치수 — 나무 팔레트(EUR)를 통째로 올린다(물류 루프 2026-07-19:
 #   지게차가 팔레트째 랙에 적재). 팔레트 실측 1.213×0.802m 를 담게 여유를 준다.
@@ -44,8 +45,8 @@ KLT_SIZE = (0.297, 0.198, 0.146)      # m. small_KLT (긴 축을 X 로 놓음)
 # 팔레트/KLT USD 피벗이 '중심'이라 가정하고 지지면 위에 앉힌다(중심을 반높이만큼 올림).
 # 사용자 보고(2026-07-20): KLT 가 팔레트에 박혀 있었다 = 피벗이 중심인데 안 올렸던 것.
 # GPU 확인 결과 바닥 피벗이면 해당 값을 0 으로 바꾸면 된다(둘 다 독립).
-PALLET_PIVOT_Z = PALLET_SIZE[2] / 2.0
-KLT_PIVOT_Z = KLT_SIZE[2] / 2.0
+PALLET_PIVOT_Z = 0.0                   # 팔레트 USD 피벗=바닥(실측: 안 그러면 KLT 가 팔레트에 박힘)
+KLT_PIVOT_Z = KLT_SIZE[2] / 2.0        # KLT 는 내가 만드는 큐브(피벗=중심) → 반높이 올림
 
 # 랙 골조 치수 — 시각/충돌용 구조물. 슬롯 좌표(=하역 목표)에는 BASE_Z 만 영향.
 BASE_Z = 0.35        # m. 1단 선반 높이. ForkliftB 포크 하한(-0.15m, 실측)보다 위 [2]
@@ -180,7 +181,7 @@ class Warehouse:
         """
         from isaacsim.core.utils.stage import add_reference_to_stage
 
-        from pjt_utils.xform import set_pose
+        from pjt_utils.xform import set_pose, set_scale
         from robots import assets
         try:
             pallet_url = assets.resolve(PALLET_USD, "나무 팔레트(EUR)")
@@ -190,47 +191,54 @@ class Warehouse:
         try:
             klt_url = assets.resolve(CRATE_USD, "KLT 빈")
         except FileNotFoundError:
-            klt_url = None      # 팔레트만 얹고 넘어간다
-
-        for s in self._slots:                    # 활성 슬롯(뒷벽): 팔레트 + KLT 8개
-            self._place_pallet(stage, add_reference_to_stage, set_pose,
+            klt_url = None      # 팔레트만 얹는다
+        for s in self._slots:                    # 활성 슬롯(뒷벽): 팔레트 + 실제 KLT 빈
+            self._place_pallet(stage, add_reference_to_stage, set_pose, set_scale,
                                f"{self._root}/Pallet_{s['index']:02d}", s["local"],
                                pallet_url, klt_url, yaw=0.0)
-        for j, (dx, dy, dz, dyaw) in enumerate(self._decor):   # 장식(뒷벽+좌우벽) 전부 채움
-            self._place_pallet(stage, add_reference_to_stage, set_pose,
+        for j, (dx, dy, dz, dyaw) in enumerate(self._decor):   # 장식(뒷벽+좌우벽)
+            self._place_pallet(stage, add_reference_to_stage, set_pose, set_scale,
                                f"{self._root}/Decor_{j:02d}", (dx, dy, dz),
                                pallet_url, klt_url, yaw=dyaw)
-        log(f"[Warehouse] 팔레트 {len(self._slots) + len(self._decor)}개(전부 KLT 8) 적재 "
-            f"(활성 {len(self._slots)}+장식 {len(self._decor)}, 3면 랙 — "
-            f"할당은 ROS2, 피벗 보정 상수는 GPU 확인)")
+        log(f"[Warehouse] 팔레트 {len(self._slots) + len(self._decor)}개 + 실제 KLT 8/팔레트 "
+            f"(활성 {len(self._slots)}+장식 {len(self._decor)}, 3면 랙 — 할당은 ROS2)")
 
-    def _place_pallet(self, stage, add_ref, set_ps, path, local,
+    def _place_pallet(self, stage, add_ref, set_ps, set_sc, path, local,
                       pallet_url, klt_url, yaw: float = 0.0) -> None:
-        """슬롯/선반 로컬 좌표에 팔레트 1개 + 위에 KLT 8개(4×2).
+        """선반 로컬 좌표에 나무 팔레트(USD) 1개 + 위에 실제 KLT 빈 8개(4×2, 간격 벌림).
 
-        yaw(도)로 팔레트를 눕힌다(측벽 랙은 90° → KLT 격자도 같이 회전). KLT 는 팔레트 prim
-        의 자식이 아니라 root 밑 형제로 둔다(팔레트 xform·스케일 오염 회피).
-        높이: 지지면 위에 팔레트가 앉고(PALLET_PIVOT_Z), KLT 는 팔레트 윗면에 앉는다(KLT_PIVOT_Z).
+        KLT 는 실제 에셋(빈 모양)이되 텍스처 머티리얼을 벗기고 displayColor 로 칠한다 —
+        텍스처째 넣으면 재질 예산이 밀려 식물 색이 죽었다(2026-07-20). yaw 로 팔레트·KLT 를
+        같이 눕힌다(측벽 90°). 높이: 팔레트는 지지면 위(피벗=바닥), KLT 는 팔레트 윗면
+        (피벗=중심 → 반높이 올림).
         """
         lx, ly, lz = local
-        support = lz + SLOT_SIZE[2] / 2.0 + 0.005            # 판/선반 윗면(지지면)
+        support = lz - SLOT_SIZE[2] / 2.0 + 0.002            # 랙 선반 윗면 = 팔레트가 직접 앉는 면
         quat = self._yaw_quat(yaw)
         add_ref(pallet_url, path)
         set_ps(stage.GetPrimAtPath(path), (lx, ly, support + PALLET_PIVOT_Z), quat)
         if not klt_url:
             return
-        kz = support + PALLET_SIZE[2] + KLT_PIVOT_Z          # 팔레트 윗면 + KLT 반높이
+        klt_scale = 0.85                                     # 살짝 줄여 8개가 붙지 않고 구분되게
+        kz = support + PALLET_SIZE[2] + KLT_SIZE[2] * klt_scale / 2.0   # 팔레트 윗면에 앉게
         nx, ny = 4, 2                                        # 4×2 = 8개
-        px, py = KLT_SIZE[0], KLT_SIZE[1]
+        pitx, pity = 0.31, 0.25                              # 간격 벌려 붙어보이지 않게(길이 4·폭 2)
         c, s = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
         for ix in range(nx):
             for iy in range(ny):
-                ox = (ix - (nx - 1) / 2.0) * px              # 팔레트 로컬 격자 오프셋
-                oy = (iy - (ny - 1) / 2.0) * py
+                ox = (ix - (nx - 1) / 2.0) * pitx            # 팔레트 로컬 격자 오프셋
+                oy = (iy - (ny - 1) / 2.0) * pity
                 kp = f"{path}_KLT_{ix}{iy}"
                 add_ref(klt_url, kp)
-                set_ps(stage.GetPrimAtPath(kp),
-                       (lx + ox * c - oy * s, ly + ox * s + oy * c, kz), quat)
+                kprim = stage.GetPrimAtPath(kp)
+                set_ps(kprim, (lx + ox * c - oy * s, ly + ox * s + oy * c, kz), quat)
+                set_sc(kprim, klt_scale)                     # 실제 KLT 를 살짝 축소
+                # 에셋의 무거운 텍스처 머티리얼을 벗기고 displayColor 로 칠한다.
+                # 실제 KLT 를 텍스처째 넣으면 재질 예산이 밀려 식물 색이 죽었다(2026-07-20).
+                for m in Usd.PrimRange(kprim):
+                    if m.IsA(UsdGeom.Mesh):
+                        UsdShade.MaterialBindingAPI(m).UnbindAllBindings()
+                        UsdGeom.Gprim(m).CreateDisplayColorAttr([KLT_COLOR])
 
     @staticmethod
     def _yaw_quat(deg: float) -> Gf.Quatd:
@@ -312,14 +320,12 @@ class Warehouse:
                           (0.0, rack_y, shelf_z),
                           (width + POST_T, RACK_DEPTH, 0.05), SHELF_COLOR)
 
-        # 상단 보 (앞뒤) + 간판 패널
+        # 상단 보 (앞뒤) — 기둥 맨 위를 잇는 연결보. 구조상 유지(사용자 정정 2026-07-20).
         for side, dy in (("F", -RACK_DEPTH / 2.0), ("B", RACK_DEPTH / 2.0)):
             self._add_box(stage, f"{frame}/TopBeam_{side}",
                           (0.0, rack_y + dy, post_h),
                           (width + POST_T, POST_T, POST_T), FRAME_COLOR)
-        self._add_box(stage, f"{frame}/Header",
-                      (0.0, rack_y, post_h + 0.28),
-                      (width * 0.9, 0.05, 0.35), Gf.Vec3f(0.95, 0.95, 0.95))
+        # 간판 패널(Header)은 제거 — 연결보 위에 0.28m 떠 있어 공중에 뜬 걸로 보였음(사용자 지적).
 
     def _build_side_rack(self, stage: Usd.Stage, root: str, sign: int) -> None:
         """좌(-1)/우(+1) 벽에 장식 랙(골조+선반)과 팔레트(90° 회전) 위치를 만든다.
@@ -353,7 +359,7 @@ class Warehouse:
             self._add_box(stage, f"{frame}/Shelf_{lvl}",
                           (rack_x, 0.0, shelf_z),
                           (RACK_DEPTH, width + POST_T, 0.05), SHELF_COLOR)
-        # 상단 보
+        # 상단 보 (앞뒤) — 기둥 맨 위를 잇는 연결보. 구조상 유지(사용자 정정 2026-07-20).
         for s2, dx in (("A", -RACK_DEPTH / 2.0), ("B", RACK_DEPTH / 2.0)):
             self._add_box(stage, f"{frame}/TopBeam_{s2}",
                           (rack_x + dx, 0.0, post_h),
@@ -378,28 +384,13 @@ class Warehouse:
 
     def _add_slot(self, stage: Usd.Stage, path: str,
                   pos: tuple[float, float, float]) -> None:
-        """슬롯 바닥판 + 포크 삽입 가이드.
+        """슬롯 = 위치 마커(Xform)만. 실제 지지는 랙 선반이 한다.
 
-        가이드(테이퍼)를 두는 이유 — v3 10장이 "포크 삽입 정렬 오차" 를 **새로운
-        리스크**로 지목했다. 물리 가이드가 있으면 정렬 요구 정밀도가 내려간다.
+        예전엔 여기 파란 바닥판(SLOT_COLOR) + 포크 가이드를 뒀으나(포크 드롭 타깃), 팔레트가
+        랙 선반에 직접 얹히면서 시각·기능이 겹쳐 제거했다(2026-07-20 사용자 지적: 팔레트 밑
+        파란 박스 불필요). 위치는 self._slots 딕셔너리에 남아 ROS2(warehouse_manager)가
+        하역 타깃으로 쓴다 — Isaac 은 위치만, 정책은 ROS2(§5.6).
         """
-        plate = UsdGeom.Cube.Define(stage, path)
-        plate.CreateSizeAttr(1.0)
-        plate.CreateDisplayColorAttr([SLOT_COLOR])
-        xf = UsdGeom.Xformable(plate.GetPrim())
-        xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
-        xf.AddScaleOp().Set(Gf.Vec3f(*SLOT_SIZE))
-        physics.add_shape_collider(plate.GetPrim())
-
-        # 좌우(±X) 가이드 — 팔레트 폭을 슬롯 중앙으로 유도한다. 깊이(Y) 방향은 비워
-        # 포크가 앞(-Y)에서 팔레트 밑으로 들어오는 길을 막지 않는다.
-        for side, sign in (("L", -1.0), ("R", 1.0)):
-            g = UsdGeom.Cube.Define(stage, f"{path}/Guide_{side}")
-            g.CreateSizeAttr(1.0)
-            g.CreateDisplayColorAttr([GUIDE_COLOR])
-            gxf = UsdGeom.Xformable(g.GetPrim())
-            gxf.AddTranslateOp().Set(
-                Gf.Vec3d(pos[0] + sign * SLOT_SIZE[0] / 2.0, pos[1],
-                         pos[2] + 0.04))
-            gxf.AddScaleOp().Set(Gf.Vec3f(0.01, SLOT_SIZE[1], 0.05))
-            physics.add_shape_collider(g.GetPrim())
+        UsdGeom.Xform.Define(stage, path)
+        UsdGeom.Xformable(stage.GetPrimAtPath(path)).AddTranslateOp().Set(
+            Gf.Vec3d(*pos))

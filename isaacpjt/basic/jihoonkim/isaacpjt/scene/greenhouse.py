@@ -33,15 +33,8 @@ class Greenhouse:
                 self._add_beam(stage, f"{root}/Post_{side}_{i:02d}",
                                center=(x, y, c.height / 2.0), size=(t, t, c.height))
 
-        # 길이 방향 상단 보 (양쪽)
-        for side, x in (("L", -half_w), ("R", half_w)):
-            self._add_beam(stage, f"{root}/TopBeam_{side}",
-                           center=(x, 0.0, c.height), size=(t, c.length + t, t))
-
-        # 폭 방향 크로스 보 (기둥 위치마다)
-        for i, y in enumerate(ys):
-            self._add_beam(stage, f"{root}/CrossBeam_{i:02d}",
-                           center=(0.0, y, c.height), size=(c.width + t, t, t))
+        # 상단 보(TopBeam)·크로스 보(CrossBeam) 제거 — 위에서 내려다볼 때 시야를 가려
+        # 안 보기 좋음(사용자 요청 2026-07-20). 기둥+유리벽만 남긴다(구조·충돌 유지).
 
         # 유리 패널 — 시각 전용 (콜라이더 없음. 로봇 차단은 골조/베드가 담당)
         # 지붕은 안 덮는다 — 시연을 위에서 내려다보는 게 우선 (사용자 결정 2026-07-18).
