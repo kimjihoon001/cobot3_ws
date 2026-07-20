@@ -1,9 +1,13 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 
 from smartfarm_interfaces.msg import TomatoDetection, TomatoDetectionArray
+
+# 팀 컨벤션(day2/color_detector_node.py): 이미지는 최신 한 장만, 밀리면 버린다.
+# 기본 QoS(RELIABLE, depth 10)로 두면 처리 지연 시 DDS가 프레임을 쌓아 묵은 프레임을 보게 됨.
+IMAGE_QOS = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.BEST_EFFORT)
 
 
 class VisionNode(Node):
@@ -11,6 +15,10 @@ class VisionNode(Node):
         """eye-in-hand RGB-D에서 토마토를 검출해 /vision/tomato_detections로 발행 (초안: 검출 로직 TODO)"""
         super().__init__("vision_node")
 
+        # [4] 임의: isaacpjt/ros/robot_bridge.py에는 아직 harvester_0 카메라 브리지가
+        # 없음(joint_command/joint_states/String만 배선됨) — /rgb,/depth는 팀이 day1~2에서
+        # 검증한 이름을 그대로 기본값으로 둠. 카메라 그래프가 실제로 붙을 때
+        # /harvester_0/rgb 처럼 네임스페이스가 바뀔 수 있어 파라미터로 뺐다.
         self.declare_parameter("rgb_topic", "/rgb")
         self.declare_parameter("depth_topic", "/depth")
         self.declare_parameter("model_path", "")  # YOLO 학습 가중치(.pt) 경로
@@ -19,8 +27,8 @@ class VisionNode(Node):
         self._depth_topic = self.get_parameter("depth_topic").value
         self._model_path = self.get_parameter("model_path").value
 
-        self.create_subscription(Image, self._rgb_topic, self._rgb_callback, qos_profile_sensor_data)
-        self.create_subscription(Image, self._depth_topic, self._depth_callback, qos_profile_sensor_data)
+        self.create_subscription(Image, self._rgb_topic, self._rgb_callback, IMAGE_QOS)
+        self.create_subscription(Image, self._depth_topic, self._depth_callback, IMAGE_QOS)
 
         self._detections_pub = self.create_publisher(TomatoDetectionArray, "/vision/tomato_detections", 10)
 

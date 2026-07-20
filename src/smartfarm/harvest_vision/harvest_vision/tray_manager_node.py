@@ -6,10 +6,13 @@ from std_msgs.msg import Int32
 
 from smartfarm_interfaces.msg import TrayStatus, TransportRequest
 
-# FR9: 트레이는 시작 시 50%(3개) 사전 적재, 추가 2~3개 수확 시 만재 간주 -> 운반 요청
+# 브리핑 문서 FR9는 "시작 시 50%(3개) 사전 적재"였지만, 실제 프로젝트 설정
+# (isaacpjt/pjt_config/settings.py TrayConfig)은 preloaded=0으로 확정돼 있다 —
+# "사전 적재는 측정 안 한 구간을 성공으로 세는 것 -> 정량 검증엔 0이 유일하게 정합적"이라는 이유.
+# capacity=6은 두 문서가 일치. 아래는 그 결정을 따름.
 CAPACITY = 6
-INITIAL_FILLED = 3
-TRANSPORT_TRIGGER_FILLED = 5  # TODO: 2~3개 중 정확한 임계값은 트랙 B와 협의 확정
+INITIAL_FILLED = 0
+TRANSPORT_TRIGGER_FILLED = CAPACITY  # TODO: 부분 적재 시점에 운반을 트리거할지는 트랙 B와 협의 필요 (지금은 만재 기준)
 
 
 class TrayManagerNode(Node):
