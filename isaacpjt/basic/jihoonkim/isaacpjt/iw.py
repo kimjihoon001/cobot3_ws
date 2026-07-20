@@ -51,7 +51,7 @@ def build_nav(stage, iw, art_path: str, nav, opts) -> None:
     """
     from ros import robot_bridge as RB
 
-    base = f"{iw.root}/base_link"
+    base = f"{iw.root}/chassis"          # 움직이는 섀시 링크(정지 컨테이너 아님) — TF·라이다 부모
     chassis = base if stage.GetPrimAtPath(base).IsValid() else art_path
     try:
         if opts.nav_drive:
@@ -60,10 +60,14 @@ def build_nav(stage, iw, art_path: str, nav, opts) -> None:
         if opts.nav_odom:
             RB.build_odometry(stage, "/World/Nav_odom", chassis, nav)
         if opts.nav_scan:
-            lidar = iw.attach_lidar(stage, nav.lidar_offset)
-            if lidar:
-                RB.build_tf_sensor(stage, "/World/Nav_tf", chassis, lidar, nav)
-                RB.build_lidar_scan(stage, "/World/Nav_scan", lidar, nav)
+            for m in nav.lidars:                      # 앞/뒤 라이다 각 1기 → /scan + TF
+                res = iw.attach_lidar(stage, m)
+                if res:
+                    lidar_prim, rp = res              # (라이다 prim, 렌더프로덕트)
+                    RB.build_tf_sensor_iw(stage, f"/World/Nav_tf_{m.name}",
+                                       chassis, lidar_prim, nav, m.frame)
+                    RB.build_lidar_scan_iw(stage, f"/World/Nav_scan_{m.name}",
+                                        rp, m.scan_topic, m.frame)
     except Exception:
         import traceback
         print("\n" + "=" * 64)

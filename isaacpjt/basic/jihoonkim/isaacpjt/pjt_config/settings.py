@@ -536,6 +536,21 @@ class RobotAssetConfig:
 
 
 @dataclass
+class LidarMount:
+    """iw.hub 안전 라이다 1기 마운트 (base_link 로컬).
+
+    앞/뒤 2기가 각자 270°(차체가 후방을 자기 가림)로 겹쳐 360° 를 커버한다 — 실물 AMR
+    안전스캐너 배치 방식(데크 페이로드가 상단을 가리므로 양끝/코너에 낮게 단다).
+    prim 이름 = frame 으로 지어 TF child 프레임과 LaserScan frame_id 가 일치하게 한다.
+    """
+    name: str                              # 그래프 경로 접미사 (front/back)
+    offset: tuple[float, float, float]     # base_link 로컬 마운트 (m)
+    yaw_deg: float                         # 정면 방향 (앞=0=+X, 뒤=180=−X)
+    frame: str                             # TF 프레임 id = prim 이름 (laser_front/back)
+    scan_topic: str                        # LaserScan 토픽 (/scan_front, /scan_back)
+
+
+@dataclass
 class IwHubNavConfig:
     """iw.hub 자율주행(Nav2) 파라미터 — 차동구동·오도메트리·라이다.
 
@@ -545,20 +560,25 @@ class IwHubNavConfig:
     """
     # 차동구동(DifferentialController). 틀리면 주행속도·회전이 스케일만 어긋난다(움직이긴 함)
     #   → odom 정확도에 직접 영향. iw.hub 바퀴를 GPU 에서 재서 [3]/[2] 로 올릴 것.
-    wheel_radius: float = 0.1        # m   TODO 근거 없음 — iw.hub 구동륜 반지름 실측
-    wheel_base: float = 0.5          # m   TODO 근거 없음 — 좌우 구동륜 간격(트랙폭) 실측
+    wheel_radius: float = 0.0771     # m [2] odom 캘리브(calib.py 2026-07-20 실주행) — 실효 rolling
+    wheel_base: float = 0.576        # m [2] 회전 캘리브 실효 트랙폭 (기하 0.5792 아님)
     max_linear_speed: float = 1.0    # m/s   [4] 임의 (안전 상한)
     max_angular_speed: float = 1.5   # rad/s [4] 임의
 
-    # 라이다 마운트 (base_link 로컬). [4] 임의 — 차체 앞 상단 가정. GPU 에서 실측.
-    lidar_offset: tuple[float, float, float] = (0.3, 0.0, 0.3)  # m TODO 근거 없음
+    # 안전 라이다 2기 — 앞/뒤 양끝, 데크(~0.25m) 아래 낮게(페이로드 미간섭), 각 270°(차체가
+    # 자기 후방을 가림)로 겹쳐 360°. 실물 AMR 방식이라 §5.5 근거가 선다(배치 패턴 = 산업 표준).
+    #   x=±0.6: iw.hub 길이 1431mm(실측·아래 assets 주석) → 반길이 0.72m 안쪽 앞/뒤 끝 [2].
+    #   z=0.15: 안전스캐너 통상 높이 [3]. yaw: 기하 [2].
+    #   ⚠ base_link 원점 위치·정확 오프셋과 RTX 라이다 생성 API 는 GPU 실측/probe 보정(§8).
+    lidars: tuple[LidarMount, ...] = (
+        LidarMount("front", (0.6, 0.0, 0.15), 0.0, "laser_front", "/scan_front"),
+        LidarMount("back", (-0.6, 0.0, 0.15), 180.0, "laser_back", "/scan_back"),
+    )
     # TF 프레임/토픽 (단일 로봇이라 네임스페이스 없이 Nav2 기본명)
     odom_frame: str = "odom"
     base_frame: str = "base_link"
-    lidar_frame: str = "laser"
     cmd_vel_topic: str = "/cmd_vel"
     odom_topic: str = "/odom"
-    scan_topic: str = "/scan"
 
 
 @dataclass

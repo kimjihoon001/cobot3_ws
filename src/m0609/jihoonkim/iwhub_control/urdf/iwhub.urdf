@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<!-- iw.hub 적재 상태 시각/충돌 모델 — RViz RobotModel 로 실제 크기를 보이게 한다.
+     치수 실측(2026-07-21, Isaac USD bbox, measure_deck.py):
+       · 몸체 1.431 × 0.659 × 0.231 m
+       · 데크 적재(팔레트+KLT+토마토) 1.2 × 0.8 × 0.32 m, 데크 상단 z=0.195 위
+     ⚠ Nav2 costmap 은 이 URDF 에서 footprint 를 자동으로 읽지 않는다 —
+        footprint 는 nav2_params.yaml 에 별도로 준다(1.5×0.84 사각형).
+     ⚠ laser_front/back 프레임은 Isaac(ros/robot_bridge) 이 chassis 밑으로 내므로
+        여기 넣지 않는다(한 프레임에 부모 둘이면 TF 충돌). -->
+<robot name="iwhub">
+
+  <!-- 로봇 몸체. base_link = 바닥투영 중심(odom→base_link 가 여기로 옴). -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.1155" rpy="0 0 0"/>
+      <geometry><box size="1.431 0.659 0.231"/></geometry>
+      <material name="iw_body"><color rgba="0.15 0.35 0.60 0.50"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.1155" rpy="0 0 0"/>
+      <geometry><box size="1.431 0.659 0.231"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 데크 적재물(팔레트+KLT+토마토) — 실제 로봇이 얼마나 넓은지(폭 0.8) 보이게. -->
+  <link name="deck_cargo">
+    <visual>
+      <origin xyz="0 0 0.16" rpy="0 0 0"/>
+      <geometry><box size="1.2 0.8 0.32"/></geometry>
+      <material name="cargo"><color rgba="0.60 0.40 0.20 0.50"/></material>
+    </visual>
+  </link>
+  <joint name="deck_cargo_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="deck_cargo"/>
+    <origin xyz="0 0 0.195" rpy="0 0 0"/>
+  </joint>
+
+</robot>

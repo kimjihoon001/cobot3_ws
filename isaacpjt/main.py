@@ -108,8 +108,10 @@ if not NO_ROS:
     # 브리지 확장은 그래프 생성 전에 켜야 한다 (tools/iwhub_bridge_check.py 검증 순서)
     # omni.graph.bundle/window.action = OmniGraph 액션 노드 안정화(팀원 hyeonminlee 확인, 2026-07-20)
     from isaacsim.core.utils.extensions import enable_extension
+    # sensors.rtx + replicator: iw.hub RTX 라이다(LidarRtx)·렌더프로덕트 생성용(--nav-scan).
     for _ext in ("isaacsim.core.nodes", "isaacsim.ros2.bridge",
-                 "omni.graph.bundle.action", "omni.graph.window.action"):
+                 "omni.graph.bundle.action", "omni.graph.window.action",
+                 "isaacsim.sensors.rtx", "omni.replicator.core"):
         enable_extension(_ext)
     for _ in range(20):
         simulation_app.update()

@@ -1,46 +1,12 @@
-# iw.hub Nav2 파라미터 (ROS2 Humble). 위치추정 = AMCL(정적 맵 + 라이다 매칭).
-#   맵 = maps/greenhouse.pgm (씬 벽·랙을 라이다 높이에서 래스터화, 불투명 벽 전제).
-# ★ 스캔 2기: 코스트맵 obstacle_layer 가 /scan_front + /scan_back 둘 다 관측소스로 쓴다.
-#   AMCL 은 스캔 1개(/scan_front)로 맵 매칭. use_sim_time: Isaac /clock → 전부 true.
-# TF: map(amcl)→odom(base_node)→base_link→laser_front/back(Isaac).
-
-amcl:
-  ros__parameters:
-    use_sim_time: true
-    base_frame_id: "base_link"
-    odom_frame_id: "odom"
-    global_frame_id: "map"
-    scan_topic: /scan_front
-    set_initial_pose: true                 # 로봇 스폰 위치(2,-12) 를 초기 포즈로
-    initial_pose: {x: 2.0, y: -12.0, z: 0.0, yaw: 0.0}
-    laser_model_type: "likelihood_field"
-    max_beams: 120
-    min_particles: 500
-    max_particles: 2000
-    laser_max_range: 100.0
-    laser_min_range: 1.0                    # 라이다 range_min 과 일치(Example_Rotary_2D)
-    update_min_a: 0.2
-    update_min_d: 0.25
-    resample_interval: 1
-    transform_tolerance: 1.0
-    alpha1: 0.2
-    alpha2: 0.2
-    alpha3: 0.2
-    alpha4: 0.2
-    z_hit: 0.5
-    z_rand: 0.5
-    sigma_hit: 0.2
-    tf_broadcast: true
-
-map_server:
-  ros__parameters:
-    use_sim_time: true
-    yaml_filename: ""                       # launch 에서 map 인자로 채움
+# iw.hub Nav2 파라미터 — odom-only 모드 (맵/AMCL 없음. 반복 온실의 aliasing 회피).
+#   시뮬 odom 은 슬립이 없어 거의 정확 → 전역 맵 없이 롤링 코스트맵 + odom 으로 주행.
+#   global_frame = odom, static_layer 없음. 스캔 2기로 장애물 회피. use_sim_time = true.
+#   TF: odom(base_node)→base_link→laser_front/back(Isaac). map 프레임 안 씀.
 
 bt_navigator:
   ros__parameters:
     use_sim_time: true
-    global_frame: map
+    global_frame: odom
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 10
@@ -67,7 +33,6 @@ controller_server:
       stateful: true
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: true
       min_vel_x: 0.0
       max_vel_x: 0.5
       max_vel_theta: 1.0
@@ -82,11 +47,9 @@ controller_server:
       vtheta_samples: 20
       sim_time: 1.7
       transform_tolerance: 0.2
-      # ★ ObstacleFootprint = 로봇 '몸통 외곽선 전체'를 장애물과 대조(충돌 경로는 무효처리).
-      #   BaseObstacle 은 '중심점 한 칸'만 봐서 몸통이 벽을 뚫는다(=점 취급, 2026-07-21 사용자 지적).
-      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign",
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
                 "PathAlign", "PathDist", "GoalDist"]
-      ObstacleFootprint.scale: 0.5
+      BaseObstacle.scale: 0.02
       PathAlign.scale: 32.0
       GoalAlign.scale: 24.0
       PathDist.scale: 32.0
@@ -99,24 +62,18 @@ local_costmap:
       use_sim_time: true
       update_frequency: 5.0
       publish_frequency: 2.0
-      global_frame: map              # static_layer 정렬 위해 map 프레임(전역 costmap 과 동일)
+      global_frame: odom
       robot_base_frame: base_link
       rolling_window: true
       width: 6
       height: 6
       resolution: 0.05
-      # ★ 로봇 크기는 URDF 가 없으면 TF 로 안 알려진다 — Nav2 는 이 footprint 로만 안다.
-      #   적재 실측: iw.hub 몸체 1.431×0.659 + 데크 팔레트 1.2×0.8 → 합산 1.5×0.84m.
-      #   base_link(중심) 기준 ±0.75(x,길이)×±0.42(y,폭). robot_radius 0.35(점/원)로는
-      #   팔레트 오버행을 못 담아 "이미 피했다" 착각→처박음(2026-07-21 사용자 지적).
+      # ★ 로봇 크기는 URDF 가 없어 TF 로 안 알려진다 — Nav2 는 오직 이 footprint 로만 안다.
+      #   적재 상태 실측 크기: iw.hub 몸체 1.431×0.659 + 데크 팔레트 1.2×0.8 → 합산 1.5×0.84m.
+      #   base_link(로봇 중심) 기준 반치수 ±0.75(길이,x) × ±0.42(폭,y). robot_radius 로는
+      #   팔레트 오버행을 못 담아 좁은 길로 계획→처박음(2026-07-21 사용자 지적).
       footprint: "[[0.75, 0.42], [0.75, -0.42], [-0.75, -0.42], [-0.75, 0.42]]"
-      # ★ static_layer 를 로컬 costmap 에도 넣는다 — 컨트롤러(DWB)가 쓰는 건 로컬 costmap 인데,
-      #   라이다만 있으면 못 본 벽을 그냥 뚫고 간다("장애물 통과", 2026-07-21 사용자 지적).
-      #   정적맵을 넣으면 컨트롤러가 매핑된 벽을 항상 알고 ObstacleFootprint 로 못 뚫는다.
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: true
+      plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -126,7 +83,6 @@ local_costmap:
           data_type: "LaserScan"
           marking: true
           clearing: true
-          max_obstacle_height: 2.0
           obstacle_max_range: 20.0
           raytrace_max_range: 25.0
         scan_back:
@@ -134,13 +90,12 @@ local_costmap:
           data_type: "LaserScan"
           marking: true
           clearing: true
-          max_obstacle_height: 2.0
           obstacle_max_range: 20.0
           raytrace_max_range: 25.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0
-        inflation_radius: 0.1
+        inflation_radius: 0.2
 
 global_costmap:
   global_costmap:
@@ -148,19 +103,19 @@ global_costmap:
       use_sim_time: true
       update_frequency: 1.0
       publish_frequency: 1.0
-      global_frame: map
+      global_frame: odom
       robot_base_frame: base_link
-      # ★ 로봇 크기는 URDF 가 없으면 TF 로 안 알려진다 — Nav2 는 이 footprint 로만 안다.
-      #   적재 실측: iw.hub 몸체 1.431×0.659 + 데크 팔레트 1.2×0.8 → 합산 1.5×0.84m.
-      #   base_link(중심) 기준 ±0.75(x,길이)×±0.42(y,폭). robot_radius 0.35(점/원)로는
-      #   팔레트 오버행을 못 담아 "이미 피했다" 착각→처박음(2026-07-21 사용자 지적).
-      footprint: "[[0.75, 0.42], [0.75, -0.42], [-0.75, -0.42], [-0.75, 0.42]]"
+      rolling_window: true          # 맵 없음 → 로봇 중심 롤링 창으로 계획
+      width: 40
+      height: 40
       resolution: 0.05
-      track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: true
+      # ★ 로봇 크기는 URDF 가 없어 TF 로 안 알려진다 — Nav2 는 오직 이 footprint 로만 안다.
+      #   적재 상태 실측 크기: iw.hub 몸체 1.431×0.659 + 데크 팔레트 1.2×0.8 → 합산 1.5×0.84m.
+      #   base_link(로봇 중심) 기준 반치수 ±0.75(길이,x) × ±0.42(폭,y). robot_radius 로는
+      #   팔레트 오버행을 못 담아 좁은 길로 계획→처박음(2026-07-21 사용자 지적).
+      footprint: "[[0.75, 0.42], [0.75, -0.42], [-0.75, -0.42], [-0.75, 0.42]]"
+      track_unknown_space: false    # 미탐색을 free 로 → 롤링 창 내 계획 가능
+      plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -182,7 +137,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0
-        inflation_radius: 0.1
+        inflation_radius: 0.2
 
 planner_server:
   ros__parameters:

@@ -77,8 +77,10 @@ class Greenhouse:
                    size: tuple[float, float, float]) -> None:
         pane = UsdGeom.Cube.Define(stage, path)
         pane.CreateSizeAttr(1.0)
-        pane.CreateDisplayColorAttr([Gf.Vec3f(0.72, 0.83, 0.90)])
-        pane.CreateDisplayOpacityAttr([0.06])   # RTX 에서 0.12 는 흰 벽처럼 보였다
+        pane.CreateDisplayColorAttr([Gf.Vec3f(0.80, 0.85, 0.90)])
+        # 불투명 벽 — RTX 라이다가 관통 못 하게(AMCL 이 벽을 봐야 스캔↔맵 매칭됨, 2026-07-20).
+        # 지붕은 여전히 없어 위에서 내려다보는 데모는 그대로. (반투명 0.06 → 라이다 통과라 폐기)
+        pane.CreateDisplayOpacityAttr([1.0])
         xf = UsdGeom.Xformable(pane.GetPrim())
         xf.AddTranslateOp().Set(Gf.Vec3d(*center))
         xf.AddScaleOp().Set(Gf.Vec3f(*size))

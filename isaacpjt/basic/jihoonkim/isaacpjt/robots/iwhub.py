@@ -34,6 +34,7 @@ class IwHub:
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
         self._root: str | None = None
+        self._lidars: list = []          # LidarRtx 참조 보관(GC 되면 렌더프로덕트 파괴됨)
 
     @property
     def root(self) -> str | None:
@@ -55,17 +56,20 @@ class IwHub:
         return root
 
     def load_cargo(self, stage: Usd.Stage, tomato_cfg, phys_cfg,
-                   deck_z: float = 0.25, log=print) -> int:
+                   deck_z: float = 0.225, log=print) -> int:
         """iw.hub 데크에 '적재된 세트' — 팔레트 + KLT 8개 + 3칸에 토마토 5개씩(15개, 꼭지 포함).
 
-        ★ 물리 구조 (사용자 정정 2026-07-20 "토마토도 강체로 / 가지런히 놓을 필요 없어"):
-          · 채운 KLT 3칸 = **static 오목 콜라이더(그릇)** — 토마토를 담아 흘리지 않는다.
-          · 토마토 = **동적 강체**(몸통 콜라이더 + 마찰) → 흩뿌려 떨어뜨리면 자연스럽게 쌓인다.
-          · 팔레트·빈 KLT = 시각 전용(콜라이더 없음).
-          아티큘레이션(iw.hub) 밑에 강체를 중첩하면 꼬이므로(§8류) 세트는 iw.hub 데크
-          **월드 위치에 독립 배치**한다 — 지금은 로봇이 정지 상태라 무방. 주행 연동은 추후
-          루프에서 포즈 동기화(TODO). 꼭지(calyx)는 몸통의 자식(장식, 콜라이더 없음).
-        deck_z: 데크 높이(base_link 기준 오프셋). [4] 임의 — GPU 에서 iw.hub 데크 실측 보정.
+        ★ 물리 구조 (사용자 정정 2026-07-20 "고정조인트로 결속 / 포크슬롯 살려야"):
+          · Load(팔레트+KLT) = **하나의 동적 강체**. chassis 데크에 FixedJoint 로 결속 →
+            로봇이 주행하면 강체로 따라간다(아티큘레이션 밑 중첩 아님 — 별도 강체+조인트).
+          · 팔레트 = **convexDecomposition 콜라이더** → 포크 슬롯(구멍) 살림. 창고에서
+            지게차 포크가 들어가고, DeckJoint 를 SetActive(False) 로 풀면 인수된다(루프 후속).
+          · 채운 KLT 3칸 = 오목 콜라이더(그릇, Load 의 일부) — 토마토를 담아 흘리지 않는다.
+          · 토마토 = **별도 동적 강체**(Load 아님) → KLT 안에서 흔들리며 접촉으로 실려간다.
+          참조 에셋(팔레트·KLT)이 자체 강체를 갖고 오므로 disable_physics 로 벗긴 뒤
+          Load 강체의 콜라이더로 붙인다(중첩강체 경고 방지 §8). 꼭지=몸통 자식(장식).
+        deck_z: 데크 높이(root 기준 오프셋). [2] 유도 — bbox 상단은 0.198(measure_deck.py)이나
+                GUI 실측상 0.225 라야 팔레트가 데크에 얹힌다(0.25=52mm 뜸, 0.20=박힘). GUI 확인.
         반환: 얹은 토마토 수(0이면 에셋 없음).
         """
         from isaacsim.core.utils.stage import add_reference_to_stage
@@ -93,7 +97,8 @@ class IwHub:
                     ripe.append((os.path.join(d, f),
                                  calyx if os.path.exists(calyx) else None))
 
-        # iw.hub 데크 월드 포즈 — 세트를 아티큘레이션 밖 독립 프림으로 여기에 놓는다.
+        # ── iw.hub 데크 월드 포즈 (적재 세트 원점) ──
+        # iw.hub 에셋엔 base_link 프림이 없어 self._root(컨테이너)로 떨어진다.
         src = f"{self._root}/base_link"
         if not stage.GetPrimAtPath(src).IsValid():
             src = self._root
@@ -105,8 +110,19 @@ class IwHub:
         ident = Gf.Quatd(1.0, 0.0, 0.0, 0.0)
         rng = random.Random(7)
 
-        add_reference_to_stage(pallet_url, f"{root}/Pallet")   # 팔레트(시각)
-        set_pose(stage.GetPrimAtPath(f"{root}/Pallet"), (0.0, 0.0, 0.0), ident)
+        # ★ 적재 강체(팔레트+KLT) = 하나의 동적 강체 Load. 뒤에서 chassis 데크에 FixedJoint
+        #   로 결속해 로봇을 따라가게 한다(사용자 선택 2026-07-20). 토마토는 Load 에 안 넣는다
+        #   — 별도 동적 강체로 KLT 안에서 흔들리며 접촉으로 실려간다(§5.1 진짜 물리 유지).
+        #   팔레트는 convexDecomposition 콜라이더 → 포크 슬롯(구멍)을 살려 창고에서 지게차
+        #   포크가 들어갈 수 있게 한다(스파이크 06 검증 방식). 결속 조인트는 창고 도착 시
+        #   해제(SetActive False)하면 지게차가 팔레트를 넘겨받는다 — 루프 후속.
+        load = f"{root}/Load"
+        UsdGeom.Xform.Define(stage, load)
+        add_reference_to_stage(pallet_url, f"{load}/Pallet")
+        set_pose(stage.GetPrimAtPath(f"{load}/Pallet"), (0.0, 0.0, 0.0), ident)
+        physics.disable_physics(stage, f"{load}/Pallet")       # 에셋 자체 물리 제거(중첩 §8)
+        physics.add_convex_decomposition_colliders(              # 포크 슬롯 살린 콜라이더
+            stage, f"{load}/Pallet")
 
         klt_scale = 0.85
         kz = PALLET_SIZE[2] + KLT_SIZE[2] * klt_scale / 2.0
@@ -124,13 +140,14 @@ class IwHub:
             for iy in range(ny):
                 ox = (ix - (nx - 1) / 2.0) * pitx
                 oy = (iy - (ny - 1) / 2.0) * pity
-                kp = f"{root}/KLT_{ix}{iy}"
+                kp = f"{load}/KLT_{ix}{iy}"
                 add_reference_to_stage(klt_url, kp)
                 set_pose(stage.GetPrimAtPath(kp), (ox, oy, kz), ident)
                 set_scale(stage.GetPrimAtPath(kp), klt_scale)
+                physics.disable_physics(stage, kp)         # 에셋 자체 강체 제거(중첩경고 §8)
                 if (ix, iy) not in filled or not ripe:
                     continue
-                physics.add_convex_decomposition_colliders(stage, kp)   # 그릇(static)
+                physics.add_convex_decomposition_colliders(stage, kp)   # 담는 그릇(Load 콜라이더)
                 for k in range(5):                         # 토마토 5개 — 흩뿌려 떨어뜨림
                     body, calyx = rng.choice(ripe)
                     jx = ox + rng.uniform(-0.06, 0.06)     # 격자 아닌 랜덤 산포
@@ -152,8 +169,19 @@ class IwHub:
                                            kinematic=False)
                     physics.bind_physics_material(tprim, tmat)
                     n_tom += 1
-        log(f"[IwHub] 데크 적재: 팔레트+KLT 8 + 토마토 {n_tom}개(꼭지 포함, 동적강체, 3칸 산포). "
-            f"KLT 3칸 static 그릇. deck_z={deck_z} [4] GPU 보정 요")
+
+        # ── Load 를 동적 강체로 확정 + chassis 데크에 FixedJoint 결속 ──
+        load_density = 200.0   # [4] 근거없음 — 팔레트+빈 유효밀도. 결속돼 있어 동특성 영향 작음. GPU 보정.
+        physics.add_rigid_body(stage.GetPrimAtPath(load), load_density,
+                               kinematic=False)
+        chassis = f"{self._root}/chassis"
+        if stage.GetPrimAtPath(chassis).IsValid():
+            physics.create_fixed_joint(stage, f"{root}/DeckJoint", chassis, load)
+            bound = "chassis 결속(로봇 따라감·창고서 해제→지게차 인수)"
+        else:
+            bound = "⚠ chassis 링크 없음 → 데크 위 비결속 배치"
+        log(f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 {n_tom}개(동적강체). "
+            f"Load {bound}. deck_z={deck_z} [4] GPU 보정 요")
         return n_tom
 
     # 에셋에 이미 있을 법한 라이다 프림 이름/타입 키워드 (Idealworks iw.hub 는 실물 AMR).
@@ -176,33 +204,43 @@ class IwHub:
                 return str(p.GetPath())
         return None
 
-    def attach_lidar(self, stage: Usd.Stage, offset: tuple[float, float, float],
-                     log=print) -> str | None:
-        """라이다 경로를 돌려준다 — **먼저 에셋에서 찾고, 없을 때만 RTX 라이다를 만든다.**
+    def attach_lidar(self, stage: Usd.Stage, mount, log=print):
+        """mount(LidarMount) 위치·방향에 RTX 2D 라이다 1기 + 렌더프로덕트를 만든다.
+        반환: (라이다 prim 경로, 렌더프로덕트 경로) 또는 None.
 
-        ⚠ GPU 반복 필요: RTX 라이다 생성 API(omni.kit.commands 'IsaacSensorCreateRtxLidar')
-          와 프로파일 이름은 Isaac 5.1 에서 실측 확인해야 한다(추측 금지, §8). 에셋에 이미
-          있으면 이 생성 경로는 아예 안 탄다 — probe 로 먼저 확인.
+        iw.hub 엔 내장 라이다가 없어(사용자 확인 2026-07-20) 앞/뒤 각 1기를 직접 만든다.
+        Isaac 5.1 정식 API `isaacsim.sensors.rtx.LidarRtx` — 라이다 생성 + 렌더프로덕트를 같이
+        만들어 준다. ROS2RtxLidarHelper 는 lidarPrim 이 아니라 renderProductPath 를 받는다
+        (2026-07-20 GPU 실측 — 이전 IsaacSensorCreateRtxLidar 직접 호출 + lidarPrim 은 실패).
+        config = Example_Rotary_2D (2D LaserScan — Nav2 코스트맵용). prim 이름 = mount.frame →
+        TF child = LaserScan frame_id 일치. LidarRtx 객체는 self._lidars 에 보관(GC 방지).
         """
-        found = self.find_lidar(stage)
-        if found:
-            log(f"[IwHub] 에셋 내장 라이다 사용: {found}")
-            return found
+        import math
 
-        # 없을 때만 생성. base_link 아래에 RTX 라이다를 offset 위치로.
-        parent = f"{self._root}/base_link"
+        import numpy as np
+
+        # ★ 움직이는 섀시 링크에 붙인다 — /World/IwHub(컨테이너)는 정지라, 거기 붙이면
+        #   로봇이 주행해도 라이다가 스폰 자리에 남는다(2026-07-20 사용자 발견). chassis 는
+        #   아티큘레이션 base 링크로 물리로 움직인다.
+        parent = f"{self._root}/chassis"
         if not stage.GetPrimAtPath(parent).IsValid():
-            parent = self._root                      # base_link 이름이 다르면 루트에
-        path = f"{parent}/nav_lidar"
+            parent = self._root
+        path = f"{parent}/{mount.frame}"             # prim 이름 = TF 프레임(= scan frame_id)
+        half = math.radians(mount.yaw_deg) / 2.0
+        quat = np.array([math.cos(half), 0.0, 0.0, math.sin(half)])   # Z축 yaw (w,x,y,z)
         try:
-            import omni.kit.commands
-            omni.kit.commands.execute(
-                "IsaacSensorCreateRtxLidar",
-                path=path, parent=None,
-                config="Example_Rotary",              # TODO GPU 실측 — 실제 프로파일명 확인
-                translation=offset, orientation=(1.0, 0.0, 0.0, 0.0))
-            log(f"[IwHub] RTX 라이다 생성: {path} (에셋에 없어 직접 만듦)")
-            return path
+            from isaacsim.sensors.rtx import LidarRtx
+            lidar = LidarRtx(
+                prim_path=path, name=f"lidar_{mount.name}",
+                translation=np.array(mount.offset, dtype=float),
+                orientation=quat,
+                # config 는 파일명 stem 으로 매칭된다(전체경로 X — commands.py 실측 2026-07-20).
+                config_file_name="Example_Rotary_2D")
+            self._lidars.append(lidar)               # 참조 유지(GC 되면 렌더프로덕트 파괴)
+            rp = lidar.get_render_product_path()
+            log(f"[IwHub] RTX 라이다 '{mount.name}': {path} @ {mount.offset} "
+                f"yaw={mount.yaw_deg}° rp={rp}")
+            return path, rp
         except Exception as e:
-            log(f"[IwHub] ⚠ 라이다 생성 실패 — GPU 에서 RTX 라이다 API 확인 필요: {e}")
+            log(f"[IwHub] ⚠ 라이다 '{mount.name}' 생성 실패 — GPU RTX 라이다 API 확인: {e}")
             return None

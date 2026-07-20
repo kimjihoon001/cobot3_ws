@@ -461,3 +461,44 @@ class JointCommandPoller:
         positions = [] if raw_positions is None else list(raw_positions)
         velocities = [] if raw_velocities is None else list(raw_velocities)
         return names, positions, velocities
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  iw.hub 전용 라이다/TF 브리지 — MM(팀원)의 동명 함수와 시그니처가 달라 _iw 로 분리.
+#  iw 는 프림 이름=프레임 이름(chassis/laser_front)이라 PubTf 로 충분, 라이다 2기(앞/뒤).
+#  (MM 처럼 네임스페이스 프레임이 필요하면 위쪽 build_tf_sensor/build_lidar_scan(RawTf) 사용)
+# ══════════════════════════════════════════════════════════════════════════
+
+def build_tf_sensor_iw(stage, graph_path: str, parent_prim: str, sensor_prim: str,
+                       nav, child_frame: str, domain_id: int = DOMAIN_ID, log=print) -> None:
+    """[iw 전용] base_link→센서(라이다) 정적 TF 발행 (/tf). Nav2 가 스캔을 로봇에 붙이는 데 필요.
+    child_frame 은 sensor_prim 이름과 같아야 한다(TF child = prim 이름 = LaserScan frame_id)."""
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("SimTime", T["SimTime"]),
+           ("Tf", T["PubTf"])],
+          [("OnTick.outputs:tick", "Tf.inputs:execIn"),
+           ("Ctx.outputs:context", "Tf.inputs:context"),
+           ("SimTime.outputs:simulationTime", "Tf.inputs:timeStamp")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False)])
+    _set_target(stage, f"{graph_path}/Tf", "inputs:parentPrim", parent_prim)
+    _set_target(stage, f"{graph_path}/Tf", "inputs:targetPrims", sensor_prim)
+    log(f"[Nav] tf(iw): {nav.base_frame}→{child_frame} ({sensor_prim})")
+
+
+def build_lidar_scan_iw(stage, graph_path: str, render_product_path: str, topic: str,
+                        frame: str, domain_id: int = DOMAIN_ID, log=print) -> str:
+    """[iw 전용] RTX 라이다 렌더프로덕트 → /scan(LaserScan). 앞/뒤 라이다별 topic·frame 파라미터.
+    render_product_path 는 LidarRtx 가 만든 것(iwhub.attach_lidar → get_render_product_path)."""
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("Lidar", T["RtxLidar"])],
+          [("OnTick.outputs:tick", "Lidar.inputs:execIn"),
+           ("Ctx.outputs:context", "Lidar.inputs:context")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Lidar.inputs:renderProductPath", render_product_path),
+           ("Lidar.inputs:topicName", topic),
+           ("Lidar.inputs:frameId", frame),
+           ("Lidar.inputs:type", "laser_scan")])
+    log(f"[Nav] lidar_scan(iw): {topic} (frame {frame}, rp {render_product_path})")
+    return topic

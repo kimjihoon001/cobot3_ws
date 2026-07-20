@@ -128,6 +128,39 @@ def disable_physics(stage: Usd.Stage, root_path: str) -> int:
     return n
 
 
+def create_fixed_joint(stage: Usd.Stage, path: str,
+                       body0_path: str, body1_path: str):
+    """두 강체를 현재 상대 포즈로 고정. body0=기준(예: 로봇 링크), body1=붙일 강체.
+
+    §8(MountJoint 폭발) 교훈: localPos/Rot 을 기본 identity 로 두면 PhysX 가 두 몸의
+    원점을 강제로 일치시키려는 충격으로 시작하자마자 폭발한다. 반드시 '현재 상대 포즈'를
+    로컬 프레임에 적어야 한다. 앵커를 body1 원점에 두면 → localFrame1=identity,
+    localFrame0 = body1_world · body0_world⁻¹ (row-vector). 대상은 실제 링크여야 한다.
+    """
+    from pxr import Gf
+
+    j = UsdPhysics.FixedJoint.Define(stage, path)
+    j.CreateBody0Rel().SetTargets([body0_path])
+    j.CreateBody1Rel().SetTargets([body1_path])
+    # 묶인 두 몸(로봇 링크↔적재물)의 상호 충돌을 끈다. 데크 위 적재물 콜라이더가 로봇 자체
+    # 콜라이더와 겹치면 조인트는 붙잡고 접촉force는 밀어내며 솔버가 싸워 로봇이 요동친다.
+    j.CreateCollisionEnabledAttr(False)
+    cw = UsdGeom.Xformable(stage.GetPrimAtPath(body0_path)).ComputeLocalToWorldTransform(
+        Usd.TimeCode.Default())
+    lw = UsdGeom.Xformable(stage.GetPrimAtPath(body1_path)).ComputeLocalToWorldTransform(
+        Usd.TimeCode.Default())
+    rel = lw * cw.GetInverse()                 # body1 원점을 body0 프레임으로
+    t = rel.ExtractTranslation()
+    q = rel.ExtractRotationQuat()
+    im = q.GetImaginary()
+    j.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
+    j.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()),
+                                   float(im[0]), float(im[1]), float(im[2])))
+    j.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+    j.CreateLocalRot1Attr(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+    return j
+
+
 def create_physics_material(stage: Usd.Stage, path: str,
                             static_friction: float,
                             dynamic_friction: float,
