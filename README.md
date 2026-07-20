@@ -192,6 +192,7 @@ gripper open/close 파라미터 조정
 | 비밀번호를 물어봄 | PAT 를 비밀번호 자리에 입력 |
 | 충돌(conflict) 발생 | 표시된 파일을 열어 `<<<<<<<` 부분을 정리 → `add` → `commit`. 애매하면 팀장과 상의 |
 | 실수로 다른 폴더 수정 | 커밋 전이면 `git checkout -- <파일>` 로 되돌리기 |
+| `colcon build` 시 `smartfarm_interfaces`에서 `ModuleNotFoundError: No module named 'em'` / `'catkin_pkg'` | `./scripts/fix_ros_build_env.sh` 실행 — `$ROS_DISTRO`를 감지해서 `.venv`에 `catkin_pkg`/`lark`/맞는 버전의 `empy`를 자동으로 설치한다(Humble=3.3.4 고정, Jazzy=4.x). 배포판별 버전을 섞어 쓰면 다른 에러로 빌드가 깨지므로 수동으로 `pip install empy`만 하지 말 것 |
 
 ---
 

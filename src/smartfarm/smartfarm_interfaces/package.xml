@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>smartfarm_interfaces</name>
+  <version>0.0.1</version>
+  <description>스마트팜 수확·운반·창고 파이프라인 전 트랙 공용 커스텀 메시지</description>
+  <maintainer email="pfr0213@gmail.com">rokey</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
