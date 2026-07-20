@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>iwhub_control</name>
+  <version>0.1.0</version>
+  <description>iw.hub 운반 AMR 베이스 제어 — cmd_vel→차동 바퀴 명령, joint_states→오도메트리(+TF), 승강 명령</description>
+  <maintainer email="kimjihoon001@gmail.com">jihoonkim</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
+  <exec_depend>nav2_bringup</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
