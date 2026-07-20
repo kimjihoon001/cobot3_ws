@@ -77,6 +77,26 @@ alias rosenv='source /opt/ros/humble/setup.bash; \
 - 화이트리스트 XML(`fastdds_whitelist.xml`)이 없는 컴퓨터는 그 export 줄을 빼거나
   파일을 복사받을 것 — 훈련장(10.10.0.x) 밖에서는 루프백만 통신된다(정상).
 
+#### 화이트리스트 XML 에 넣을 것 — 종료 시 세그폴트 완화 (2026-07-20)
+
+Nav2 브리지(`--nav`)를 켜면 **Stop/종료할 때 Isaac 이 간헐적으로 세그폴트**로 죽는다
+(5회 중 1회 실측). 백트레이스에 파이썬 프레임은 없고 전부 FastDDS 내부다 —
+Twist 구독자를 파괴하면서 `removeLocalReader → StatefulWriter::intraprocess_delivery`
+경로에서 터진다. Isaac 5.1 이 쓰는 FastDDS 2.6 의 종료 시점 문제라 우리 코드로는 못 막는다.
+
+`fastdds_whitelist.xml` 의 `</profiles>` **뒤**(= `<dds>` 바로 아래)에 이 블록을 넣으면
+그 경로 자체가 사라진다. 넣고 3회 반복 실행에서 재발 없음:
+
+```xml
+  <library_settings>
+    <intraprocess_delivery>OFF</intraprocess_delivery>
+  </library_settings>
+```
+
+끄는 게 안전한 이유 — 같은 XML 의 participant 가 이미 `useBuiltinTransports=false` 로
+공유메모리를 끄고 UDP 만 쓴다. 프로세스 내부 전달 경로는 원래 안 쓰고 있었다.
+(이 파일은 저장소 밖 개인 설정이라 git 으로 공유되지 않는다 — 각자 넣어야 한다.)
+
 ### 시뮬 띄우기 (Isaac 터미널)
 
 ROS2 브리지용 env 를 걸고 실행한다 (시스템 ROS 는 **source 하지 않는다** —

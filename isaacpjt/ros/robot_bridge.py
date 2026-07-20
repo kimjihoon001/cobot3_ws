@@ -256,19 +256,28 @@ def build_lidar_scan(stage, graph_path: str, lidar_prim: str, nav,
                      domain_id: int = DOMAIN_ID, log=print) -> str:
     """RTX 라이다 → /scan(LaserScan) 발행. 반환: scan 토픽.
 
-    ⚠ 가장 probe 의존적. RtxLidarHelper 는 보통 renderProductPath 를 요구한다 —
-      lidar_prim 에서 렌더프로덕트를 만드는 배선은 GPU 에서 실측 보정 필요(§8 예고).
+    ★ RtxLidarHelper 에는 lidarPrim 입력이 **없다** — renderProductPath 를 받는다
+      (2026-07-20 실측: inputs 에 renderProductPath 는 있고 lidarPrim 은 없음).
+      예전 배선은 없는 relationship 에 타깃을 걸어 조용히 무시됐고 /scan 이 안 나왔다.
+      그래서 카메라와 같은 모양으로 간다: 라이다 프림 → 렌더프로덕트 → Helper.
+      해상도는 1x1 — 라이다는 픽셀이 아니라 스캔을 뽑으므로 크기가 의미 없다.
+    inputs:type 의 allowedTokens 는 laser_scan / point_cloud 두 개뿐(실측).
     """
     _edit(graph_path,
-          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("Lidar", T["RtxLidar"])],
-          [("OnTick.outputs:tick", "Lidar.inputs:execIn"),
-           ("Ctx.outputs:context", "Lidar.inputs:context")],
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
+           ("RP", T["RenderProduct"]), ("Lidar", T["RtxLidar"])],
+          [("OnTick.outputs:tick", "RP.inputs:execIn"),
+           ("RP.outputs:execOut", "Lidar.inputs:execIn"),
+           ("Ctx.outputs:context", "Lidar.inputs:context"),
+           ("RP.outputs:renderProductPath", "Lidar.inputs:renderProductPath")],
           [("Ctx.inputs:domain_id", domain_id),
            ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("RP.inputs:width", 1),
+           ("RP.inputs:height", 1),
            ("Lidar.inputs:topicName", nav.scan_topic),
            ("Lidar.inputs:frameId", nav.lidar_frame),
            ("Lidar.inputs:type", "laser_scan")])
-    _set_target(stage, f"{graph_path}/Lidar", "inputs:lidarPrim", lidar_prim)
+    _set_target(stage, f"{graph_path}/RP", "inputs:cameraPrim", lidar_prim)
     log(f"[Nav] lidar_scan: {nav.scan_topic} (frame {nav.lidar_frame}, {lidar_prim})")
     return nav.scan_topic
 

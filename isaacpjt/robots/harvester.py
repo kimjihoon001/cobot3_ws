@@ -605,9 +605,13 @@ class HarvestMM:
           `Gf.Rotation(orientation)` 을 호출하는데 튜플 오버로드가 없어 Boost.Python
           ArgumentError 로 죽는다 (2026-07-20 GPU 실측). 이 함수는 예외를 삼키므로
           틀리면 '조용히 라이다 없음' 이 된다 — 그래서 타입을 여기서 못 박는다.
-        config 는 Example_Rotary 로 생성 성공 확인(2026-07-20). 같은 날 실측으로
-          SICK_picoScan150 · RPLIDAR_S2E · OS1_REV6_128ch10hz1024res 도 생성되고,
-          Hesai_XT32_SD10 · Velodyne_VLS128 은 커맨드는 True 지만 prim 이 안 생긴다.
+        ★ config 는 **2D 라이다여야 한다.** Nav2 가 쓰는 /scan(LaserScan)은 평면 스캔이라
+          IsaacComputeRTXLidarFlatScan 이 3D 프로파일을 거부한다 (2026-07-20 실측:
+          Example_Rotary 로 뒀더니 "elevationDeg contains nonzero value -15.0 …
+          not a 2D Lidar, and node will not execute" 로 노드가 아예 안 돈다).
+          Example_Rotary_2D = NVIDIA 표준 2D 프로파일. 실물 감각을 원하면
+          Slamtec_RPLIDAR_S2E(360°·30m) 나 SICK_TIM781 로 바꿔도 된다 —
+          단 3D(Example_Rotary·OS1·XT32·VLS_128)는 /scan 용으로 못 쓴다.
         """
         chassis = self.chassis_path
         if not chassis or not stage.GetPrimAtPath(chassis).IsValid():
@@ -619,7 +623,7 @@ class HarvestMM:
             omni.kit.commands.execute(
                 "IsaacSensorCreateRtxLidar",
                 path=path, parent=None,
-                config="Example_Rotary",
+                config="Example_Rotary_2D",
                 translation=Gf.Vec3d(*offset),
                 orientation=Gf.Quatd(1.0, 0.0, 0.0, 0.0))
             log(f"[Harvester] RTX 라이다 생성: {path} (오프셋 {offset})")
