@@ -27,6 +27,8 @@
 | 10 | `handoff_node` | `/handoff/tray_ready` | `smartfarm_interfaces/HandoffEvent` | `fork_lift_node`, `warehouse_manager_node` |
 | 11 | `warehouse_manager_node` | `/warehouse/slot_assignment` | `smartfarm_interfaces/SlotAssignment` | `fork_lift_node`, `logger_node` |
 | 11 | `fork_lift_node` | `/forklift/task_complete` | `std_msgs/Int32` (tray_id) | `warehouse_manager_node`, `logger_node` |
+| 11 | `fork_lift_node` | `/forklift/clear` | `std_msgs/Bool` | `fleet_dispatch_node` (AMR 출발 허가) |
+| - | `fork_lift_node` | `/forklift/status` | `std_msgs/String` | 운영자·logger_node |
 | - | 각 로봇 AMCL | `/<amr_id>/amcl_pose` | `geometry_msgs/PoseWithCovarianceStamped` | `handoff_node` (도착 판정용) |
 
 ## ⚠ 실제 Isaac 브리지와의 차이 (isaacpjt/README.md, ros/robot_bridge.py 확인 결과 — [1] 출처)
