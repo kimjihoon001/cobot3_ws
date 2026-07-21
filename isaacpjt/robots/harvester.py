@@ -126,6 +126,7 @@ class HarvestMM:
         self._hinge_path: str | None = None       # 커터 마운트(=절단점) prim
         self._blade_joint: str | None = None       # 단일 날 RevoluteJoint 경로(= 서보)
         self._tool0_m: Gf.Matrix4d | None = None   # 툴0(플랜지) 월드 포즈 — CAD 지그 부착 기준
+        self._grasp_tcp: str | None = None         # 실제 파지 중심 프레임
         self._blade_target_attr = None             # 가동날 드라이브 목표각 attr (§5.6 ROS2 제어점)
         self._blade_shaft_w: Gf.Vec3d | None = None  # 가동날 절단점(서보축) 월드좌표 (줄기 배치용)
         self._blade_rel: Gf.Matrix4d | None = None   # 날 사본 ← grip_base 상대포즈 (정지 중 재배치용)
@@ -177,6 +178,14 @@ class HarvestMM:
         grip_base = self._attach_gripper(stage, arm_path, gripper_path, log)
         self._gripper_path = gripper_path
         self._grip_base = grip_base
+        if grip_base:
+            # RMPflow 기본 EE(UR ee_link)와 실제 손가락 파지 중심은 다르다.
+            # 고정 길이를 카메라 광선에서 빼지 않고 이 프레임의 실제 월드 포즈로
+            # EE→TCP 오프셋을 측정한다.
+            self._grasp_tcp = f"{grip_base}/HarvestTCP"
+            tcp = UsdGeom.Xform.Define(stage, self._grasp_tcp)
+            tcp.AddTranslateOp().Set(Gf.Vec3d(
+                0.0, 0.0, self._cfg.end_effector.grasp_reach_z))
 
         # 커터·카메라 = 사용자 CAD 커터 지그(커플러 링 + 서보 가위 + 실물 D455).
         # 프리미티브 커터/카메라(_add_cutter/_add_camera)는 남겨두되 안 쓰고 CAD 로 대체.
@@ -685,6 +694,12 @@ class HarvestMM:
                 return str(p.GetPath())
         return None
 
+    def grasp_tcp_path(self, stage: Usd.Stage) -> str | None:
+        """그리퍼 손가락 사이의 실제 파지 중심 prim 경로."""
+        if self._grasp_tcp and stage.GetPrimAtPath(self._grasp_tcp).IsValid():
+            return self._grasp_tcp
+        return None
+
     def _add_camera_at(self, stage: Usd.Stage, cam_pos, euler, log) -> None:
         """RealSense D455 를 그리퍼 base_link 자식으로 붙인다(팔 따라감) + 로컬 rotateXYZ
         op 에 euler 를 리터럴로 박는다 — GUI 트랜스폼 패널이 이 값을 그대로 표시.
@@ -883,9 +898,11 @@ class HarvestMM:
         _set_full_pose(stage.GetPrimAtPath(hinge), U.GetInverse() * M_orig)  # 사본 월드=원본 월드
         UsdPhysics.RigidBodyAPI.Apply(asset)
         mass = UsdPhysics.MassAPI.Apply(asset)
-        mass.CreateMassAttr(0.01)
-        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(1e-5, 1e-5, 1e-5))
-        PhysxSchema.PhysxRigidBodyAPI.Apply(asset).CreateDisableGravityAttr(True)
+        mass.CreateMassAttr(0.05)
+        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(2e-4, 2e-4, 2e-4))
+        blade_physx = PhysxSchema.PhysxRigidBodyAPI.Apply(asset)
+        blade_physx.CreateDisableGravityAttr(True)
+        blade_physx.CreateAngularDampingAttr(5.0)
         for p in Usd.PrimRange(asset):                                  # jig 흰색에 안 묻히게 색칠
             if p.IsA(UsdGeom.Mesh):
                 UsdShade.MaterialBindingAPI.Apply(p).UnbindAllBindings()
@@ -928,8 +945,11 @@ class HarvestMM:
         rev.CreateUpperLimitAttr(45.0)      # 열림 0° ~ 닫힘 35° + 여유
         drive = UsdPhysics.DriveAPI.Apply(rev.GetPrim(), "angular")
         drive.CreateTypeAttr("force")
-        drive.CreateStiffnessAttr(2000.0)
-        drive.CreateDampingAttr(200.0)
+        # 10g급 강체에 stiffness 2000은 reset 첫 프레임의 작은 오차도 폭발적인
+        # 토크로 바꿔 날을 날려 보낸다. 서보 응답에 충분한 범위로 제한한다.
+        drive.CreateStiffnessAttr(120.0)
+        drive.CreateDampingAttr(20.0)
+        drive.CreateMaxForceAttr(15.0)
         drive.CreateTargetPositionAttr(self.BLADE_OPEN_DEG)
         self._blade_target_attr = drive.GetTargetPositionAttr()
         log(f"[Harvester] 가동날 서보 힌지 부착: {hinge} (축 Y, 피벗 (0,53,132), "

@@ -59,6 +59,7 @@ NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
 # 손끝 D455 → ROS2 rgb/depth 발행 (YOLO 파인튜닝용). 기본 켜짐(ROS 켤 때 자동). --no-camera 로 끔.
 # ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로(main 이 예외 잡음).
 CAMERA = "--no-camera" not in sys.argv
+RMPFLOW = "--rmpflow" in sys.argv
 # MM 키보드 텔레옵 (팔·베이스·그리퍼·블레이드 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
 # MM 키보드 입력은 명시적인 전용 플래그만 사용한다. --mm와 --iw를 같이 띄워도
 # 키 입력이 iw.hub에 전달되거나 전역 teleop 상태를 공유하지 않는다.
@@ -140,19 +141,20 @@ class Opts:
         self.no_ros = NO_ROS
         self.gui = GUI
         self.mm_teleop = MM_TELEOP
+        self.rmpflow = RMPFLOW
         self.camera = CAMERA
         self.nav_drive = NAV_DRIVE
         self.nav_odom = NAV_ODOM
         self.nav_scan = NAV_SCAN
 
 
-def build_drivers(cfg) -> list:
+def build_drivers(cfg, task=None) -> list:
     """플래그로 고른 로봇 드라이버만 만든다. 드라이버는 **지연 import** — 안 고른 로봇 파일은
     아예 불러오지 않는다(팀원이 그 파일을 깨뜨려도 내 로봇은 돌아간다)."""
     drivers = []
     if "--mm" in sys.argv:
         from mm import MMDriver
-        drivers.append(MMDriver(cfg))
+        drivers.append(MMDriver(cfg, task=task))
     if "--iw" in sys.argv:
         from iw import IwDriver
         drivers.append(IwDriver(cfg))
@@ -274,7 +276,7 @@ def main() -> None:
 
     # ── 로봇: 플래그로 고른 것만 (없으면 환경만) ──
     stage = omni.usd.get_context().get_stage()
-    drivers = build_drivers(cfg)
+    drivers = build_drivers(cfg, task=task)
     if drivers:
         _assemble_robots(world, stage, drivers)
     else:
@@ -310,14 +312,24 @@ def main() -> None:
     # Play/Stop 반복 시 동일한 초기 상태에서 재시작 (재현성)
     was_playing = False
     while simulation_app.is_running():
+        # 최상위 독립 강체인 커터 날은 첫 물리 스텝 전에 그리퍼 위치로 맞춰야 한다.
+        # 기존 순서는 step 후 reset이라 Play 첫 프레임에 힌지가 날을 순간 가속했다.
+        pre_playing = world.is_playing()
+        if pre_playing and not was_playing:
+            for d in drivers:
+                d.update(False)
+            world.reset()
+            for d in drivers:
+                d.update(False)
         world.step(render=True)
         is_playing = world.is_playing()
-        if is_playing and not was_playing:
-            world.reset()
         was_playing = is_playing
         for d in drivers:                        # 로봇별 매 프레임(텔레옵·JSON 명령)
             d.update(is_playing)
 
 
-main()
-simulation_app.close()
+try:
+    main()
+finally:
+    # 예외·Ctrl-C 경로에서도 Kit/OmniGraph를 Python 종료 전에 먼저 정리한다.
+    simulation_app.close()

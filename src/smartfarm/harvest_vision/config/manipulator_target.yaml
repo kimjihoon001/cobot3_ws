@@ -1,0 +1,34 @@
+manipulator_target_node:
+  ros__parameters:
+    input_topic: /vision/approach_target
+    validated_topic: /harvester_0/manipulator/validated_target
+    output_topic: /harvester_0/manipulator/target_pose
+    isaac_command_topic: /harvester_0/cmd
+    target_class_topic: /vision/target_class
+    state_topic: /harvester_0/manipulator/target_state
+    rmp_status_topic: /harvester_0/rmpflow/status
+    basket_pose_topic: /iw/basket/empty_slot_pose
+    harvest_enable_topic: /harvest_test/enable
+    external_harvest_gate_enabled: false
+    mobility_ready_topic: /harvester_0/manipulator/mobility_ready
+    # fleet_dispatch/harvester_nav2.launch.py 기본 namespace가 비어 있으므로 TF도 base_link다.
+    base_frame: base_link
+
+    # 캘리브레이션과 dry-run 확인 전에는 절대로 true로 바꾸지 않는다.
+    command_enabled: false
+    max_target_age_sec: 0.5
+    tf_timeout_sec: 0.2
+    max_jump_m: 0.15
+    auto_grasp_enabled: true
+    pregrasp_clearance_m: 0.15
+    tool_grasp_reach_m: 0.115
+    motion_timeout_sec: 10.0
+    blade_close_delay_sec: 0.6
+    cut_match_tolerance_m: 0.10
+    basket_approach_height_m: 0.15
+    basket_workspace_min: [-0.80, -0.80, 0.15]
+    basket_workspace_max: [1.25, 0.80, 1.80]
+
+    # base_frame 기준 허용 작업영역 [x, y, z] (m). 실제 로봇/환경에 맞춰 축소한다.
+    workspace_min: [0.15, -0.75, 0.15]
+    workspace_max: [1.25, 0.75, 1.80]

@@ -135,20 +135,30 @@ class TomatoPlants:
 
     # ----- 내부 -----
 
-    def _find_usd_variants(self) -> list[tuple[str, str | None]]:
-        """(몸통 usd, 꼭지 usd|None) 목록. 폴더 없으면 경고 후 빈 목록."""
+    def _find_usd_variants(self) -> dict[str, list[tuple[str, str | None]]]:
+        """클래스별 형상 목록: ripe=정상형, spoiled=손상/함몰형."""
         d = self._assets.usd_dir
         if not os.path.isdir(d):
             print(f"[WARN] 토마토 USD 폴더 없음: {d}")
             print("       isaac/tomatest/00_convert_obj_to_usd.py 를 먼저 실행하거나 "
                   "config/settings.py 의 usd_dir 을 수정하세요. 줄기만 스폰합니다.")
-            return []
-        out = []
+            return {}
+        out = {"ripe": [], "spoiled": []}
         for f in sorted(os.listdir(d)):
             if f.endswith(".usd") and not f.endswith("_calyx.usd"):
+                if f.startswith("tomato_ripe_"):
+                    class_name = "ripe"
+                elif f.startswith(("tomato_spoiled_", "tomato_dented_")):
+                    class_name = "spoiled"
+                else:
+                    continue
                 body = os.path.join(d, f)
                 calyx = os.path.join(d, f[:-4] + "_calyx.usd")
-                out.append((body, calyx if os.path.exists(calyx) else None))
+                out[class_name].append(
+                    (body, calyx if os.path.exists(calyx) else None))
+        missing = [name for name, items in out.items() if not items]
+        if missing:
+            raise RuntimeError(f"토마토 형상 누락: {', '.join(missing)}")
         return out
 
     def _spawn_bed(self, stage: Usd.Stage, path: str,
@@ -187,7 +197,7 @@ class TomatoPlants:
         physics.add_shape_collider(bar.GetPrim())
 
     def _spawn_plant(self, stage: Usd.Stage, path: str, x: float, y: float,
-                     variants: list[tuple[str, str | None]],
+                     variants: dict[str, list[tuple[str, str | None]]],
                      foliage: bool = True, sector: int = 0) -> None:
         c = self._cfg
         UsdGeom.Xform.Define(stage, path)
@@ -250,9 +260,9 @@ class TomatoPlants:
                      fi: int, nf: int, sector: int = 0) -> None:
         c = self._cfg
         rng = self._rng
-        body_usd, calyx_usd = rng.choice(variants)
         names = list(c.class_weights)
         class_name = rng.choices(names, weights=[c.class_weights[n] for n in names])[0]
+        body_usd, calyx_usd = rng.choice(variants[class_name])
 
         # 화방: 줄기에서 옆으로 조금(pedicel_h_offset) + 아래로 매단다 (인장).
         # spike 02: 수평 캔틸레버는 굽힘모멘트가 break_torque(0.067N·m)를 넘겨 바로 끊긴다.
@@ -269,6 +279,9 @@ class TomatoPlants:
         # 프레임 계산이 어긋나 "disjointed body transforms" 로 스냅된다(spike 02 는 회전
         # 없이 검증됨). 토마토는 구형이라 요는 시각적으로도 거의 무의미.
         fruit = UsdGeom.Xform.Define(stage, path)
+        fruit.GetPrim().SetCustomDataByKey("class_name", class_name)
+        fruit.GetPrim().SetCustomDataByKey(
+            "shape_asset", os.path.basename(body_usd))
         xf = UsdGeom.Xformable(fruit.GetPrim())
         xf.AddTranslateOp().Set(pos)
         s = self._assets.scale

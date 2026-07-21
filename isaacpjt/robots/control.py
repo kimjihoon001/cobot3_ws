@@ -20,6 +20,173 @@ import numpy as np
 from isaacsim.core.utils.types import ArticulationAction
 
 
+class RmpFlowTargetController:
+    """UR10e의 모바일 베이스 기준 위치 목표를 Isaac RMPflow로 추종한다."""
+
+    def __init__(self, robot, stage, reference_prim: str, arm_base_prim: str,
+                 physics_dt: float = 1.0 / 60.0,
+                 tool_tcp_prim: str | None = None):
+        import isaacsim.robot_motion.motion_generation as mg
+
+        self._robot = robot
+        self._stage = stage
+        self._reference_prim = reference_prim
+        self._arm_base_prim = arm_base_prim
+        self._tool_tcp_prim = tool_tcp_prim
+        config = mg.interface_config_loader.load_supported_motion_policy_config(
+            "UR10e", "RMPflow")
+        if not config:
+            raise RuntimeError("Isaac Sim UR10e RMPflow 설정을 찾을 수 없습니다")
+        self._policy = mg.lula.motion_policies.RmpFlow(**config)
+        self._articulation_policy = mg.ArticulationMotionPolicy(
+            robot, self._policy, physics_dt)
+        joints = self._articulation_policy.get_active_joints_subset()
+        home = joints.get_joint_positions()
+        if hasattr(home, "cpu"):
+            home = home.cpu().numpy()
+        self._home_positions = np.asarray(home, dtype=float).copy()
+        self._target_world = None
+        self._target_base = None
+        self._target_orientation_world = None
+        self._motion_active = False
+        self._mode = "IDLE"
+        self._target_id = 0
+        self._phase = "IDLE"
+        self._sync_arm_base_pose()
+
+    def set_target(self, position, target_id: int = 0, phase: str = "MOVE") -> None:
+        from pxr import Gf, UsdGeom
+
+        values = np.asarray(position, dtype=float)
+        if values.shape != (3,) or not np.all(np.isfinite(values)):
+            raise ValueError(f"RMPflow 목표는 유한한 xyz 3개여야 합니다: {position}")
+        matrix = UsdGeom.XformCache().GetLocalToWorldTransform(
+            self._stage.GetPrimAtPath(self._reference_prim))
+        self._target_base = values.copy()
+        desired_tcp_world = np.asarray(
+            matrix.Transform(Gf.Vec3d(*values)), dtype=float)
+        self._motion_active = True
+        self._mode = "POSITION"
+        self._target_id = int(target_id)
+        self._phase = str(phase)
+        # eye-in-hand 카메라로 목표를 본 순간의 tool0 방향을 유지한다. 위치만 주고
+        # orientation=None으로 두면 RMPflow가 손목 방향을 보장하지 않아 그리퍼가
+        # 카메라 광선과 다른 방향으로 접근할 수 있다.
+        self._sync_arm_base_pose()
+        joints = self._articulation_policy.get_active_joints_subset()
+        positions = joints.get_joint_positions()
+        if hasattr(positions, "cpu"):
+            positions = positions.cpu().numpy()
+        _, current_rotation = self._policy.get_end_effector_pose(
+            np.asarray(positions, dtype=float))
+        current_ee_world, _ = self._policy.get_end_effector_pose(
+            np.asarray(positions, dtype=float))
+        # RMPflow는 UR ee_link를 움직이지만 명령 position은 HarvestTCP 기준이다.
+        # 현재 조립체에서 EE→TCP 벡터를 실측해 원하는 TCP 위치에서 역으로 뺀다.
+        self._target_world = desired_tcp_world
+        if self._tool_tcp_prim:
+            tcp_prim = self._stage.GetPrimAtPath(self._tool_tcp_prim)
+            if tcp_prim.IsValid():
+                tcp_world = np.asarray(
+                    UsdGeom.XformCache().GetLocalToWorldTransform(
+                        tcp_prim).ExtractTranslation(), dtype=float)
+                self._target_world = desired_tcp_world - (
+                    tcp_world - np.asarray(current_ee_world, dtype=float))
+        from isaacsim.core.utils.rotations import rot_matrix_to_quat
+        self._target_orientation_world = rot_matrix_to_quat(current_rotation)
+        self._policy.set_end_effector_target(
+            self._target_world, self._target_orientation_world)
+
+    def apply(self) -> None:
+        if not self._motion_active:
+            return
+        self._sync_arm_base_pose()
+        action = self._articulation_policy.get_next_articulation_action()
+        self._robot.get_articulation_controller().apply_action(action)
+
+    def reset(self) -> None:
+        self._target_world = None
+        self._target_base = None
+        self._target_orientation_world = None
+        self._motion_active = False
+        self._mode = "IDLE"
+        self._target_id = 0
+        self._phase = "IDLE"
+        self._policy.reset()
+        self._sync_arm_base_pose()
+
+    def stop(self) -> None:
+        # 진단을 위해 마지막 목표는 보존한다. 이전에는 timeout 직후 목표를
+        # None으로 지워서 ROS에서 실패 지점의 distance를 확인할 수 없었다.
+        self._target_orientation_world = None
+        self._motion_active = False
+        self._mode = "STOPPED"
+        if not self._phase.startswith("STOPPED_"):
+            self._phase = f"STOPPED_{self._phase}"
+        self._policy.set_end_effector_target(None, None)
+
+    def go_home(self, target_id: int = 0) -> None:
+        self._target_world = None
+        self._target_base = None
+        self._target_orientation_world = None
+        self._target_id = int(target_id)
+        self._phase = "HOME"
+        self._mode = "HOME"
+        self._motion_active = True
+        self._policy.set_end_effector_target(None, None)
+        self._policy.set_cspace_target(self._home_positions)
+
+    def status(self, position_tolerance: float = 0.02) -> dict:
+        result = {"id": self._target_id, "phase": self._phase,
+                  "active": self._motion_active, "reached": False,
+                  "distance": None, "at_home": False,
+                  "current_position": None, "target_position": None}
+        joints = self._articulation_policy.get_active_joints_subset()
+        positions = joints.get_joint_positions()
+        if positions is None:
+            return result
+        if hasattr(positions, "cpu"):
+            positions = positions.cpu().numpy()
+        positions = np.asarray(positions, dtype=float)
+        home_error = float(np.max(np.abs(positions - self._home_positions)))
+        result["at_home"] = home_error <= 0.03
+        if self._mode == "HOME":
+            result["distance"] = home_error
+            result["reached"] = result["at_home"]
+        elif self._target_world is not None:
+            current, _ = self._policy.get_end_effector_pose(positions)
+            distance = float(np.linalg.norm(current - self._target_world))
+            result["distance"] = distance
+            # 접근/후퇴/바스켓 상공은 경유점이므로 산업용 팔이 자세 제약 아래
+            # 수 cm 앞에서 수렴해도 다음 단계로 진행해도 된다. 실제 파지점 GRASP와
+            # 놓기점 BASKET_PLACE만 기존 2 cm 정밀도를 유지한다.
+            phase_tolerance = {
+                "PREGRASP": 0.04,
+                "RETRACT": 0.04,
+                "BASKET_APPROACH": 0.04,
+            }.get(self._phase, position_tolerance)
+            result["reached"] = distance <= phase_tolerance
+            from pxr import Gf, UsdGeom
+            reference_world = UsdGeom.XformCache().GetLocalToWorldTransform(
+                self._stage.GetPrimAtPath(self._reference_prim))
+            current_base = reference_world.GetInverse().Transform(
+                Gf.Vec3d(*current))
+            result["current_position"] = [float(v) for v in current_base]
+            result["target_position"] = [float(v) for v in self._target_base]
+        return result
+
+    def _sync_arm_base_pose(self) -> None:
+        from pxr import UsdGeom
+
+        matrix = UsdGeom.XformCache().GetLocalToWorldTransform(
+            self._stage.GetPrimAtPath(self._arm_base_prim))
+        quat = matrix.ExtractRotationQuat()
+        imag = quat.GetImaginary()
+        self._policy.set_robot_base_pose(
+            np.asarray(matrix.ExtractTranslation(), dtype=float),
+            np.asarray([quat.GetReal(), imag[0], imag[1], imag[2]], dtype=float))
+
+
 class _JointMap:
     """dof 이름 → 인덱스. 요청한 이름이 없으면 즉시 에러(조용한 오작동 금지, §8)."""
 

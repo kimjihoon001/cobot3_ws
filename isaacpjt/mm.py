@@ -10,6 +10,7 @@ import json
 import math
 
 import numpy as np
+from isaacsim.core.utils.types import ArticulationAction
 
 from robot_base import Driver, ros_fail
 from robots.harvester import HOME_POSE_DEG, HarvestMM
@@ -28,16 +29,23 @@ class MMDriver(Driver):
     ns = "harvester_0"
     root = "/World/Harvester"
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, task=None):
         super().__init__()
         self._cfg = cfg
+        self._task = task
         self._mm = HarvestMM(cfg.robots)
         self._base_idx = None
+        self._gripper_idx = None
+        self._gripper_target = None
         self._poller = None
+        self._status_pub = None
         self._teleop = None
         self._stage = None
         self._twist = None                    # /cmd_vel 폴러 (Nav2 주행)
         self._dt = 1.0 / 60.0                 # finalize 에서 월드 실제 물리 dt 로 덮어씀
+        self._rmpflow = None
+        self._was_playing = False
+        self._cut_status = {}
 
     def spawn(self, stage):
         self._mm.spawn(stage, self.root, POSE)
@@ -63,15 +71,21 @@ class MMDriver(Driver):
         r = self.robot
         self._base_idx = np.array(
             [list(r.dof_names).index(n) for n in BASE_JOINTS])
+        self._gripper_idx = list(r.dof_names).index("finger_joint")
 
         if not opts.no_ros:
             try:
                 from ros import robot_bridge as RB
                 RB.build_joint_bridge(stage, f"/World/RosBridge_{self.ns}",
-                                      self.ns, self.art)
+                                      self.ns, self.art,
+                                      apply_commands=not opts.rmpflow)
                 sub = RB.build_string_sub(
                     f"/World/RosCmd_{self.ns}", f"/{self.ns}/cmd")
                 self._poller = RB.StringPoller(sub)
+                pub = RB.build_string_pub(
+                    f"/World/RosRmpStatus_{self.ns}",
+                    f"/{self.ns}/rmpflow/status")
+                self._status_pub = RB.StringPublisher(pub)
             except Exception:
                 ros_fail("MM 조인트/명령 브리지")
             if opts.camera:
@@ -81,7 +95,19 @@ class MMDriver(Driver):
                 self._twist = build_nav(stage, self._mm,
                                         self._cfg.robots.harvester_nav, opts)
 
-        if opts.mm_teleop:
+        if opts.rmpflow:
+            from robots.control import RmpFlowTargetController
+            self._rmpflow = RmpFlowTargetController(
+                r, stage,
+                reference_prim=f"{self.root}/Base/base_link",
+                arm_base_prim=f"{self.root}/Arm/base_link",
+                physics_dt=world.get_physics_dt(),
+                tool_tcp_prim=self._mm.grasp_tcp_path(stage))
+            print("[RMPflow] UR10e 목표 추종 활성: /harvester_0/cmd rmp_target")
+
+        if opts.mm_teleop and opts.rmpflow:
+            print("[MM] --rmpflow와 --mm-teleop 동시 제어는 충돌하므로 텔레옵 비활성")
+        elif opts.mm_teleop:
             self._teleop = build_teleop(r, self._mm.set_blade_deg, opts.gui)
 
     def _build_camera(self, stage):
@@ -93,12 +119,20 @@ class MMDriver(Driver):
             from ros import robot_bridge as RB
             RB.build_camera(stage, "/World/RosCamera", cam_prim,
                             self._cfg.robots.camera)
+            RB.build_camera_optical_tf(
+                stage, "/World/RosCameraTf",
+                f"{self.root}/Base/base_link", cam_prim,
+                self._cfg.robots.camera.frame_id)
         except Exception:
             import traceback
             print("\n[Camera] 그래프 생성 실패 — 씬 유지. probe 로 노드명 확인.")
             traceback.print_exc()
 
     def update(self, is_playing):
+        if is_playing and not self._was_playing and self._rmpflow is not None:
+            self._rmpflow.reset()
+            self._cut_status = {}
+        self._was_playing = is_playing
         if not is_playing and self._stage is not None:
             # 정지 중엔 조인트가 안 걸린다 — 가동날 사본을 그리퍼에 손으로 붙여둔다.
             self._mm.sync_blade_pose(self._stage)
@@ -119,9 +153,117 @@ class MMDriver(Driver):
                         self._mm.set_blade_deg(float(cmd["blade"]))
                     if "base" in cmd:
                         b = [float(v) for v in cmd["base"]]
-                        if len(b) == 3:
+                        home_ready = (self._rmpflow is None
+                                      or self._rmpflow.status()["at_home"])
+                        if len(b) == 3 and home_ready:
                             self.robot.set_joint_positions(
                                 np.array(b), joint_indices=self._base_idx)
+                        elif len(b) == 3:
+                            print("[MM] 홈 자세 전 베이스 이동 차단")
+                    if "rmp_target" in cmd and self._rmpflow is not None:
+                        target = cmd["rmp_target"]
+                        if isinstance(target, dict):
+                            try:
+                                self._rmpflow.set_target(
+                                    target["position"], int(target.get("id", 0)),
+                                    str(target.get("phase", "MOVE")))
+                            except (KeyError, TypeError, ValueError) as exc:
+                                print(f"[RMPflow] 잘못된 목표 무시: {exc}")
+                    if cmd.get("rmp_stop") is True and self._rmpflow is not None:
+                        self._rmpflow.stop()
+                    if "rmp_home" in cmd and self._rmpflow is not None:
+                        home = cmd["rmp_home"]
+                        if isinstance(home, dict):
+                            self._rmpflow.go_home(int(home.get("id", 0)))
+                    if "gripper" in cmd and isinstance(cmd["gripper"], dict):
+                        closed = bool(cmd["gripper"].get("closed", False))
+                        self._gripper_target = 0.80 if closed else 0.0
+                    if "cut_fruit" in cmd:
+                        self._handle_cut(cmd["cut_fruit"])
+        if is_playing and self._rmpflow is not None:
+            self._rmpflow.apply()
+            if self._status_pub is not None:
+                status = self._rmpflow.status()
+                status["gripper"] = float(
+                    self.robot.get_joint_positions()[self._gripper_idx])
+                status["blade"] = self._mm.blade_deg()
+                status.update(self._cut_status)
+                # Isaac 5.1 generic ROS2Publisher의 std_msgs/String data는 긴
+                # 문자열을 약 128 byte에서 "..."로 잘라 버린다. 잘린 JSON은
+                # manipulator_target_node가 파싱할 수 없어 reached=true를 놓치고
+                # 모든 동작이 ERROR_TIMEOUT으로 끝난다. 제어 루프에 필요한 값만
+                # 짧게 보내고, 좌표 상세값은 Isaac 콘솔의 RMPflow 로그로 본다.
+                wire_status = {
+                    "id": status["id"],
+                    "phase": status["phase"],
+                    "active": status["active"],
+                    "reached": status["reached"],
+                    "gripper": round(status["gripper"], 3),
+                }
+                if status["distance"] is not None:
+                    wire_status["distance"] = round(status["distance"], 4)
+                if status["phase"] == "HOME":
+                    wire_status["at_home"] = status["at_home"]
+                if "cut_id" in status:
+                    wire_status["cut_id"] = status["cut_id"]
+                    wire_status["cut_success"] = status["cut_success"]
+                payload = json.dumps(wire_status, separators=(",", ":"))
+                if len(payload.encode("utf-8")) > 120:
+                    # 향후 필드가 늘어도 조용히 다시 JSON을 깨뜨리지 않는다.
+                    print(f"[RMPflow] 상태 payload 초과({len(payload)}): {payload}")
+                else:
+                    self._status_pub.publish(payload)
+        # 손가락 위치 목표는 한 프레임짜리 명령으로 끝내지 않고 계속 유지한다.
+        # 물체 접촉과 mimic 관절 부하가 있는 2F-85는 단발 action에서 목표가
+        # 유지되지 않거나 중간 위치에 멈출 수 있다.
+        if is_playing and self._gripper_target is not None:
+            self.robot.apply_action(ArticulationAction(
+                joint_positions=np.array([self._gripper_target]),
+                joint_indices=np.array([self._gripper_idx])))
+
+    def _handle_cut(self, request) -> None:
+        """닫힌 커터 근처 ripe 과실의 pedicel FixedJoint를 해제한다."""
+        if not isinstance(request, dict) or self._task is None or self._stage is None:
+            return
+        try:
+            cut_id = int(request["id"])
+            base_position = np.asarray(request["position"], dtype=float)
+            tolerance = float(request.get("max_distance", 0.10))
+            if base_position.shape != (3,) or not np.all(np.isfinite(base_position)):
+                raise ValueError("position은 유한한 xyz여야 함")
+        except (KeyError, TypeError, ValueError) as exc:
+            print(f"[Cutter] 잘못된 절단 요청 무시: {exc}")
+            return
+
+        from pxr import Gf, UsdGeom
+        reference = self._stage.GetPrimAtPath(f"{self.root}/Base/base_link")
+        matrix = UsdGeom.XformCache().GetLocalToWorldTransform(reference)
+        target_world = np.asarray(
+            matrix.Transform(Gf.Vec3d(*base_position)), dtype=float)
+        nearest = None
+        nearest_distance = float("inf")
+        cache = UsdGeom.XformCache()
+        for fruit in self._task.pickable_fruits():
+            if fruit.get("class_name") != "ripe":
+                continue
+            prim = self._stage.GetPrimAtPath(fruit["path"])
+            if not prim.IsValid():
+                continue
+            position = np.asarray(
+                cache.GetLocalToWorldTransform(prim).ExtractTranslation(), dtype=float)
+            distance = float(np.linalg.norm(position - target_world))
+            if distance < nearest_distance:
+                nearest, nearest_distance = fruit, distance
+        blade_closed = self._mm.blade_deg() >= self._mm.BLADE_CLOSED_DEG - 1.0
+        success = bool(nearest is not None and nearest_distance <= tolerance
+                       and blade_closed and self._task.detach_fruit(nearest["path"]))
+        self._cut_status = {
+            "cut_id": cut_id, "cut_success": success,
+            "cut_distance": None if nearest is None else nearest_distance,
+            "fruit_path": "" if nearest is None else nearest["path"]}
+        print(f"[Cutter] pedicel joint {'해제' if success else '실패'}: "
+              f"id={cut_id}, distance={nearest_distance:.3f}m, "
+              f"blade_closed={blade_closed}")
 
     def _drive_base(self) -> None:
         """/cmd_vel(vx, vy, wz) 을 더미 3축에 적분해 넣는다 — 홀로노믹 베이스의 '주행'.

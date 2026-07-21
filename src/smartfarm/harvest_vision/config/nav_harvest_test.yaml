@@ -1,0 +1,21 @@
+manipulator_target_node:
+  ros__parameters:
+    command_enabled: true
+    auto_grasp_enabled: true
+    external_harvest_gate_enabled: true
+    # 모바일 매니퓰레이터 RMPflow는 자세에 따라 10초를 넘길 수 있어 단계별 여유를 둔다.
+    motion_timeout_sec: 30.0
+
+nav_harvest_test_node:
+  ros__parameters:
+    nav_status_topic: /navigate_to_pose/_action/status
+    harvest_enable_topic: /harvest_test/enable
+    manipulator_state_topic: /harvester_0/manipulator/target_state
+    mobility_ready_topic: /harvester_0/manipulator/mobility_ready
+    basket_pose_topic: /iw/basket/empty_slot_pose
+    basket_frame: base_link
+    # IW가 없을 때만 쓰는 tool0 release pose [x,y,z] in basket_frame.
+    mock_basket_release_xyz: [0.45, -0.35, 0.45]
+    search_timeout_sec: 60.0
+    # 통합시험 노드를 로봇 도착 후 켜도 마지막 SUCCEEDED 목표에서 수확을 이어간다.
+    accept_initial_succeeded_goal: true

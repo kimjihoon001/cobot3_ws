@@ -31,6 +31,7 @@ T = {
     "SimTime": "isaacsim.core.nodes.IsaacReadSimulationTime",
     "Clock": "isaacsim.ros2.bridge.ROS2PublishClock",
     "SubStr": "isaacsim.ros2.bridge.ROS2Subscriber",       # 제네릭(String) — GPU 확인
+    "PubStr": "isaacsim.ros2.bridge.ROS2Publisher",
     # ── Nav2 노드 (2026-07-20 create-probe 로 전부 확정 — tools/nav2_node_probe.py) ──
     # 아래 8개는 GPU 에서 실제 생성 성공한 이름이다. 같은 날 ROS2SubscribeTwist 의
     # 출력 속성도 실측했다: outputs:linearVelocity / outputs:angularVelocity (TwistPoller).
@@ -151,6 +152,23 @@ def build_string_sub(graph_path: str, topic: str,
            ("Sub.inputs:topicName", topic)])
     log(f"[RosBridge] String 구독: {topic} ({graph_path}/Sub)")
     return f"{graph_path}/Sub"
+
+
+def build_string_pub(graph_path: str, topic: str,
+                     domain_id: int = DOMAIN_ID, log=print) -> str:
+    """제네릭 std_msgs/String 발행 그래프. 반환값은 Publisher 노드 경로다."""
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("Pub", T["PubStr"])],
+          [("OnTick.outputs:tick", "Pub.inputs:execIn"),
+           ("Ctx.outputs:context", "Pub.inputs:context")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Pub.inputs:messagePackage", "std_msgs"),
+           ("Pub.inputs:messageSubfolder", "msg"),
+           ("Pub.inputs:messageName", "String"),
+           ("Pub.inputs:topicName", topic)])
+    log(f"[RosBridge] String 발행: {topic} ({graph_path}/Pub)")
+    return f"{graph_path}/Pub"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -364,6 +382,37 @@ def build_camera(stage, graph_path: str, camera_prim: str, cam,
     return cam.rgb_topic, cam.depth_topic
 
 
+def build_camera_optical_tf(stage, graph_path: str, base_prim: str,
+                            camera_prim: str, frame_id: str,
+                            domain_id: int = DOMAIN_ID, log=print) -> None:
+    """손끝 USD Camera의 ROS optical frame을 네이티브 동적 TF로 발행한다.
+
+    USD Camera(+X 오른쪽,+Y 위,-Z 전방) 아래에 X축 180° 회전한 프림을 두면
+    ROS optical(+X 오른쪽,+Y 아래,+Z 전방)이 된다. Python이 매 프레임 OG 값을
+    쓰지 않고 USD 계층과 ROS2PublishTransformTree가 팔 움직임을 직접 추종한다.
+    """
+    from pxr import Gf, UsdGeom
+
+    optical_path = f"{camera_prim}/{frame_id}"
+    optical = UsdGeom.Xform.Define(stage, optical_path)
+    optical.ClearXformOpOrder()
+    optical.AddRotateXOp().Set(180.0)
+    optical.AddTranslateOp().Set(Gf.Vec3d(0.0))
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
+           ("SimTime", T["SimTime"]), ("Tf", T["PubTf"])],
+          [("OnTick.outputs:tick", "Tf.inputs:execIn"),
+           ("Ctx.outputs:context", "Tf.inputs:context"),
+           ("SimTime.outputs:simulationTime", "Tf.inputs:timeStamp")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Tf.inputs:topicName", "/tf"),
+           ("Tf.inputs:staticPublisher", False)])
+    _set_target(stage, f"{graph_path}/Tf", "inputs:parentPrim", base_prim)
+    _set_target(stage, f"{graph_path}/Tf", "inputs:targetPrims", optical_path)
+    log(f"[Camera] 동적 TF: {stage.GetPrimAtPath(base_prim).GetName()}→{frame_id}")
+
+
 class TwistPoller:
     """ROS2SubscribeTwist 출력 폴링 → (vx, vy, wz). 홀로노믹 베이스(Ridgeback)용.
 
@@ -416,6 +465,23 @@ class StringPoller:
             self._last = raw
             return str(raw)
         return None
+
+
+class StringPublisher:
+    """제네릭 String Publisher의 data 입력을 갱신한다."""
+
+    def __init__(self, node_path: str):
+        self._path = node_path
+        self._attr = None
+
+    def publish(self, value: str) -> bool:
+        if self._attr is None:
+            try:
+                self._attr = og.Controller.attribute("inputs:data", self._path)
+            except Exception:
+                return False
+        og.Controller.set(self._attr, value)
+        return True
 
 
 class JointCommandPoller:

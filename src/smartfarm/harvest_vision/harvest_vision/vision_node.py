@@ -14,6 +14,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import String
 
 from smartfarm_interfaces.msg import TomatoDetection, TomatoDetectionArray
 
@@ -45,11 +46,13 @@ class VisionNode(Node):
         self.declare_parameter("camera_info_topic", "/harvester/camera_info")
         self.declare_parameter("annotated_topic", "/vision/annotated_image")
         self.declare_parameter("target_topic", "/vision/approach_target")
+        self.declare_parameter("target_class_topic", "/vision/target_class")
         self.declare_parameter("detector_model_path", os.path.join(share, "finetuned_far.pt"))
         self.declare_parameter("quality_model_path", os.path.join(share, "finetuned_near.pt"))
         self.declare_parameter("detector_confidence", 0.25)
         self.declare_parameter("quality_confidence", 0.55)
         self.declare_parameter("near_distance_m", 0.50)
+        self.declare_parameter("far_resume_distance_m", 0.60)
         self.declare_parameter("near_box_ratio", 0.025)
         self.declare_parameter("crop_padding_ratio", 0.20)
         self.declare_parameter("quality_vote_frames", 5)
@@ -60,6 +63,7 @@ class VisionNode(Node):
         self._quality_votes: deque[tuple[str, float]] = deque(
             maxlen=int(self.get_parameter("quality_vote_frames").value)
         )
+        self._near_latched = False
 
         self._detector = self._load_model("detector_model_path", expected={"tomato"})
         self._quality_model = self._load_model(
@@ -80,6 +84,9 @@ class VisionNode(Node):
         )
         self._target_pub = self.create_publisher(
             PoseStamped, str(self.get_parameter("target_topic").value), 10
+        )
+        self._target_class_pub = self.create_publisher(
+            String, str(self.get_parameter("target_class_topic").value), 10
         )
 
         self.get_logger().info(
@@ -116,7 +123,9 @@ class VisionNode(Node):
     def _rgb_callback(self, msg: Image):
         frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         depth = self._depth_array(self._latest_depth)
-        detections, annotated, target_pose = self._run_detection(frame, depth, msg)
+        detections, annotated, target_pose, target_class = self._run_detection(
+            frame, depth, msg
+        )
 
         array_msg = TomatoDetectionArray()
         array_msg.header = msg.header
@@ -130,6 +139,8 @@ class VisionNode(Node):
         self._annotated_pub.publish(annotated_msg)
         if target_pose is not None:
             self._target_pub.publish(target_pose)
+        # 빈 문자열도 발행해야 접근 제어기가 검출 소실을 즉시 알 수 있다.
+        self._target_class_pub.publish(String(data=target_class or ""))
 
     @staticmethod
     def _bgr_image_message(frame: np.ndarray) -> Image:
@@ -161,7 +172,7 @@ class VisionNode(Node):
 
     def _run_detection(
         self, frame: np.ndarray, depth: np.ndarray | None, source_msg: Image
-    ) -> tuple[list[TomatoDetection], np.ndarray, PoseStamped | None]:
+    ) -> tuple[list[TomatoDetection], np.ndarray, PoseStamped | None, str | None]:
         conf = float(self.get_parameter("detector_confidence").value)
         result = self._detector.predict(frame, conf=conf, verbose=False)[0]
         candidates = []
@@ -178,12 +189,13 @@ class VisionNode(Node):
 
         if not candidates:
             self._quality_votes.clear()
+            self._near_latched = False
             annotated = frame.copy()
             cv2.putText(
                 annotated, "NO TOMATO", (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                 1.0, (0, 0, 255), 2, cv2.LINE_AA,
             )
-            return [], annotated, None
+            return [], annotated, None, None
 
         # 깊이가 있으면 가장 가까운 토마토, 없으면 가장 큰 박스를 목표로 삼는다.
         with_depth = [item for item in candidates if item["distance"] is not None]
@@ -193,7 +205,8 @@ class VisionNode(Node):
             else max(candidates, key=lambda item: self._box_area(item["box"]))
         )
         target_class, target_conf = "tomato", target["confidence"]
-        if self._is_near(target, frame.shape):
+        near = self._is_near(target, frame.shape)
+        if near:
             quality = self._classify_quality(frame, target["box"])
             if quality is not None:
                 self._quality_votes.append(quality)
@@ -214,15 +227,29 @@ class VisionNode(Node):
             )
         annotated = self._draw_detections(frame, candidates, target, messages)
         target_pose = self._pose_for_candidate(target, source_msg)
-        return messages, annotated, target_pose
+        # 근거리 진입 즉시 팔을 멈추고, 정지 상태에서 품질 투표를 끝낸다.
+        control_class = (
+            target_class if target_class in QUALITY_CLASSES else
+            "quality_check" if near else "tomato"
+        )
+        return messages, annotated, target_pose, control_class
 
     def _is_near(self, candidate: dict, shape: tuple[int, ...]) -> bool:
         distance = candidate["distance"]
         if distance is not None:
-            return distance <= float(self.get_parameter("near_distance_m").value)
+            threshold = (
+                float(self.get_parameter("far_resume_distance_m").value)
+                if self._near_latched
+                else float(self.get_parameter("near_distance_m").value)
+            )
+            self._near_latched = distance <= threshold
+            return self._near_latched
         image_area = float(shape[0] * shape[1])
         ratio = self._box_area(candidate["box"]) / image_area
-        return ratio >= float(self.get_parameter("near_box_ratio").value)
+        self._near_latched = ratio >= float(
+            self.get_parameter("near_box_ratio").value
+        )
+        return self._near_latched
 
     def _classify_quality(
         self, frame: np.ndarray, box: tuple[float, float, float, float]
@@ -233,9 +260,31 @@ class VisionNode(Node):
             return None
         conf = float(self.get_parameter("quality_confidence").value)
         result = self._quality_model.predict(crop, conf=conf, verbose=False)[0]
-        if not len(result.boxes):
+        if len(result.boxes):
+            best = max(result.boxes, key=lambda item: float(item.conf[0]))
+            name = _model_names(self._quality_model)[int(best.cls[0])]
+            return name, float(best.conf[0])
+
+        # 근거리 detect 모델은 전체 카메라 프레임으로 학습됐을 수 있다. 타이트한 crop을
+        # 640 입력으로 확대하면 과실 일부가 잘려 검출이 0개가 되는 경우가 있으므로,
+        # 전체 프레임에서 다시 추론하고 원거리 타겟 중심 안에 든 품질 박스만 채택한다.
+        full = self._quality_model.predict(frame, conf=conf, verbose=False)[0]
+        matches = []
+        tx1, ty1, tx2, ty2 = box
+        for candidate in full.boxes:
+            qx1, qy1, qx2, qy2 = (
+                float(value) for value in candidate.xyxy[0].tolist()
+            )
+            cx, cy = (qx1 + qx2) * 0.5, (qy1 + qy2) * 0.5
+            if tx1 <= cx <= tx2 and ty1 <= cy <= ty2:
+                matches.append(candidate)
+        if not matches:
+            self.get_logger().warning(
+                "근거리 품질 모델 검출 없음(crop/full-frame)",
+                throttle_duration_sec=2.0,
+            )
             return None
-        best = max(result.boxes, key=lambda item: float(item.conf[0]))
+        best = max(matches, key=lambda item: float(item.conf[0]))
         name = _model_names(self._quality_model)[int(best.cls[0])]
         return name, float(best.conf[0])
 
