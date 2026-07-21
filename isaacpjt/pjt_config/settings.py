@@ -598,7 +598,10 @@ class HarvesterNavConfig:
     # [1] Clearpath Ridgeback 공식 사양: 0.96 × 0.793 × 0.296 m, 최고 1.1 m/s, 적재 100 kg.
     # [4] 아래 상한은 사양이 아니라 **온실 통로 안전 상한** — 통로 1.5m 에서 1.1m/s 는 과하다.
     max_vx: float = 0.5              # m/s   전후
-    max_vy: float = 0.4              # m/s   좌우(게걸음). 측면은 시야가 없어 더 낮춘다
+    # 2026-07-21 사용자 요청으로 옆걸음(게걸음) 제거 — 0.0 으로 하드 클램프.
+    # Nav2 쪽(harvester_nav2.yaml FollowPath/velocity_smoother)도 이미 y=0 만
+    # 내보내지만, 여기서 한 번 더 막아 다른 소스(teleop 등)의 y 도 차단한다.
+    max_vy: float = 0.0              # m/s   좌우(게걸음) — 비활성
     max_wz: float = 1.0              # rad/s 제자리 회전
 
     # 라이다 마운트 (Base/base_link 로컬). [2] 유도 — 차체 길이 0.96m 의 앞 끝(+0.45),
