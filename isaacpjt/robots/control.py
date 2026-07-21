@@ -46,6 +46,7 @@ class RmpFlowTargetController:
             home = home.cpu().numpy()
         self._home_positions = np.asarray(home, dtype=float).copy()
         self._target_world = None
+        self._target_tcp_world = None
         self._target_base = None
         self._target_orientation_world = None
         self._motion_active = False
@@ -65,6 +66,7 @@ class RmpFlowTargetController:
         self._target_base = values.copy()
         desired_tcp_world = np.asarray(
             matrix.Transform(Gf.Vec3d(*values)), dtype=float)
+        self._target_tcp_world = desired_tcp_world.copy()
         self._motion_active = True
         self._mode = "POSITION"
         self._target_id = int(target_id)
@@ -106,6 +108,7 @@ class RmpFlowTargetController:
 
     def reset(self) -> None:
         self._target_world = None
+        self._target_tcp_world = None
         self._target_base = None
         self._target_orientation_world = None
         self._motion_active = False
@@ -127,6 +130,7 @@ class RmpFlowTargetController:
 
     def go_home(self, target_id: int = 0) -> None:
         self._target_world = None
+        self._target_tcp_world = None
         self._target_base = None
         self._target_orientation_world = None
         self._target_id = int(target_id)
@@ -155,7 +159,19 @@ class RmpFlowTargetController:
             result["reached"] = result["at_home"]
         elif self._target_world is not None:
             current, _ = self._policy.get_end_effector_pose(positions)
-            distance = float(np.linalg.norm(current - self._target_world))
+            measured_world = np.asarray(current, dtype=float)
+            desired_world = self._target_world
+            # 완료 판정은 RMPflow 내부 ee_link가 아니라 실제 USD HarvestTCP로 한다.
+            # 플랜지만 목표에 도달하고 손가락 중심이 남은 상태를 성공 처리하지 않는다.
+            if self._target_tcp_world is not None and self._tool_tcp_prim:
+                tcp_prim = self._stage.GetPrimAtPath(self._tool_tcp_prim)
+                if tcp_prim.IsValid():
+                    from pxr import UsdGeom
+                    measured_world = np.asarray(
+                        UsdGeom.XformCache().GetLocalToWorldTransform(
+                            tcp_prim).ExtractTranslation(), dtype=float)
+                    desired_world = self._target_tcp_world
+            distance = float(np.linalg.norm(measured_world - desired_world))
             result["distance"] = distance
             # 접근/후퇴/바스켓 상공은 경유점이므로 산업용 팔이 자세 제약 아래
             # 수 cm 앞에서 수렴해도 다음 단계로 진행해도 된다. 실제 파지점 GRASP와
@@ -170,7 +186,7 @@ class RmpFlowTargetController:
             reference_world = UsdGeom.XformCache().GetLocalToWorldTransform(
                 self._stage.GetPrimAtPath(self._reference_prim))
             current_base = reference_world.GetInverse().Transform(
-                Gf.Vec3d(*current))
+                Gf.Vec3d(*measured_world))
             result["current_position"] = [float(v) for v in current_base]
             result["target_position"] = [float(v) for v in self._target_base]
         return result

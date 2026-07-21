@@ -193,20 +193,26 @@ class MMDriver(Driver):
                 # manipulator_target_node가 파싱할 수 없어 reached=true를 놓치고
                 # 모든 동작이 ERROR_TIMEOUT으로 끝난다. 제어 루프에 필요한 값만
                 # 짧게 보내고, 좌표 상세값은 Isaac 콘솔의 RMPflow 로그로 본다.
-                wire_status = {
-                    "id": status["id"],
-                    "phase": status["phase"],
-                    "active": status["active"],
-                    "reached": status["reached"],
-                    "gripper": round(status["gripper"], 3),
-                }
-                if status["distance"] is not None:
-                    wire_status["distance"] = round(status["distance"], 4)
-                if status["phase"] == "HOME":
-                    wire_status["at_home"] = status["at_home"]
                 if "cut_id" in status:
-                    wire_status["cut_id"] = status["cut_id"]
-                    wire_status["cut_success"] = status["cut_success"]
+                    # 절단 응답은 FSM이 기다리는 필드만 보낸다. 일반 모션 상태에
+                    # 두 필드를 덧붙이면 generic String의 128-byte 한계를 넘는다.
+                    wire_status = {
+                        "cut_id": status["cut_id"],
+                        "cut_success": status["cut_success"],
+                        "gripper": round(status["gripper"], 3),
+                    }
+                else:
+                    wire_status = {
+                        "id": status["id"],
+                        "phase": status["phase"],
+                        "active": status["active"],
+                        "reached": status["reached"],
+                        "gripper": round(status["gripper"], 3),
+                    }
+                    if status["distance"] is not None:
+                        wire_status["distance"] = round(status["distance"], 4)
+                    if status["phase"] == "HOME":
+                        wire_status["at_home"] = status["at_home"]
                 payload = json.dumps(wire_status, separators=(",", ":"))
                 if len(payload.encode("utf-8")) > 120:
                     # 향후 필드가 늘어도 조용히 다시 JSON을 깨뜨리지 않는다.
