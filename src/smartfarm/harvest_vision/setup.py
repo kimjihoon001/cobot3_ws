@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import setup
 
 package_name = "harvest_vision"
@@ -8,7 +10,11 @@ setup(
     packages=[package_name],
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
-        ("share/" + package_name, ["package.xml", "resource/1st_learn.pt"]),
+        ("share/" + package_name, ["package.xml"]),
+    ]
+    + [
+        ("share/" + package_name, [model_path])
+        for model_path in glob("resource/*.pt")
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -23,6 +29,7 @@ setup(
             "harvest_fsm_node = harvest_vision.harvest_fsm_node:main",
             "tray_manager_node = harvest_vision.tray_manager_node:main",
             "vision_debug_view = harvest_vision.vision_debug_view:main",
+            "target_approach_node = harvest_vision.target_approach_node:main",
         ],
     },
 )

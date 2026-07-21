@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 import os
 
-from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from pjt_config.settings import RobotConfig
 from pjt_utils.xform import set_pose, set_translate
@@ -569,8 +569,35 @@ class HarvestMM:
             stage.GetPrimAtPath(f"{root}/camera_dummy")).ComputeAlignedRange().GetMidpoint()
         self._add_camera_at(stage, Gf.Vec3d(cam_w), _CAD_CAM_EULER, log)
         stage.GetPrimAtPath(f"{root}/camera_dummy").SetActive(False)  # 로케이터 숨김
+
+        # 커터/지그 = 금속 회색으로 못박는다. CAD USD 메시엔 색/재질이 안 구워져 있어 그대로면
+        # RGB(Replicator)·ROS 카메라에서 fallback 회색으로 뜬다. UsdPreviewSurface(metallic)를
+        # 직접 바인딩해 main·SDG 모두에서 금속 날로 보이게 한다(camera_dummy 는 비활성이라 제외됨).
+        self._bind_metal(stage, root)
         log(f"[Harvester] CAD 커터 지그 부착: {root} "
-            f"(커플러 동축, 그리퍼 +{_COUPLER_T*1000:.0f}mm, 실물 D455)")
+            f"(커플러 동축, 그리퍼 +{_COUPLER_T*1000:.0f}mm, 실물 D455, 금속 회색 재질)")
+
+    @staticmethod
+    def _bind_metal(stage: Usd.Stage, root: str,
+                    mat_path: str = "/World/Looks/CutterMetal") -> None:
+        """root 하위 모든 메시에 금속 회색 UsdPreviewSurface 를 바인딩(재질 1개 재사용)."""
+        if stage.GetPrimAtPath(mat_path):
+            metal = UsdShade.Material(stage.GetPrimAtPath(mat_path))
+        else:
+            metal = UsdShade.Material.Define(stage, mat_path)
+            sh = UsdShade.Shader.Define(stage, mat_path + "/S")
+            sh.CreateIdAttr("UsdPreviewSurface")
+            sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+                Gf.Vec3f(0.55, 0.57, 0.60))
+            sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.9)
+            sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.35)
+            metal.CreateSurfaceOutput().ConnectToSource(
+                sh.CreateOutput("surface", Sdf.ValueTypeNames.Token))
+        for prim in Usd.PrimRange(stage.GetPrimAtPath(root)):
+            if prim.IsA(UsdGeom.Mesh):
+                mb = UsdShade.MaterialBindingAPI.Apply(prim)
+                mb.UnbindAllBindings()
+                mb.Bind(metal)
 
     def camera_path(self, stage: Usd.Stage) -> str | None:
         """D455 컬러 카메라 prim 경로 (ROS2 렌더프로덕트용). 없으면 None.
