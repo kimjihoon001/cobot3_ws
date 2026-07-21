@@ -43,6 +43,8 @@ generate_tomatoes.py
 yolo_training/raw/
 yolo_training/processed/
 yolo_training/runs/
+isaacpjt/tomatest/scene_yolo
+isaacpjt/tomatest/scene_dataset
 
 # 대용량 압축 아카이브 (GitHub 100MB 제한 초과)
 *.tar.gz
