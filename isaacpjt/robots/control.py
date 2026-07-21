@@ -14,6 +14,8 @@ harvester.py / transporter.py 는 **놓기만** 한다(그쪽 docstring 참조).
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from isaacsim.core.utils.types import ArticulationAction
 
@@ -75,6 +77,14 @@ class HarvesterController:
     def move_base(self, dx: float, dy: float, dyaw: float) -> None:
         bx, by, bw = self._jm.idx(*self.BASE)
         self._t[bx] += dx; self._t[by] += dy; self._t[bw] += dyaw
+
+    def move_base_forward(self, distance: float, dyaw: float = 0.0) -> None:
+        """현재 MM yaw 기준으로 전후 이동하고 회전한다. 횡방향 게걸음은 허용하지 않는다."""
+        bx, by, bw = self._jm.idx(*self.BASE)
+        yaw = self._t[bw]
+        self._t[bx] += float(distance) * math.cos(yaw)
+        self._t[by] += float(distance) * math.sin(yaw)
+        self._t[bw] += float(dyaw)
 
     def set_gripper(self, closed_frac: float) -> None:
         """0=완전 열림, 1=완전 닫힘."""

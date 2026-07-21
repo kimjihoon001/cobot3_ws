@@ -20,10 +20,10 @@
                      ⚠ 노드명 미확정 — tools/nav2_node_probe.py 로 먼저 실측할 것)
   (카메라는 --mm 일 때 기본 자동 발행 — 손끝 D455 → /harvester_0/... , YOLO 파인튜닝용.
    ROS 켤 때 자동. 끄려면 --no-camera. ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로)
-  isaac_python main.py --mm --teleop      (MM 키보드 텔레옵 — 팔·베이스·그리퍼·블레이드 직접 조작)
+  isaac_python main.py --mm --mm-teleop   (MM 전용 텔레옵 — iw.hub와 완전 분리)
   isaac_python main.py --mm --iw --fork --export --headless   (조립한 씬을 USD 로 저장하고 종료.
                      기본 ~/cobot3_ws/scene.usd. 이름/경로 지정 가능: --export mm.usda)
-  isaac_python main.py --load --mm --teleop --no-ros   (기존 USD 를 열어 실행 — 씬 재조립 안 함)
+  isaac_python main.py --load --mm --mm-teleop --no-ros (기존 USD에서 MM만 텔레옵)
 
 로봇 3대 (물류 루프: MM 수확 → iw.hub 팔레트+KLT 운반 → 지게차 랙 적재):
   /World/Harvester   수확 MM (Ridgeback+UR10e+2F-85+커터지그+가동날+D455)   --mm
@@ -60,7 +60,15 @@ NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
 # ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로(main 이 예외 잡음).
 CAMERA = "--no-camera" not in sys.argv
 # MM 키보드 텔레옵 (팔·베이스·그리퍼·블레이드 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
-TELEOP = "--teleop" in sys.argv
+# MM 키보드 입력은 명시적인 전용 플래그만 사용한다. --mm와 --iw를 같이 띄워도
+# 키 입력이 iw.hub에 전달되거나 전역 teleop 상태를 공유하지 않는다.
+MM_TELEOP = "--mm-teleop" in sys.argv
+if "--teleop" in sys.argv:
+    raise SystemExit("--teleop은 제거됐습니다. MM은 --mm --mm-teleop을 사용하세요.")
+if MM_TELEOP and "--mm" not in sys.argv:
+    raise SystemExit("--mm-teleop은 --mm과 함께 사용해야 합니다.")
+if MM_TELEOP and NAV_DRIVE:
+    raise SystemExit("MM 텔레옵과 Nav2는 동시에 베이스를 제어할 수 없습니다.")
 
 
 def _arg_value(name: str, default=None):
@@ -84,7 +92,7 @@ else:
     EXPORT = None
 
 # 기존 USD 를 열어 그대로 실행(씬 재조립 안 함). --load <이름|경로>, 생략 시 scene.usd.
-#   기본 폴더 ~/cobot3_ws. 텔레옵은 --teleop 와 같이. 예) --load --mm --teleop --no-ros
+#   기본 폴더 ~/cobot3_ws. 텔레옵은 --mm-teleop과 같이 쓴다.
 if "--load" in sys.argv:
     _lname = _arg_value("--load", "scene.usd")
     LOAD = _lname if os.path.isabs(_lname) else os.path.join(_EXPORT_DIR, _lname)
@@ -131,7 +139,7 @@ class Opts:
     def __init__(self):
         self.no_ros = NO_ROS
         self.gui = GUI
-        self.teleop = TELEOP
+        self.mm_teleop = MM_TELEOP
         self.camera = CAMERA
         self.nav_drive = NAV_DRIVE
         self.nav_odom = NAV_ODOM
@@ -232,7 +240,7 @@ def run_loaded(path: str) -> None:
         world.reset()
         for _ in range(15):
             world.step(render=False)
-        if TELEOP:
+        if MM_TELEOP:
             from mm import build_teleop, find_blade_setter
             teleop = build_teleop(mm_robot, find_blade_setter(stage), GUI)
     else:

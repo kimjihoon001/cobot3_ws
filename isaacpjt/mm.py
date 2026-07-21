@@ -81,7 +81,7 @@ class MMDriver(Driver):
                 self._twist = build_nav(stage, self._mm,
                                         self._cfg.robots.harvester_nav, opts)
 
-        if opts.teleop:
+        if opts.mm_teleop:
             self._teleop = build_teleop(r, self._mm.set_blade_deg, opts.gui)
 
     def _build_camera(self, stage):
@@ -228,7 +228,7 @@ def build_teleop(mm_robot, set_blade, gui: bool):
     print("""
 [MM 텔레옵] 플레이 상태에서 (방향키는 뷰포트가 가로챔 — 숫자/글자키만)
   팔    숫자 1~6 으로 관절 선택 → , 반시계 / . 시계 로 그 관절 회전
-  베이스 I/K 전후 · J/L 좌우 · U/O 회전
+  베이스 I/K 전후 · J/L 제자리 회전 (옆 이동 없음: 회전 후 전진)
   그리퍼 Z 열기 / X 닫기      블레이드 B 열기(0°) / N 닫기(절단)
 """)
 
@@ -240,11 +240,10 @@ def build_teleop(mm_robot, set_blade, gui: bool):
             ctrl.move_arm(j, DQ)
         if K.PERIOD in pressed:                      # . = 시계(CW, −)
             ctrl.move_arm(j, -DQ)
-        dx = (K.I in pressed) - (K.K in pressed)
-        dy = (K.J in pressed) - (K.L in pressed)
-        dyaw = (K.U in pressed) - (K.O in pressed)
-        if dx or dy or dyaw:
-            ctrl.move_base(dx * DB, dy * DB, dyaw * DYAW)
+        forward = (K.I in pressed) - (K.K in pressed)
+        dyaw = (K.J in pressed) - (K.L in pressed)
+        if forward or dyaw:
+            ctrl.move_base_forward(forward * DB, dyaw * DYAW)
         if K.Z in pressed:
             ctrl.move_gripper(-DG)
         if K.X in pressed:

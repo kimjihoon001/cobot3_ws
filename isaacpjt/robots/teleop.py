@@ -12,7 +12,7 @@
        R/F wrist_1        T/G wrist_2         Y/H wrist_3
   그리퍼   O 열기 / P 닫기
   블레이드 Z 열기(0°) / X 닫기(35°=절단)
-  베이스   I/K 앞뒤   J/L 좌우(옆이동—홀로노믹)   U/M 회전
+  베이스   I/K 앞뒤   J/L 제자리 회전 (옆이동 없음)
   SPACE 현재 관절·날각 출력    ESC 종료
 """
 import os
@@ -106,11 +106,10 @@ def main():
         if K.P in pressed: ctrl.move_gripper(DG)      # 그리퍼 닫기
         if K.Z in pressed: mm.move_blade(-DBL)        # 날 열기(→0°)
         if K.X in pressed: mm.move_blade(DBL)         # 날 닫기(→35°=절단)
-        dx = (K.I in pressed) - (K.K in pressed)      # 앞/뒤
-        dy = (K.J in pressed) - (K.L in pressed)      # 좌/우(홀로노믹 옆이동)
-        dw = (K.U in pressed) - (K.M in pressed)      # 회전
-        if dx or dy or dw:
-            ctrl.move_base(dx * DB, dy * DB, dw * DYAW)
+        forward = (K.I in pressed) - (K.K in pressed) # 앞/뒤
+        dw = (K.J in pressed) - (K.L in pressed)      # 제자리 회전
+        if forward or dw:
+            ctrl.move_base_forward(forward * DB, dw * DYAW)
 
         ctrl.apply()                                  # 제어 실행(매 프레임 고정)
         world.step(render=True)
@@ -127,7 +126,7 @@ def main():
 #   키보드 핸들러와 '같은 메서드'를 부른다:
 #       팔     : ctrl.set_arm([q0..q5])   또는  ctrl.move_arm(i, dq)
 #       그리퍼 : ctrl.set_gripper(0~1)
-#       베이스 : ctrl.set_base(x, y, yaw) 또는  ctrl.move_base(dx, dy, dyaw)
+#       베이스 : ctrl.set_base(x, y, yaw) 또는 ctrl.move_base_forward(ds, dyaw)
 #       블레이드: mm.set_blade_deg(0~35)   또는  mm.move_blade(d)
 #   즉 '제어 실행'은 여기 고정, '무엇을 할지' 판단만 ROS2(dev 머신)로 간다(§5.6).
 # ============================================================
