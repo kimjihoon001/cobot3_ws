@@ -51,6 +51,9 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("basket_pose_topic", "/iw/basket/empty_slot_pose")
         self.declare_parameter("harvest_enable_topic", "/harvest_test/enable")
         self.declare_parameter("external_harvest_gate_enabled", False)
+        self.declare_parameter("use_sim_ground_truth", False)
+        self.declare_parameter("sim_tomato_topic", "/harvester_0/sim/tomato")
+        self.declare_parameter("sim_match_radius_m", 0.35)
         self.declare_parameter(
             "mobility_ready_topic", "/harvester_0/manipulator/mobility_ready"
         )
@@ -87,6 +90,7 @@ class ManipulatorTargetNode(Node):
         self._cut_sent = False
         self._gripper_command_at_ns = 0
         self._basket_place: np.ndarray | None = None
+        self._sim_fruits: list[tuple[np.ndarray, int]] = []
 
         input_topic = str(self.get_parameter("input_topic").value)
         validated_topic = str(self.get_parameter("validated_topic").value)
@@ -115,6 +119,9 @@ class ManipulatorTargetNode(Node):
         self.create_subscription(String, status_topic, self._status_callback, 10)
         self.create_subscription(PoseStamped, basket_topic, self._basket_callback, 10)
         self.create_subscription(Bool, enable_topic, self._enable_callback, 10)
+        self.create_subscription(
+            String, str(self.get_parameter("sim_tomato_topic").value),
+            self._sim_tomato_callback, 20)
         self.create_timer(0.1, self._watchdog)
         self._target_class = ""
         self._state = "NO_TARGET"
@@ -286,6 +293,17 @@ class ManipulatorTargetNode(Node):
             self._transition("ERROR_NO_TARGET", stop=True)
             return
         target = np.asarray(self._latest_target, dtype=float)
+        if bool(self.get_parameter("use_sim_ground_truth").value):
+            sim_target = self._match_sim_tomato(target)
+            if sim_target is None:
+                self._transition("ERROR_NO_SIM_MATCH", stop=True)
+                return
+            self.get_logger().info(
+                "비전 검출을 시뮬 토마토 좌표에 매칭: "
+                f"vision=({target[0]:.3f}, {target[1]:.3f}, {target[2]:.3f}) -> "
+                f"sim=({sim_target[0]:.3f}, {sim_target[1]:.3f}, {sim_target[2]:.3f})")
+            target = sim_target
+            self._latest_target = tuple(float(v) for v in target)
         camera = np.asarray(self._latest_camera, dtype=float)
         ray = target - camera
         length = float(np.linalg.norm(ray))
@@ -299,6 +317,41 @@ class ManipulatorTargetNode(Node):
         self._pregrasp_target = pregrasp
         self._grasp_target = target
         self._send_rmp_goal(pregrasp, "PREGRASP")
+
+    def _sim_tomato_callback(self, msg: String) -> None:
+        try:
+            item = json.loads(msg.data)
+            if not isinstance(item, dict):
+                return
+            position = np.asarray(item["position"], dtype=float)
+        except (KeyError, TypeError, ValueError):
+            return
+        if item.get("class") != "ripe" or position.shape != (3,):
+            return
+        now = self.get_clock().now().nanoseconds
+        for index, (known, _) in enumerate(self._sim_fruits):
+            if float(np.linalg.norm(known - position)) < 0.02:
+                self._sim_fruits[index] = (position, now)
+                break
+        else:
+            self._sim_fruits.append((position, now))
+        self._sim_fruits = [
+            entry for entry in self._sim_fruits
+            if now - entry[1] <= int(3.0e9)]
+
+    def _match_sim_tomato(self, vision_target: np.ndarray) -> np.ndarray | None:
+        now = self.get_clock().now().nanoseconds
+        fresh = [position for position, stamp in self._sim_fruits
+                 if now - stamp <= int(3.0e9)]
+        if not fresh:
+            return None
+        nearest = min(fresh, key=lambda p: float(np.linalg.norm(p - vision_target)))
+        distance = float(np.linalg.norm(nearest - vision_target))
+        if distance > float(self.get_parameter("sim_match_radius_m").value):
+            self.get_logger().warning(
+                f"시뮬 토마토 매칭 거리 초과: {distance:.3f}m")
+            return None
+        return nearest.copy()
 
     def _send_rmp_goal(self, position: np.ndarray, phase: str) -> None:
         self._sequence_id += 1

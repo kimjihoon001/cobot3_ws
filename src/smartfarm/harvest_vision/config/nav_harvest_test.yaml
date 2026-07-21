@@ -3,6 +3,10 @@ manipulator_target_node:
     command_enabled: true
     auto_grasp_enabled: true
     external_harvest_gate_enabled: true
+    # 시뮬 통합시험: YOLO가 선택한 과실을 Isaac ground-truth 좌표에 매칭한다.
+    # 실기에서는 false로 두고 비전 3D 좌표만 사용한다.
+    use_sim_ground_truth: true
+    sim_match_radius_m: 0.35
     # 모바일 매니퓰레이터 RMPflow는 자세에 따라 10초를 넘길 수 있어 단계별 여유를 둔다.
     motion_timeout_sec: 30.0
 

@@ -39,6 +39,8 @@ class MMDriver(Driver):
         self._gripper_target = None
         self._poller = None
         self._status_pub = None
+        self._fruit_pub = None
+        self._fruit_cursor = 0
         self._teleop = None
         self._stage = None
         self._twist = None                    # /cmd_vel 폴러 (Nav2 주행)
@@ -72,6 +74,23 @@ class MMDriver(Driver):
         self._base_idx = np.array(
             [list(r.dof_names).index(n) for n in BASE_JOINTS])
         self._gripper_idx = list(r.dof_names).index("finger_joint")
+        # RMPflow 목표를 따라갈 때 링크가 처져 보이지 않도록 UR10e 6축의
+        # articulation position drive 게인만 강화한다. 베이스/그리퍼는 건드리지 않는다.
+        arm_indices = np.array([
+            list(r.dof_names).index(name) for name, _ in HOME_POSE_DEG])
+        controller = r.get_articulation_controller()
+        kps, kds = controller.get_gains()
+        if hasattr(kps, "cpu"):
+            kps = kps.cpu().numpy()
+        if hasattr(kds, "cpu"):
+            kds = kds.cpu().numpy()
+        kps = np.asarray(kps, dtype=float).copy()
+        kds = np.asarray(kds, dtype=float).copy()
+        kps[arm_indices] = np.maximum(kps[arm_indices] * 2.0, 10000.0)
+        kds[arm_indices] = np.maximum(kds[arm_indices] * 2.0, 1000.0)
+        controller.set_gains(kps=kps, kds=kds)
+        print(f"[MM] UR10e drive gain 강화: kp={kps[arm_indices].tolist()} "
+              f"kd={kds[arm_indices].tolist()}")
 
         if not opts.no_ros:
             try:
@@ -86,6 +105,10 @@ class MMDriver(Driver):
                     f"/World/RosRmpStatus_{self.ns}",
                     f"/{self.ns}/rmpflow/status")
                 self._status_pub = RB.StringPublisher(pub)
+                fruit_pub = RB.build_string_pub(
+                    f"/World/RosSimTomato_{self.ns}",
+                    f"/{self.ns}/sim/tomato")
+                self._fruit_pub = RB.StringPublisher(fruit_pub)
             except Exception:
                 ros_fail("MM 조인트/명령 브리지")
             if opts.camera:
@@ -226,6 +249,41 @@ class MMDriver(Driver):
             self.robot.apply_action(ArticulationAction(
                 joint_positions=np.array([self._gripper_target]),
                 joint_indices=np.array([self._gripper_idx])))
+        if is_playing:
+            self._publish_sim_tomato()
+
+    def _publish_sim_tomato(self) -> None:
+        """로봇 주변 ripe 과실의 실제 base-frame 좌표를 한 개씩 발행한다."""
+        if self._fruit_pub is None or self._task is None or self._stage is None:
+            return
+        from pxr import Gf, UsdGeom
+        cache = UsdGeom.XformCache()
+        base = self._stage.GetPrimAtPath(f"{self.root}/Base/base_link")
+        if not base.IsValid():
+            return
+        world_to_base = cache.GetLocalToWorldTransform(base).GetInverse()
+        nearby = []
+        for fruit in self._task.pickable_fruits():
+            if fruit.get("class_name") != "ripe":
+                continue
+            prim = self._stage.GetPrimAtPath(fruit["path"])
+            if not prim.IsValid():
+                continue
+            world = cache.GetLocalToWorldTransform(prim).ExtractTranslation()
+            p = world_to_base.Transform(Gf.Vec3d(world))
+            # 매 프레임 수백 개를 순회 발행하지 않고 현재 팔 작업영역만 보낸다.
+            if 0.0 <= p[0] <= 1.5 and abs(p[1]) <= 0.9 and 0.1 <= p[2] <= 1.9:
+                nearby.append((fruit["path"], [float(v) for v in p]))
+        if not nearby:
+            return
+        nearby.sort(key=lambda item: item[0])
+        _, position = nearby[self._fruit_cursor % len(nearby)]
+        self._fruit_cursor += 1
+        payload = json.dumps({
+            "class": "ripe",
+            "position": [round(v, 4) for v in position],
+        }, separators=(",", ":"))
+        self._fruit_pub.publish(payload)
 
     def _handle_cut(self, request) -> None:
         """닫힌 커터 근처 ripe 과실의 pedicel FixedJoint를 해제한다."""
