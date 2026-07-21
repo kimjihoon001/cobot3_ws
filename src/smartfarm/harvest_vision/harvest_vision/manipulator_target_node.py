@@ -235,6 +235,10 @@ class ManipulatorTargetNode(Node):
         if self._state in ACTIVE_SEQUENCE_STATES:
             # 파지 중 검출 흔들림으로 시퀀스를 재시작하지 않는다.
             # 표적 소실과 spoiled 판정만 긴급 중단한다.
+            # 시뮬 GT에 매칭된 뒤에는 과실 좌표와 정체가 이미 확정됐다. 팔/카메라가
+            # 움직이며 YOLO가 잠깐 quality_check/빈 프레임을 내도 수확을 중단하지 않는다.
+            if bool(self.get_parameter("use_sim_ground_truth").value):
+                return
             if self._state in {"PREGRASP", "GRASP", "GRIPPER_CLOSING"} and not target_class:
                 self._deadline_ns = 0
                 self._transition("ABORT_TARGET_LOST", stop=True)
