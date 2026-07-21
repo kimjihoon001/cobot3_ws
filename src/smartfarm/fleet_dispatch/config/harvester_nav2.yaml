@@ -100,6 +100,9 @@ controller_server:
     #   Shim 은 경로 시작 방향과 현재 헤딩이 angular_dist_threshold 이상 벌어지면
     #   **먼저 제자리에서 돌고**, 정렬되면 primary_controller(DWB)에 넘긴다.
     #   vy_samples 는 남겨둔다 — 주행 중 미세 횡보정용이지, 방향전환 수단이 아니다.
+    #   ⚠ 2026-07-21 사용자 요청으로 옆걸음 자체를 없앰 — 아래 min/max_vel_y=0,
+    #     vy_samples=0 (차동처럼 굴러간다, 위 주석 132행대로). 회전은 계속 Shim 이
+    #     먼저 처리하고, 소각도 보정도 이제 전진+회전 조합만 남는다.
     FollowPath:
       plugin: "nav2_rotation_shim_controller::RotationShimController"
       primary_controller: "dwb_core::DWBLocalPlanner"
@@ -117,8 +120,8 @@ controller_server:
       # Isaac 쪽에서도 한 번 더 clamp 하므로, 다르면 여기 값이 아니라 저기 값이 이긴다.
       min_vel_x: -0.5
       max_vel_x: 0.5
-      min_vel_y: -0.4
-      max_vel_y: 0.4
+      min_vel_y: 0.0
+      max_vel_y: 0.0
       max_vel_theta: 1.0
       min_speed_xy: 0.0
       max_speed_xy: 0.5
@@ -130,7 +133,7 @@ controller_server:
       decel_lim_y: -1.0
       decel_lim_theta: -2.0
       vx_samples: 20
-      vy_samples: 10        # 0 이면 게걸음을 아예 후보로 안 놓는다 = 차동처럼 굴러간다
+      vy_samples: 0         # 0 이면 게걸음을 아예 후보로 안 놓는다 = 차동처럼 굴러간다
       vtheta_samples: 20
       sim_time: 1.7
       linear_granularity: 0.05
@@ -329,8 +332,11 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
     # ★ 홀로노믹 이식 (b) — 배열 순서는 [x, y, theta]. Carter(차동)는 y 자리를 0.0 으로 둔다.
-    max_velocity: [0.5, 0.4, 1.0]
-    min_velocity: [-0.5, -0.4, -1.0]
+    # ⚠ 2026-07-21 사용자 요청으로 옆걸음 제거 — y 를 Carter 와 같이 0.0 으로.
+    #   controller_server 가 이미 vy=0 만 내보내지만, 다른 소스(teleop 등)가 y 를
+    #   보내도 여기서 한 번 더 막는다.
+    max_velocity: [0.5, 0.0, 1.0]
+    min_velocity: [-0.5, 0.0, -1.0]
     max_accel: [1.0, 1.0, 2.0]
     max_decel: [-1.0, -1.0, -2.0]
     odom_topic: "odom"
