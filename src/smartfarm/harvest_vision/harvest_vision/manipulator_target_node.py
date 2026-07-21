@@ -294,7 +294,8 @@ class ManipulatorTargetNode(Node):
             return
         target = np.asarray(self._latest_target, dtype=float)
         if bool(self.get_parameter("use_sim_ground_truth").value):
-            sim_target = self._match_sim_tomato(target)
+            sim_target = self._match_sim_tomato(target, np.asarray(
+                self._latest_camera, dtype=float))
             if sim_target is None:
                 self._transition("ERROR_NO_SIM_MATCH", stop=True)
                 return
@@ -339,17 +340,37 @@ class ManipulatorTargetNode(Node):
             entry for entry in self._sim_fruits
             if now - entry[1] <= int(3.0e9)]
 
-    def _match_sim_tomato(self, vision_target: np.ndarray) -> np.ndarray | None:
+    def _match_sim_tomato(
+        self, vision_target: np.ndarray, camera: np.ndarray
+    ) -> np.ndarray | None:
         now = self.get_clock().now().nanoseconds
         fresh = [position for position, stamp in self._sim_fruits
                  if now - stamp <= int(3.0e9)]
         if not fresh:
             return None
-        nearest = min(fresh, key=lambda p: float(np.linalg.norm(p - vision_target)))
-        distance = float(np.linalg.norm(nearest - vision_target))
-        if distance > float(self.get_parameter("sim_match_radius_m").value):
+        # depth는 앞쪽 잎 때문에 크게 틀릴 수 있지만 검출 중심의 카메라 광선은
+        # 유효하다. 3D 점간 거리 대신 각 GT 과실의 광선 횡오차로 대응시킨다.
+        ray = vision_target - camera
+        vision_depth = float(np.linalg.norm(ray))
+        if vision_depth < 1e-6:
+            return None
+        ray /= vision_depth
+        scored = []
+        for position in fresh:
+            relative = position - camera
+            along = float(np.dot(relative, ray))
+            if along <= 0.0:
+                continue
+            lateral = float(np.linalg.norm(relative - ray * along))
+            # 같은 광선상 과실이 여럿이면 비전의 대략 깊이에 가까운 것을 우선한다.
+            score = lateral + 0.05 * abs(along - vision_depth)
+            scored.append((score, lateral, position))
+        if not scored:
+            return None
+        _, lateral, nearest = min(scored, key=lambda item: item[0])
+        if lateral > float(self.get_parameter("sim_match_radius_m").value):
             self.get_logger().warning(
-                f"시뮬 토마토 매칭 거리 초과: {distance:.3f}m")
+                f"시뮬 토마토 광선 매칭 거리 초과: {lateral:.3f}m")
             return None
         return nearest.copy()
 
