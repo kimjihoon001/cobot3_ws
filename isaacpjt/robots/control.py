@@ -339,6 +339,12 @@ class TransporterController:
         self._lift = float(q[self._lift_i])
         self._steer = float(q[self._steer_i[0]])
         self._drive_vel = 0.0
+        self._kinematic_moving = False
+        # ForkliftB 에셋은 구동 관절이 돌아도 접촉 마찰 상태에 따라 차체가 전혀
+        # 전진하지 않는 경우가 있다. 바퀴 명령과 함께 평면 차량 운동을 적용할
+        # 호출자를 위해 실측 스파이크와 같은 바퀴 반지름/축거를 보관한다.
+        self._wheel_radius = 0.22
+        self._wheelbase = 2.05
 
     # ---- 명령 ----
     def set_fork(self, height: float) -> None:
@@ -358,16 +364,64 @@ class TransporterController:
         self._drive_vel = vel
 
     # ---- 반영 ----
-    def apply(self) -> None:
+    def apply(
+        self,
+        dt: float | None = None,
+        kinematic_yaw_sign: float = 1.0,
+    ) -> None:
         # 위치(승강 1 + 조향 N)와 속도(구동 N)를 각각 건다. DC 의 pos-target·
         # vel-target 버퍼가 달라 두 액션이 공존한다.
         pos_i = [self._lift_i] + self._steer_i
         pos_v = [self._lift] + [self._steer] * len(self._steer_i)
         self._robot.apply_action(ArticulationAction(
             joint_positions=np.array(pos_v), joint_indices=np.array(pos_i)))
+        # dt가 주어진 ForkliftB 자동화에서는 차체 이동을 아래의 Ackermann
+        # 평면 적분 하나로만 만든다. 바퀴 속도 드라이브까지 동시에 걸면 PhysX
+        # 접촉력과 set_world_pose 이동이 서로 더해져 실행마다 궤적이 달라진다.
+        physical_drive = self._drive_vel if dt is None else 0.0
         self._robot.apply_action(ArticulationAction(
-            joint_velocities=np.full(len(self._drive_i), self._drive_vel),
+            joint_velocities=np.full(len(self._drive_i), physical_drive),
             joint_indices=np.array(self._drive_i)))
+
+        # ForkliftB의 후륜 구동은 에셋/바닥 마찰에 따라 바퀴만 헛돌 수 있다.
+        # dt를 준 호출자는 물리 추진 대신 Ackermann 평면 운동만 적용한다.
+        # 정지 중에는 pose를 건드리지 않아 리프트 물리와 팔레트 접촉을
+        # 불필요하게 방해하지 않는다.
+        if dt is not None and abs(self._drive_vel) > 1e-6:
+            position, quat = self._robot.get_world_pose()
+            position = np.asarray(position, dtype=float).copy()
+            quat = np.asarray(quat, dtype=float)  # Isaac Core: [w, x, y, z]
+            w, x, y, z = quat
+            yaw = np.arctan2(
+                2.0 * (w * z + x * y),
+                1.0 - 2.0 * (y * y + z * z),
+            )
+            linear = self._drive_vel * self._wheel_radius
+            # 일부 에셋은 차체 루트 +X와 작업 전방(포크 방향)이 반대다. 그런
+            # 호출자는 주행 부호를 뒤집어 쓰므로 yaw도 같은 좌표계로 맞춰야 한다.
+            yaw += (
+                kinematic_yaw_sign
+                * linear
+                / self._wheelbase
+                * np.tan(self._steer)
+                * dt
+            )
+            position[0] += linear * np.cos(yaw) * dt
+            position[1] += linear * np.sin(yaw) * dt
+            half = yaw * 0.5
+            # 이전 PhysX 접촉에서 남은 선속도/각속도를 제거한 뒤 계산된 pose만
+            # 반영한다. 따라서 정지 명령 뒤 관성으로 더 돌거나 밀리지 않는다.
+            self._robot.set_linear_velocity(np.zeros(3, dtype=float))
+            self._robot.set_angular_velocity(np.zeros(3, dtype=float))
+            self._robot.set_world_pose(
+                position=position,
+                orientation=np.array([np.cos(half), 0.0, 0.0, np.sin(half)]),
+            )
+            self._kinematic_moving = True
+        elif dt is not None and self._kinematic_moving:
+            self._robot.set_linear_velocity(np.zeros(3, dtype=float))
+            self._robot.set_angular_velocity(np.zeros(3, dtype=float))
+            self._kinematic_moving = False
 
     def joint_report(self) -> str:
         q = np.asarray(self._robot.get_joint_positions(), dtype=float)

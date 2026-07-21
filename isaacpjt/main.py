@@ -47,6 +47,7 @@ ROS2 토픽 (§5.6: 판단은 ROS2 = dev 머신, 실행만 여기. domain 108):
 """
 import os
 import sys
+from pathlib import Path
 
 GUI = "--headless" not in sys.argv
 NO_ROS = "--no-ros" in sys.argv
@@ -70,6 +71,76 @@ if MM_TELEOP and "--mm" not in sys.argv:
     raise SystemExit("--mm-teleop은 --mm과 함께 사용해야 합니다.")
 if MM_TELEOP and NAV_DRIVE:
     raise SystemExit("MM 텔레옵과 Nav2는 동시에 베이스를 제어할 수 없습니다.")
+# 지게차+운반 AMR만 선택하면 창고 자동화 단독 시험으로 본다. 이 모드에서는
+# iw.py가 AMR을 창고 도킹 위치에 빈 상태로 놓아 첫 팔레트 상차를 바로 시험한다.
+WAREHOUSE_TEST = (
+    "--iw" in sys.argv and "--fork" in sys.argv and "--mm" not in sys.argv
+)
+
+# Warehouse 자동화의 공통 도메인은 108이다. ~/.bashrc가 109를 기본으로 내보내므로
+# setdefault()를 쓰면 Isaac만 109에 남고 ROS 터미널(108)과 완전히 분리된다.
+# 이 진입점에서는 양방향 브리지가 반드시 같은 값으로 뜨도록 명시적으로 고정한다.
+if not NO_ROS:
+    os.environ["ROS_DOMAIN_ID"] = "108"
+    os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
+    os.environ["ROS_LOCALHOST_ONLY"] = "0"
+
+
+def _bootstrap_isaac_ros2() -> None:
+    """Isaac 내장 Humble 라이브러리를 잡은 환경으로 main.py를 한 번 재실행한다."""
+    if NO_ROS:
+        return
+
+    # resolve()하면 kit/python 심볼릭 링크가 Packman 캐시 경로로 바뀔 수 있으므로
+    # 링크 경로 자체의 부모를 훑는다(forklift_teleop.py에서 검증한 방식).
+    executable = Path(sys.executable).absolute()
+    for parent in executable.parents:
+        humble = parent / "exts" / "isaacsim.ros2.bridge" / "humble"
+        if (humble / "lib").is_dir():
+            break
+    else:
+        print(
+            "[RosBridge] Isaac 내장 Humble 경로를 자동으로 찾지 못했습니다. "
+            "LD_LIBRARY_PATH를 직접 설정해야 합니다."
+        )
+        return
+
+    marker = str(humble)
+    if os.environ.get("ISAACPJT_ROS_ROOT") == marker:
+        return
+
+    env = os.environ.copy()
+    env["ISAACPJT_ROS_ROOT"] = marker
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        part for part in (str(humble / "lib"), env.get("LD_LIBRARY_PATH")) if part
+    )
+    rclpy_path = humble / "rclpy"
+    if rclpy_path.is_dir():
+        env["PYTHONPATH"] = os.pathsep.join(
+            part for part in (str(rclpy_path), env.get("PYTHONPATH")) if part
+        )
+    env.setdefault("ROS_DISTRO", "humble")
+    env["ROS_DOMAIN_ID"] = "108"
+    env["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
+    env["ROS_LOCALHOST_ONLY"] = "0"
+    print(f"[RosBridge] Isaac 내장 ROS 2 환경 적용: {humble}", flush=True)
+    os.execve(
+        str(executable),
+        [str(executable), str(Path(__file__).resolve()), *sys.argv[1:]],
+        env,
+    )
+
+
+_bootstrap_isaac_ros2()
+
+if not NO_ROS:
+    print(
+        "[RosBridge] 실제 실행 환경: "
+        f"domain={os.environ['ROS_DOMAIN_ID']}, "
+        f"RMW={os.environ['RMW_IMPLEMENTATION']}, "
+        f"localhost_only={os.environ['ROS_LOCALHOST_ONLY']}",
+        flush=True,
+    )
 
 
 def _arg_value(name: str, default=None):
@@ -156,8 +227,12 @@ def build_drivers(cfg, task=None) -> list:
         from mm import MMDriver
         drivers.append(MMDriver(cfg, task=task))
     if "--iw" in sys.argv:
-        from iw import IwDriver
-        drivers.append(IwDriver(cfg))
+        if WAREHOUSE_TEST:                       # --iw --fork (--mm 없음) → 창고 상차 단독 시험
+            from iw_test import IwDriver
+            drivers.append(IwDriver(cfg, warehouse_test=True))
+        else:                                    # 일반 통합 실행 — 깃허브용 iw.py(데크 적재)
+            from iw import IwDriver
+            drivers.append(IwDriver(cfg))
     if "--fork" in sys.argv:
         from fork import ForkDriver
         drivers.append(ForkDriver(cfg))

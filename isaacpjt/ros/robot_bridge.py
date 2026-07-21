@@ -17,9 +17,14 @@ env 레시피(LD_LIBRARY_PATH 등)는 tools/iwhub_bridge_check.py docstring 참�
 """
 from __future__ import annotations
 
+import os
+
 import omni.graph.core as og
 
-DOMAIN_ID = 108           # dev 머신과 일치 필수 (CLAUDE.md)
+# main.py와 외부 ROS 2 노드가 사용하는 도메인을 그대로 따른다. 기존에는 여기만
+# 109로 고정되어 있어서 사용자가 ROS_DOMAIN_ID=108로 실행해도 Isaac 조인트
+# 브리지가 다른 DDS 도메인에 생성되는 문제가 있었다.
+DOMAIN_ID = int(os.environ.get("ROS_DOMAIN_ID", "108"))
 
 # Isaac 5.1 실측 타입명 (2026-07-19 create-probe — tools/iwhub_bridge_check.py)
 T = {
@@ -27,6 +32,7 @@ T = {
     "Ctx": "isaacsim.ros2.bridge.ROS2Context",
     "SubJS": "isaacsim.ros2.bridge.ROS2SubscribeJointState",
     "PubJS": "isaacsim.ros2.bridge.ROS2PublishJointState",
+    "PubAny": "isaacsim.ros2.bridge.ROS2Publisher",
     "Art": "isaacsim.core.nodes.IsaacArticulationController",
     "SimTime": "isaacsim.core.nodes.IsaacReadSimulationTime",
     "Clock": "isaacsim.ros2.bridge.ROS2PublishClock",
@@ -133,8 +139,28 @@ def build_joint_bridge(stage, graph_path: str, ns: str, art_path: str,
         rel.SetTargets([art_path])
     mode = "직접 적용" if apply_commands else "Python 제어기로 전달"
     log(f"[RosBridge] {ns}: {cmd_topic} 수신 / {states_topic} 발행  "
-        f"({art_path}, {mode})")
+        f"({art_path}, {mode}, domain={domain_id})")
     return cmd_topic, states_topic
+
+
+def build_pose_publisher(graph_path: str, topic: str,
+                         domain_id: int = DOMAIN_ID, log=print) -> str:
+    """Python에서 채운 실제 차체 자세를 PoseStamped로 매 프레임 발행한다."""
+    _edit(
+        graph_path,
+        [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
+         ("Pub", T["PubAny"])],
+        [("OnTick.outputs:tick", "Pub.inputs:execIn"),
+         ("Ctx.outputs:context", "Pub.inputs:context")],
+        [("Ctx.inputs:domain_id", domain_id),
+         ("Ctx.inputs:useDomainIDEnvVar", False),
+         ("Pub.inputs:messagePackage", "geometry_msgs"),
+         ("Pub.inputs:messageSubfolder", "msg"),
+         ("Pub.inputs:messageName", "PoseStamped"),
+         ("Pub.inputs:topicName", topic)],
+    )
+    log(f"[RosBridge] 실제 자세 발행: {topic} (domain={domain_id})")
+    return f"{graph_path}/Pub"
 
 
 def build_string_sub(graph_path: str, topic: str,
@@ -527,6 +553,52 @@ class JointCommandPoller:
         positions = [] if raw_positions is None else list(raw_positions)
         velocities = [] if raw_velocities is None else list(raw_velocities)
         return names, positions, velocities
+
+
+class PosePublisher:
+    """ROS2Publisher의 동적 PoseStamped 입력을 Python에서 갱신한다."""
+
+    _FIELDS = (
+        "header:frame_id",
+        "pose:position:x", "pose:position:y", "pose:position:z",
+        "pose:orientation:x", "pose:orientation:y",
+        "pose:orientation:z", "pose:orientation:w",
+    )
+
+    def __init__(self, node_path: str):
+        self._path = node_path
+        self._attrs = None
+
+    def _resolve(self) -> bool:
+        if self._attrs is not None:
+            return True
+        try:
+            self._attrs = {
+                field: og.Controller.attribute(f"inputs:{field}", self._path)
+                for field in self._FIELDS
+            }
+        except Exception:
+            # messageName이 적용된 다음 프레임에 동적 입력이 생긴다.
+            self._attrs = None
+            return False
+        return True
+
+    def publish(self, position, orientation_xyzw) -> bool:
+        if not self._resolve():
+            return False
+        values = {
+            "header:frame_id": "world",
+            "pose:position:x": float(position[0]),
+            "pose:position:y": float(position[1]),
+            "pose:position:z": float(position[2]),
+            "pose:orientation:x": float(orientation_xyzw[0]),
+            "pose:orientation:y": float(orientation_xyzw[1]),
+            "pose:orientation:z": float(orientation_xyzw[2]),
+            "pose:orientation:w": float(orientation_xyzw[3]),
+        }
+        for field, value in values.items():
+            og.Controller.set(self._attrs[field], value)
+        return True
 
 
 # ══════════════════════════════════════════════════════════════════════════

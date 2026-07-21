@@ -30,6 +30,11 @@ class TransporterAMR:
 
     # 포크 승강 조인트 이름 후보. 에셋마다 다르다.
     _LIFT_CANDIDATES = ("lift", "lift_joint", "fork_lift", "mast", "carriage")
+    # ForkliftB 원본값(100k/10k/5kN)은 포크·캐리지 자중 때문에 목표보다
+    # 약 47mm 처졌다. GPU 실측으로 아래 값에서 처짐이 약 5mm로 감소했다.
+    LIFT_DRIVE_STIFFNESS = 1_000_000.0
+    LIFT_DRIVE_DAMPING = 50_000.0
+    LIFT_DRIVE_MAX_FORCE = 30_000.0
 
     def __init__(self, cfg: RobotConfig, warehouse: WarehouseConfig):
         self._cfg = cfg
@@ -69,6 +74,7 @@ class TransporterAMR:
         self._lift_joint = self._find_lift_joint(stage, body)
         if self._lift_joint:
             log(f"[Transporter] 포크 승강 조인트: {self._lift_joint}")
+            self._configure_lift_drive(stage, log)
             self._check_lift_range(stage, log)
         else:
             log("[Transporter] ⚠ 포크 승강 조인트를 못 찾음. 에셋의 실제 조인트 "
@@ -77,6 +83,25 @@ class TransporterAMR:
         return root
 
     # ----- 내부 -----
+
+    def _configure_lift_drive(self, stage: Usd.Stage, log=print) -> None:
+        """자중 처짐 없이 ROS 목표 높이에 도달하도록 승강 드라이브를 보강한다."""
+        if not self._lift_joint:
+            return
+        joint_prim = stage.GetPrimAtPath(self._lift_joint)
+        drive = UsdPhysics.DriveAPI.Get(joint_prim, "linear")
+        if not drive:
+            log("[Transporter] ⚠ lift_joint linear drive를 찾지 못해 보강 생략")
+            return
+        drive.GetStiffnessAttr().Set(self.LIFT_DRIVE_STIFFNESS)
+        drive.GetDampingAttr().Set(self.LIFT_DRIVE_DAMPING)
+        drive.GetMaxForceAttr().Set(self.LIFT_DRIVE_MAX_FORCE)
+        log(
+            "[Transporter] 포크 승강 드라이브 보강: "
+            f"stiffness={self.LIFT_DRIVE_STIFFNESS:.0f}, "
+            f"damping={self.LIFT_DRIVE_DAMPING:.0f}, "
+            f"maxForce={self.LIFT_DRIVE_MAX_FORCE:.0f}N"
+        )
 
     def _find_lift_joint(self, stage: Usd.Stage, body: str) -> str | None:
         prim = stage.GetPrimAtPath(body)
