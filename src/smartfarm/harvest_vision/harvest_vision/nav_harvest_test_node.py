@@ -30,6 +30,7 @@ class NavHarvestTestNode(Node):
         self.declare_parameter("mock_basket_release_xyz", [0.45, -0.35, 0.45])
         self.declare_parameter("search_timeout_sec", 30.0)
         self.declare_parameter("accept_initial_succeeded_goal", True)
+        self.declare_parameter("resume_search_after_start_sec", 2.0)
 
         latched = QoSProfile(
             depth=1,
@@ -68,6 +69,11 @@ class NavHarvestTestNode(Node):
         self._mobility_ready = True
         self._search_deadline_ns = 0
         self._basket_sent = False
+        resume = float(self.get_parameter("resume_search_after_start_sec").value)
+        self._resume_deadline_ns = (
+            self.get_clock().now().nanoseconds + int(resume * 1e9)
+            if resume > 0.0 else 0)
+        self._state = ""
         self._publish_enable(False)
         self._publish_status("READY_FOR_NAV_GOAL")
 
@@ -170,6 +176,15 @@ class NavHarvestTestNode(Node):
         self._basket_pub.publish(pose)
 
     def _watchdog(self) -> None:
+        if (self._resume_deadline_ns
+                and self.get_clock().now().nanoseconds >= self._resume_deadline_ns):
+            self._resume_deadline_ns = 0
+            if self._state == "READY_FOR_NAV_GOAL" and self._active_goal is None:
+                self._publish_enable(True)
+                timeout = float(self.get_parameter("search_timeout_sec").value)
+                self._search_deadline_ns = (
+                    self.get_clock().now().nanoseconds + int(timeout * 1e9))
+                self._publish_status("SEARCHING_TOMATO")
         if (self._search_deadline_ns
                 and self.get_clock().now().nanoseconds > self._search_deadline_ns):
             self._search_deadline_ns = 0
@@ -180,6 +195,7 @@ class NavHarvestTestNode(Node):
         self._enable_pub.publish(Bool(data=enabled))
 
     def _publish_status(self, state: str) -> None:
+        self._state = state
         self._status_pub.publish(String(data=json.dumps({"state": state})))
         self.get_logger().info(f"단독 수확 시험: {state}")
 

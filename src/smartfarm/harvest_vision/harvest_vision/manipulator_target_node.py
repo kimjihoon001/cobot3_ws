@@ -179,7 +179,10 @@ class ManipulatorTargetNode(Node):
                 f"작업영역 밖 목표 차단: ({p.x:.3f}, {p.y:.3f}, {p.z:.3f})"
             )
             return
-        if self._is_jump(target):
+        # Nav 대기 중에는 팔 명령이 나가지 않으므로 검출 대상이 바뀌어도 최신 좌표를
+        # 받아야 한다. 이전에는 여기서 계속 차단돼 _last_position이 영원히 과거
+        # 토마토에 고정되고 GT 매칭도 복구되지 않았다.
+        if self._harvest_enabled and self._is_jump(target):
             p = target.pose.position
             self.get_logger().warning(
                 f"급격한 목표 이동 차단: ({p.x:.3f}, {p.y:.3f}, {p.z:.3f})"
@@ -292,7 +295,6 @@ class ManipulatorTargetNode(Node):
         self._class_callback(String(data=self._target_class))
 
     def _start_grasp_sequence(self) -> None:
-        self._mobility_pub.publish(Bool(data=False))
         if self._latest_target is None or self._latest_camera is None:
             self._transition("ERROR_NO_TARGET", stop=True)
             return
@@ -301,7 +303,9 @@ class ManipulatorTargetNode(Node):
             sim_target = self._match_sim_tomato(target, np.asarray(
                 self._latest_camera, dtype=float))
             if sim_target is None:
-                self._transition("ERROR_NO_SIM_MATCH", stop=True)
+                # 후보가 round-robin 토픽으로 더 들어오거나 다음 검출 프레임에서
+                # 광선이 안정되면 자동 재시도한다. 일시 실패로 수확 게이트를 닫지 않는다.
+                self._transition("WAIT_SIM_MATCH", stop=True)
                 return
             self.get_logger().info(
                 "비전 검출을 시뮬 토마토 좌표에 매칭: "
@@ -309,6 +313,7 @@ class ManipulatorTargetNode(Node):
                 f"sim=({sim_target[0]:.3f}, {sim_target[1]:.3f}, {sim_target[2]:.3f})")
             target = sim_target
             self._latest_target = tuple(float(v) for v in target)
+        self._mobility_pub.publish(Bool(data=False))
         camera = np.asarray(self._latest_camera, dtype=float)
         ray = target - camera
         length = float(np.linalg.norm(ray))
@@ -342,14 +347,14 @@ class ManipulatorTargetNode(Node):
             self._sim_fruits.append((position, now))
         self._sim_fruits = [
             entry for entry in self._sim_fruits
-            if now - entry[1] <= int(3.0e9)]
+            if now - entry[1] <= int(30.0e9)]
 
     def _match_sim_tomato(
         self, vision_target: np.ndarray, camera: np.ndarray
     ) -> np.ndarray | None:
         now = self.get_clock().now().nanoseconds
         fresh = [position for position, stamp in self._sim_fruits
-                 if now - stamp <= int(3.0e9)]
+                 if now - stamp <= int(30.0e9)]
         if not fresh:
             return None
         # depth는 앞쪽 잎 때문에 크게 틀릴 수 있지만 검출 중심의 카메라 광선은
