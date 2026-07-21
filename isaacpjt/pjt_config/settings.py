@@ -602,7 +602,7 @@ class HarvesterNavConfig:
     # Nav2 쪽(harvester_nav2.yaml FollowPath/velocity_smoother)도 이미 y=0 만
     # 내보내지만, 여기서 한 번 더 막아 다른 소스(teleop 등)의 y 도 차단한다.
     max_vy: float = 0.0              # m/s   좌우(게걸음) — 비활성
-    max_wz: float = 1.0              # rad/s 제자리 회전
+    max_wz: float = 1.3              # rad/s 제자리 회전
 
     # 라이다 마운트 (Base/base_link 로컬). [2] 유도 — 차체 길이 0.96m 의 앞 끝(+0.45),
     # 높이는 차체 상면(0.30m) 바로 위. 팔이 접힌 상태에서 전방 시야를 가리지 않는 최소 높이.

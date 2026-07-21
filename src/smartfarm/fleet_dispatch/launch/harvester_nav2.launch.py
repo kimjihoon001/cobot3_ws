@@ -13,8 +13,8 @@
 # 프레임/토픽 이름과 그대로 맞아 별도 params 파일 없이 씀.
 #
 # Isaac 쪽 짝: isaac_python main.py --mm --nav  (isaacpjt/mm.py::build_nav)
-#   /harvester_0/scan · /harvester_0/odom · TF 를 Isaac 이 발행하고,
-#   /harvester_0/cmd_vel 을 Isaac 이 구독해 홀로노믹 베이스로 적분한다.
+#   /scan · /odom · TF 를 Isaac 이 발행하고,
+#   /cmd_vel 을 Isaac 이 구독해 MM 베이스 위치로 적분한다.
 #
 # 왜 nav2_bringup 을 include 하나 — Carter(carter_navigation)도 이 구조다. 노드 9개를
 # 직접 띄우면 distro 마다 구성이 달라 깨진다. 조합·라이프사이클 관리는 bringup 에 맡긴다.
@@ -23,7 +23,7 @@
 #   controller_server : cmd_vel        → 리맵 → cmd_vel_nav
 #   velocity_smoother : cmd_vel(입력)  → 리맵 → cmd_vel_nav
 #                       cmd_vel_smoothed(출력) → 리맵 → **cmd_vel**
-#   즉 로봇이 구독해야 할 최종 토픽은 cmd_vel = /harvester_0/cmd_vel 이고, 이는
+#   즉 로봇이 구독해야 할 최종 토픽은 cmd_vel = /cmd_vel 이고, 이는
 #   settings.HarvesterNavConfig.cmd_vel_topic 과 일치한다. (Humble 1.1.20 의
 #   navigation_launch.py 에는 collision_monitor 가 없다. 추가된 distro 에서는 그놈이
 #   마지막 단이 되지만 출력 토픽 이름은 역시 cmd_vel 이라 로봇 쪽은 안 바뀐다.)
@@ -34,6 +34,8 @@
 import os
 import re
 import tempfile
+
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -82,15 +84,40 @@ def _pybool(context, name: str) -> str:
                in ("true", "1", "yes", "on"))
 
 
+def _params_with_initial_pose(context, params_file: str) -> str:
+    """정적 맵 실행 시 AMCL 초기 위치를 launch 인자로 주입한다."""
+    if (_pybool(context, "slam") == "True" or
+            _pybool(context, "set_initial_pose") != "True"):
+        return params_file
+
+    with open(params_file, encoding="utf-8") as stream:
+        params = yaml.safe_load(stream)
+    amcl = params.setdefault("amcl", {}).setdefault("ros__parameters", {})
+    amcl["set_initial_pose"] = True
+    amcl["initial_pose"] = {
+        "x": float(LaunchConfiguration("initial_pose_x").perform(context)),
+        "y": float(LaunchConfiguration("initial_pose_y").perform(context)),
+        "z": 0.0,
+        "yaw": float(LaunchConfiguration("initial_pose_yaw").perform(context)),
+    }
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False,
+                                      encoding="utf-8")
+    yaml.safe_dump(params, tmp, sort_keys=False)
+    tmp.close()
+    return tmp.name
+
+
 def _bringup(context, *_args, **_kwargs):
     distro = os.environ.get("ROS_DISTRO", "")
+    params_file = _params_for_distro(
+        LaunchConfiguration("params_file").perform(context))
+    params_file = _params_with_initial_pose(context, params_file)
     args = {
         "namespace": LaunchConfiguration("namespace").perform(context),
         "slam": _pybool(context, "slam"),
         "map": LaunchConfiguration("map").perform(context),
         "use_sim_time": _pybool(context, "use_sim_time"),
-        "params_file": _params_for_distro(
-            LaunchConfiguration("params_file").perform(context)),
+        "params_file": params_file,
         "autostart": _pybool(context, "autostart"),
     }
     # use_namespace 는 Humble 에만 있는 인자다 (Iron 에서 제거 — namespace 하나로 통합).
@@ -135,8 +162,7 @@ def generate_launch_description():
         get_package_share_directory("fleet_dispatch"), "config",
         "harvester_nav2.yaml")
     return LaunchDescription([
-        # 네임스페이스는 프레임 접두사(harvester_0/base_link)와 반드시 같아야 한다 —
-        # 파라미터의 프레임 이름은 네임스페이스를 안 따라가므로 바꾸려면 yaml 도 같이 고칠 것.
+        # 현재 MM은 전역 /tf, /scan, /odom, /cmd_vel을 쓰므로 namespace 기본값은 비운다.
         DeclareLaunchArgument("namespace", default_value=""),
         DeclareLaunchArgument("slam", default_value="false"),
         DeclareLaunchArgument("explore", default_value="false"),
@@ -144,6 +170,11 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),  # Isaac /clock
         DeclareLaunchArgument("params_file", default_value=default_params),
         DeclareLaunchArgument("autostart", default_value="true"),
+        # 저장 맵은 MM HOME spawn 위치를 (0, 0, 0)으로 저장했다. 필요하면 실행 시 덮어쓴다.
+        DeclareLaunchArgument("set_initial_pose", default_value="true"),
+        DeclareLaunchArgument("initial_pose_x", default_value="0.0"),
+        DeclareLaunchArgument("initial_pose_y", default_value="0.0"),
+        DeclareLaunchArgument("initial_pose_yaw", default_value="0.0"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=os.path.join(
             get_package_share_directory("fleet_dispatch"), "rviz",
