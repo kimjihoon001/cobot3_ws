@@ -178,12 +178,14 @@ class VisionNode(Node):
         candidates = []
         for box in result.boxes:
             x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
-            distance = self._median_depth(depth, x1, y1, x2, y2)
+            distance, pixel = self._tomato_measurement(
+                frame, depth, x1, y1, x2, y2)
             candidates.append(
                 {
                     "box": (x1, y1, x2, y2),
                     "confidence": float(box.conf[0]),
                     "distance": distance,
+                    "pixel": pixel,
                 }
             )
 
@@ -311,6 +313,35 @@ class VisionNode(Node):
         values = values[values > 0]
         return float(np.median(values)) if values.size else None
 
+    def _tomato_measurement(self, frame, depth, x1, y1, x2, y2):
+        """잎이 겹친 bbox에서도 과실 색 픽셀로 깊이와 투영 중심을 구한다.
+
+        bbox 중심 깊이를 그대로 쓰면 앞쪽 잎이 토마토보다 10~30 cm 가까운 값을
+        차지한다. 수확 대상인 익은 과실의 red/orange 고채도 픽셀만 골라 3D 점을
+        만들고, 유효 픽셀이 부족할 때만 기존 중앙 ROI 방식으로 후퇴한다.
+        """
+        if depth is None:
+            return None, ((x1 + x2) * 0.5, (y1 + y2) * 0.5)
+        height, width = depth.shape[:2]
+        xa, xb = max(int(x1), 0), min(int(x2) + 1, width)
+        ya, yb = max(int(y1), 0), min(int(y2) + 1, height)
+        if xa >= xb or ya >= yb:
+            return None, ((x1 + x2) * 0.5, (y1 + y2) * 0.5)
+        crop = frame[ya:yb, xa:xb]
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        # OpenCV hue 0..179: 익은 토마토의 red/orange와 암적색 양쪽 범위.
+        warm = (((hsv[..., 0] <= 25) | (hsv[..., 0] >= 165))
+                & (hsv[..., 1] >= 70) & (hsv[..., 2] >= 45))
+        local_depth = depth[ya:yb, xa:xb]
+        valid = warm & np.isfinite(local_depth) & (local_depth > 0.0)
+        ys, xs = np.nonzero(valid)
+        if xs.size >= 12:
+            values = local_depth[valid]
+            return (float(np.median(values)),
+                    (float(xa + np.median(xs)), float(ya + np.median(ys))))
+        return (self._median_depth(depth, x1, y1, x2, y2),
+                ((x1 + x2) * 0.5, (y1 + y2) * 0.5))
+
     def _to_message(self, item, tomato_class, confidence, source_msg):
         msg = TomatoDetection()
         msg.tomato_class = tomato_class
@@ -326,8 +357,10 @@ class VisionNode(Node):
         info = self._camera_info
         if distance is None or info is None or not info.k[0] or not info.k[4]:
             return None
-        x1, y1, x2, y2 = item["box"]
-        u, v = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        u, v = item.get("pixel", (
+            (item["box"][0] + item["box"][2]) * 0.5,
+            (item["box"][1] + item["box"][3]) * 0.5,
+        ))
         pose = PoseStamped()
         pose.header = source_msg.header
         pose.pose.position.x = (u - info.k[2]) * distance / info.k[0]
