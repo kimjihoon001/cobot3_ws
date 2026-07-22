@@ -124,10 +124,17 @@ class ForkLiftNode(Node):
         FORK_BLADE_BOTTOM_Z_AT_ZERO + FORK_BLADE_TOP_Z_AT_ZERO
     ) / 2.0
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        node_name: str = "fork_lift_node",
+        instance_lock_path: str | None = None,
+        console_enabled: bool = True,
+    ):
         # 같은 PC에서 노드 두 개가 /forklift_0/joint_command에 동시에 명령을
         # 보내는 상황을 막는다. 프로세스가 비정상 종료돼도 flock은 자동 해제된다.
-        self._instance_lock = open(self.INSTANCE_LOCK_PATH, "a+", encoding="utf-8")
+        lock_path = instance_lock_path or self.INSTANCE_LOCK_PATH
+        self._instance_lock = open(lock_path, "a+", encoding="utf-8")
         try:
             fcntl.flock(
                 self._instance_lock.fileno(),
@@ -143,7 +150,7 @@ class ForkLiftNode(Node):
         self._instance_lock.write(str(os.getpid()))
         self._instance_lock.flush()
 
-        super().__init__("fork_lift_node")
+        super().__init__(node_name)
 
         # 좌표 파라미터. 실제 도킹 위치가 정해지면 이 세 항목을 먼저 보정한다.
         self.declare_parameter("initial_pose", [0.0, 14.5, -math.pi / 2.0])
@@ -210,6 +217,9 @@ class ForkLiftNode(Node):
         # 필요할 때만 -p auto_start:=true로 0번 자동 작업을 활성화한다.
         self.declare_parameter("auto_start", False)
         self.declare_parameter("auto_start_delay", 2.0)
+        # 별도 fork_lift_return_node와 함께 실행할 때는 이 노드가 IW 귀환
+        # 이벤트를 처리하지 않는다. 예전 단일 노드 P0→P1 시험이 필요하면 true.
+        self.declare_parameter("enable_internal_return_cycle", False)
         # GUI 차체가 실제로 움직인 사실을 확인한 뒤에만 상태기를 진행한다. 피드백 없이
         # dead reckoning만 쓰면 DDS 도메인이 달라도 ROS 로그상 작업이 끝난 것처럼 보인다.
         self.declare_parameter("require_joint_state_feedback", True)
@@ -225,6 +235,9 @@ class ForkLiftNode(Node):
         self._clear_pub = self.create_publisher(Bool, "/forklift/clear", 10)
         self._complete_pub = self.create_publisher(
             Int32, "/forklift/task_complete", 10
+        )
+        self._pallet_on_iw_pub = self.create_publisher(
+            Int32, "/forklift/pallet_on_iw", 10
         )
 
         self.create_subscription(
@@ -288,7 +301,7 @@ class ForkLiftNode(Node):
                 "초기화 완료: ForkliftB 연결 후 터미널에 0~5번을 "
                 "입력하세요"
             )
-        if sys.stdin.isatty():
+        if console_enabled and sys.stdin.isatty():
             threading.Thread(
                 target=self._read_console_requests,
                 name="forklift-pallet-selector",
@@ -400,6 +413,9 @@ class ForkLiftNode(Node):
         self._auto_start = bool(self.get_parameter("auto_start").value)
         self._auto_start_delay = float(
             self.get_parameter("auto_start_delay").value
+        )
+        self._enable_internal_return_cycle = bool(
+            self.get_parameter("enable_internal_return_cycle").value
         )
         self._require_pose_feedback = bool(
             self.get_parameter("require_pose_feedback").value
@@ -563,6 +579,11 @@ class ForkLiftNode(Node):
                 return
             self._start_initial_load()
         elif self._mode == self.MODE_WAIT_RETURN:
+            if not self._enable_internal_return_cycle:
+                self.get_logger().info(
+                    "IW 귀환 처리는 fork_lift_return_node가 담당합니다"
+                )
+                return
             dx = self._x - self._wait_pose[0]
             dy = self._y - self._wait_pose[1]
             position_error = math.hypot(dx, dy)
@@ -1689,7 +1710,9 @@ class ForkLiftNode(Node):
             self._handle_amr_docked()
 
         if self._mode != self.MODE_BUSY or not self._steps:
-            self._publish_command(0.0, 0.0)
+            # 별도 회수 노드가 같은 명령 토픽의 제어권을 이어받을 수 있도록
+            # 유휴 상태에서는 반복 발행하지 않는다. 큐 종료·오류 진입 시에는
+            # _finish_queue/_fail이 정지 명령을 한 번 확실히 보낸다.
             return
 
         if self._require_joint_state_feedback and (
@@ -2213,6 +2236,7 @@ class ForkLiftNode(Node):
                 f"Pallet_{step.pallet_id:02d} 토마토 적재 팔레트 창고 복귀 완료"
             )
         elif step.label == "loaded_on_amr":
+            self._pallet_on_iw_pub.publish(Int32(data=step.pallet_id))
             self._publish_status(
                 f"Pallet_{step.pallet_id:02d} 빈 팔레트 AMR 상차 완료"
             )
