@@ -4,8 +4,8 @@
        · 몸체 1.431 × 0.659 × 0.231 m
        · 데크 적재(팔레트+KLT+토마토) 1.2 × 0.8 × 0.32 m, 데크 상단 z=0.195 위
      ⚠ Nav2 costmap 은 이 URDF 에서 footprint 를 자동으로 읽지 않는다 —
-        footprint 는 nav2_params.yaml 에 별도로 준다(1.5×0.84 사각형).
-     ⚠ laser_front/back 프레임은 Isaac(ros/robot_bridge) 이 chassis 밑으로 내므로
+        footprint 는 nav2_params.yaml 에 별도로 준다(현재 1.50×0.622m).
+     ⚠ front/back_2d_lidar 프레임은 Isaac(ros/robot_bridge) 이 chassis 밑으로 내므로
         여기 넣지 않는다(한 프레임에 부모 둘이면 TF 충돌). -->
 <robot name="iwhub">
 

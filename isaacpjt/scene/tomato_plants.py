@@ -59,8 +59,12 @@ class TomatoPlants:
         """
         return self._fruits
 
-    def spawn(self, stage: Usd.Stage, root: str = "/World/Plants") -> None:
+    def spawn(self, stage: Usd.Stage, root: str = "/World/Plants",
+              elevation: float = 0.0) -> None:
         UsdGeom.Xform.Define(stage, root)
+        UsdGeom.Xformable(stage.GetPrimAtPath(root)).AddTranslateOp().Set(
+            Gf.Vec3d(0.0, 0.0, elevation))
+        self._elevation = elevation
         # 무광 재질 — 없으면 RTX 기본 광택 재질이라 과실이 유리처럼 보인다.
         # displayColor(=클래스 색, YOLO 라벨 근거)는 그대로 읽는다.
         ripeness.bind_matte_material(stage, root)
@@ -330,7 +334,8 @@ class TomatoPlants:
         self._fruits.append({
             "path": path,
             "class_name": class_name,
-            "position": (pos[0], pos[1], pos[2]),
+            # GroundTruth 좌표는 월드 좌표여야 한다. Plants 루트 상승분도 포함한다.
+            "position": (pos[0], pos[1], pos[2] + self._elevation),
             "joint": joint,
             "sector": sector,          # 어느 재배 섹터(0..5) — 창고 슬롯 1:1 매핑에 씀
         })

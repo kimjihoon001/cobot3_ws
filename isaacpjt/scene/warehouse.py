@@ -297,8 +297,10 @@ class Warehouse:
         FLOOR = Gf.Vec3f(0.58, 0.58, 0.56)    # 콘크리트 바닥
         TRIM = Gf.Vec3f(0.25, 0.42, 0.70)     # 파란 간판
 
-        # 바닥 슬래브 (홀 바닥 위 살짝 — 창고 구역 표시). 방 중심은 root 로컬 원점.
-        self._add_box(stage, f"{b}/Floor", (0.0, 0.0, 0.03), (W, D, 0.05), FLOOR)
+        # 공통 물리 지면 자체가 이 슬래브 상면(z=0.055m)으로 올라왔다. 창고 바닥은
+        # 구역 표시용 시각판만 남기고 collider와 입구 경사판은 제거한다.
+        self._add_box(stage, f"{b}/Floor", (0.0, 0.0, 0.03), (W, D, 0.05), FLOOR,
+                      collider=False)
         # 뒷벽(+y, 랙이 붙는 벽) + 좌우벽
         self._add_box(stage, f"{b}/Wall_Back", (0.0, D / 2, H / 2), (W, T, H), WALL)
         self._add_box(stage, f"{b}/Wall_Left", (-W / 2, 0.0, H / 2), (T, D, H), WALL)
@@ -405,14 +407,16 @@ class Warehouse:
 
     def _add_box(self, stage: Usd.Stage, path: str,
                  pos: tuple[float, float, float],
-                 size: tuple[float, float, float], color: Gf.Vec3f) -> None:
+                 size: tuple[float, float, float], color: Gf.Vec3f,
+                 collider: bool = True) -> None:
         box = UsdGeom.Cube.Define(stage, path)
         box.CreateSizeAttr(1.0)
         box.CreateDisplayColorAttr([color])
         xf = UsdGeom.Xformable(box.GetPrim())
         xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
         xf.AddScaleOp().Set(Gf.Vec3f(*size))
-        physics.add_shape_collider(box.GetPrim())
+        if collider:
+            physics.add_shape_collider(box.GetPrim())
 
     def _add_slot(self, stage: Usd.Stage, path: str,
                   pos: tuple[float, float, float]) -> None:

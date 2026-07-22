@@ -15,7 +15,7 @@ from isaacsim.core.api.tasks import BaseTask
 
 from pjt_config.settings import SceneConfig
 from scene import pedicel, physics
-from scene.ground import Ground
+from scene.ground import COMMON_FLOOR_Z, Ground
 from scene.lighting import Lighting
 from scene.greenhouse import Greenhouse
 from scene.tomato_plants import TomatoPlants
@@ -49,11 +49,12 @@ class GreenhouseTask(BaseTask):
         # 기본 지면의 파란 격자가 지평선에도 안 보이게 시야보다 훨씬 넉넉히 깐다.
         ground.spawn_hall(stage, center=(0.0, 1.5), size=(60.0, 60.0))
         Lighting(cfg.lighting).spawn(stage)
-        Greenhouse(g).spawn(stage, back_wall=False)   # 뒷벽은 창고와 공유(벽 하나로 붙임)
+        Greenhouse(g).spawn(stage, back_wall=False, elevation=COMMON_FLOOR_Z)
+        # 베드·줄기·과실 전체를 공통 바닥과 함께 올린다.
 
         self._plants = TomatoPlants(cfg.plants, cfg.tomato_assets,
                                     g, cfg.physics, rng)
-        self._plants.spawn(stage)
+        self._plants.spawn(stage, elevation=COMMON_FLOOR_Z)
 
         # 창고 방 — 온실 뒷벽에 **벽 하나로 붙인다**(gap 없음, 팀 피드백 2026-07-20).
         # 방 중심 x=0, 방 앞벽(-y)이 온실 뒷벽(+y=length/2)과 겹쳐 공유 칸막이가 된다.

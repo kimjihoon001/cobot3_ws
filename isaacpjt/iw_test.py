@@ -10,12 +10,13 @@ from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 from robot_base import Driver, ros_fail
 from robots.iwhub import IwHub
+from scene.ground import COMMON_FLOOR_Z
 
 # 일반 통합 실행 위치와 창고 자동화 단독 시험용 도킹 위치.
-POSE = (2.0, -12.0, 0.0)
+POSE = (2.0, -12.0, COMMON_FLOOR_Z)
 # 창고 입구(Y=13) 밖 중앙축. 지게차 대기점 (0, 14.5)에서 월드 -Y로 2m
 # 이동했을 때 포크가 insertion_depth=0.65m 들어가는 AMR 중심 좌표.
-WAREHOUSE_DOCK_POSE = (0.0, 10.84885, 0.0)
+WAREHOUSE_DOCK_POSE = (0.0, 10.84885, COMMON_FLOOR_Z)
 
 
 def _fix_articulation_to_world(stage: Usd.Stage, body_path: str) -> bool:
@@ -122,9 +123,8 @@ def build_nav(stage, iw, art_path: str, nav, opts) -> None:
             for m in nav.lidars:                      # 앞/뒤 라이다 각 1기 → /scan + TF
                 res = iw.attach_lidar(stage, m)
                 if res:
-                    lidar_prim, rp = res              # (라이다 prim, 렌더프로덕트)
-                    RB.build_tf_sensor_iw(stage, f"/World/Nav_tf_{m.name}",
-                                       chassis, lidar_prim, nav, m.frame)
+                    _lidar_prim, rp = res             # (라이다 prim, 렌더프로덕트)
+                    # 고정 마운트 TF는 iwhub_base.launch.py가 /tf_static으로 발행.
                     RB.build_lidar_scan_iw(stage, f"/World/Nav_scan_{m.name}",
                                         rp, m.scan_topic, m.frame)
     except Exception:

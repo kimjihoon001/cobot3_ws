@@ -557,7 +557,7 @@ class LidarMount:
     offset: tuple[float, float, float]     # base_link 로컬 마운트 (m)
     yaw_deg: float                         # 정면 방향 (앞=0=+X, 뒤=180=−X)
     frame: str                             # TF 프레임 id = prim 이름 (laser_front/back)
-    scan_topic: str                        # LaserScan 토픽 (/scan_front, /scan_back)
+    scan_topic: str                        # LaserScan 토픽 (Nova Carter 규칙)
 
 
 @dataclass
@@ -575,20 +575,23 @@ class IwHubNavConfig:
     max_linear_speed: float = 1.0    # m/s   [4] 임의 (안전 상한)
     max_angular_speed: float = 1.5   # rad/s [4] 임의
 
-    # 안전 라이다 2기 — 앞/뒤 양끝, 데크(~0.25m) 아래 낮게(페이로드 미간섭), 각 270°(차체가
-    # 자기 후방을 가림)로 겹쳐 360°. 실물 AMR 방식이라 §5.5 근거가 선다(배치 패턴 = 산업 표준).
-    #   x=±0.6: iw.hub 길이 1431mm(실측·아래 assets 주석) → 반길이 0.72m 안쪽 앞/뒤 끝 [2].
+    # Nova Carter와 같은 SLAMTEC RPLIDAR S2E 2기 — 앞/뒤 양끝, 데크 아래
+    # 낮은 중심선에 배치한다. 각 센서는 360°, 0.05~30m, 10Hz 프로파일이다.
+    #   앞 x=+0.65, 뒤 x=-0.60: iw.hub 길이 1431mm(반길이 약 0.72m) 안쪽 끝 [2].
     #   z=0.15: 안전스캐너 통상 높이 [3]. yaw: 기하 [2].
     #   ⚠ base_link 원점 위치·정확 오프셋과 RTX 라이다 생성 API 는 GPU 실측/probe 보정(§8).
     lidars: tuple[LidarMount, ...] = (
-        LidarMount("front", (0.6, 0.0, 0.15), 0.0, "laser_front", "/scan_front"),
-        LidarMount("back", (-0.6, 0.0, 0.15), 180.0, "laser_back", "/scan_back"),
+        LidarMount("front", (0.65, 0.0, 0.15), 0.0,
+                   "iwhub_0/front_2d_lidar", "/iwhub_0/front_2d_lidar/scan"),
+        LidarMount("back", (-0.6, 0.0, 0.15), 180.0,
+                   "iwhub_0/back_2d_lidar", "/iwhub_0/back_2d_lidar/scan"),
     )
-    # TF 프레임/토픽 (단일 로봇이라 네임스페이스 없이 Nav2 기본명)
-    odom_frame: str = "odom"
-    base_frame: str = "base_link"
-    cmd_vel_topic: str = "/cmd_vel"
-    odom_topic: str = "/odom"
+    # MM Nav2의 전역 토픽/프레임과 섞이지 않도록 IW 전체를 iwhub_0 아래에 격리한다.
+    odom_frame: str = "iwhub_0/odom"
+    base_frame: str = "iwhub_0/base_link"
+    tf_namespace: str = "iwhub_0"
+    cmd_vel_topic: str = "/iwhub_0/cmd_vel"
+    odom_topic: str = "/iwhub_0/odom"
 
 
 @dataclass

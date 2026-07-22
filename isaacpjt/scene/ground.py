@@ -13,21 +13,26 @@ SAFETY_BLACK = Gf.Vec3f(0.12, 0.12, 0.12)
 
 _LANE_W = 0.09       # m. 유도선 폭
 _EPS = 0.006         # m. 바닥판 위 z 오프셋 (z-fighting 방지)
+# 창고 바닥 슬래브 상면과 같은 공통 주행면. 온실·베드·식물·로봇도 이 높이를 쓴다.
+COMMON_FLOOR_Z = 0.055
 
 
 class Ground:
     """기본 지면 (콜라이더 포함)."""
 
-    def spawn(self, scene) -> None:
+    def spawn(self, scene, elevation: float = COMMON_FLOOR_Z) -> None:
         """scene = BaseTask.set_up_scene() 이 넘겨주는 Scene 객체."""
-        scene.add_default_ground_plane()
+        scene.add_default_ground_plane(z_position=elevation)
 
     def spawn_hall(self, stage: Usd.Stage,
                    center: tuple[float, float],
                    size: tuple[float, float],
-                   root: str = "/World/Hall") -> None:
+                   root: str = "/World/Hall",
+                   elevation: float = COMMON_FLOOR_Z) -> None:
         """홀 바닥판 + 그 둘레의 AMR 유도선 루프 + 한쪽 가장자리 안전띠."""
         UsdGeom.Xform.Define(stage, root)
+        UsdGeom.Xformable(stage.GetPrimAtPath(root)).AddTranslateOp().Set(
+            Gf.Vec3d(0.0, 0.0, elevation))
         cx, cy = center
         w, l = size
 

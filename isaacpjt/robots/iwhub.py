@@ -98,15 +98,39 @@ class IwHub:
                                  calyx if os.path.exists(calyx) else None))
 
         # ── iw.hub 데크 월드 포즈 (적재 세트 원점) ──
-        # iw.hub 에셋엔 base_link 프림이 없어 self._root(컨테이너)로 떨어진다.
+        # 컨테이너 root 원점은 실제 차체 기하 중심과 일치하지 않는다. root XY를 그대로 쓰면
+        # 팔레트가 뒤쪽으로 쏠리고, 무거운 Load의 무게중심까지 치우쳐 회전이 불안정해진다.
+        # cargo XY는 움직이는 chassis의 월드 bbox 중심에 맞추고 Z만 기존 데크 실측값을 쓴다.
         src = f"{self._root}/base_link"
         if not stage.GetPrimAtPath(src).IsValid():
             src = self._root
         bp = UsdGeom.Xformable(stage.GetPrimAtPath(src)).ComputeLocalToWorldTransform(
             Usd.TimeCode.Default()).ExtractTranslation()
+        cargo_x, cargo_y = float(bp[0]), float(bp[1])
+        chassis = f"{self._root}/chassis"
+        chassis_prim = stage.GetPrimAtPath(chassis)
+        if chassis_prim.IsValid():
+            try:
+                bbox_cache = UsdGeom.BBoxCache(
+                    Usd.TimeCode.Default(),
+                    [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+                )
+                chassis_center = (
+                    bbox_cache.ComputeWorldBound(chassis_prim)
+                    .ComputeAlignedRange()
+                    .GetMidpoint()
+                )
+                cargo_x, cargo_y = float(chassis_center[0]), float(chassis_center[1])
+                log(
+                    "[IwHub] 카고 중심 정렬: "
+                    f"root 대비 dx={cargo_x - float(bp[0]):+.3f}m, "
+                    f"dy={cargo_y - float(bp[1]):+.3f}m"
+                )
+            except Exception as e:
+                log(f"[IwHub] ⚠ chassis bbox 중심 계산 실패 — root 중심 사용: {e}")
         root = "/World/IwHubCargo"
         UsdGeom.Xform.Define(stage, root)
-        set_translate(stage.GetPrimAtPath(root), (bp[0], bp[1], bp[2] + deck_z))
+        set_translate(stage.GetPrimAtPath(root), (cargo_x, cargo_y, bp[2] + deck_z))
         ident = Gf.Quatd(1.0, 0.0, 0.0, 0.0)
         rng = random.Random(7)
 
@@ -174,7 +198,6 @@ class IwHub:
         load_density = 200.0   # [4] 근거없음 — 팔레트+빈 유효밀도. 결속돼 있어 동특성 영향 작음. GPU 보정.
         physics.add_rigid_body(stage.GetPrimAtPath(load), load_density,
                                kinematic=False)
-        chassis = f"{self._root}/chassis"
         if stage.GetPrimAtPath(chassis).IsValid():
             physics.create_fixed_joint(stage, f"{root}/DeckJoint", chassis, load)
             bound = "chassis 결속(로봇 따라감·창고서 해제→지게차 인수)"
@@ -212,7 +235,7 @@ class IwHub:
         Isaac 5.1 정식 API `isaacsim.sensors.rtx.LidarRtx` — 라이다 생성 + 렌더프로덕트를 같이
         만들어 준다. ROS2RtxLidarHelper 는 lidarPrim 이 아니라 renderProductPath 를 받는다
         (2026-07-20 GPU 실측 — 이전 IsaacSensorCreateRtxLidar 직접 호출 + lidarPrim 은 실패).
-        config = Example_Rotary_2D (2D LaserScan — Nav2 코스트맵용). prim 이름 = mount.frame →
+        config = RPLIDAR_S2E (Nova Carter의 SLAMTEC 2D LaserScan). prim 이름 = mount.frame →
         TF child = LaserScan frame_id 일치. LidarRtx 객체는 self._lidars 에 보관(GC 방지).
         """
         import math
@@ -235,7 +258,7 @@ class IwHub:
                 translation=np.array(mount.offset, dtype=float),
                 orientation=quat,
                 # config 는 파일명 stem 으로 매칭된다(전체경로 X — commands.py 실측 2026-07-20).
-                config_file_name="Example_Rotary_2D")
+                config_file_name="RPLIDAR_S2E")
             self._lidars.append(lidar)               # 참조 유지(GC 되면 렌더프로덕트 파괴)
             rp = lidar.get_render_product_path()
             log(f"[IwHub] RTX 라이다 '{mount.name}': {path} @ {mount.offset} "

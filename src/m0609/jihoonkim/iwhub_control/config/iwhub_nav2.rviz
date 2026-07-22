@@ -16,7 +16,7 @@ Visualization Manager:
   Class: ""
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: map
+    Fixed Frame: iwhub_0/map
     Frame Rate: 30
   Displays:
     - Class: rviz_default_plugins/Grid
@@ -36,7 +36,7 @@ Visualization Manager:
       Name: Map
       Enabled: true
       Topic:
-        Value: /map
+        Value: /iwhub_0/map
         Depth: 1
         Durability Policy: Transient Local
         Reliability Policy: Reliable
@@ -46,7 +46,7 @@ Visualization Manager:
       Name: Global Costmap
       Enabled: true
       Topic:
-        Value: /global_costmap/costmap
+        Value: /iwhub_0/global_costmap/costmap
         Durability Policy: Transient Local
         Reliability Policy: Reliable
       Color Scheme: costmap
@@ -55,7 +55,7 @@ Visualization Manager:
       Name: Local Costmap
       Enabled: true
       Topic:
-        Value: /local_costmap/costmap
+        Value: /iwhub_0/local_costmap/costmap
         Durability Policy: Volatile
         Reliability Policy: Reliable
       Color Scheme: costmap
@@ -64,7 +64,7 @@ Visualization Manager:
       Name: LaserScan front
       Enabled: true
       Topic:
-        Value: /scan_front
+        Value: /iwhub_0/front_2d_lidar/scan
         Reliability Policy: Best Effort
       Style: Points
       Size (Pixels): 3
@@ -74,7 +74,7 @@ Visualization Manager:
       Name: LaserScan back
       Enabled: true
       Topic:
-        Value: /scan_back
+        Value: /iwhub_0/back_2d_lidar/scan
         Reliability Policy: Best Effort
       Style: Points
       Size (Pixels): 3
@@ -82,15 +82,15 @@ Visualization Manager:
       Color Transformer: FlatColor
     - Class: rviz_default_plugins/RobotModel
       Name: RobotModel
-      Enabled: true
+      Enabled: false
       Description Topic:
-        Value: /robot_description
+        Value: /iwhub_0/robot_description
       Alpha: 0.6
     - Class: rviz_default_plugins/Polygon
       Name: Robot Footprint
       Enabled: true
       Topic:
-        Value: /local_costmap/published_footprint
+        Value: /iwhub_0/local_costmap/published_footprint
         Reliability Policy: Reliable
       Color: 255; 170; 0
       Alpha: 1
@@ -98,7 +98,7 @@ Visualization Manager:
       Name: Global Plan
       Enabled: true
       Topic:
-        Value: /plan
+        Value: /iwhub_0/plan
         Reliability Policy: Reliable
       Color: 0; 255; 0
       Line Style: Lines
@@ -106,7 +106,7 @@ Visualization Manager:
       Name: Local Plan
       Enabled: true
       Topic:
-        Value: /local_plan
+        Value: /iwhub_0/local_plan
         Reliability Policy: Reliable
       Color: 255; 255; 0
       Line Style: Lines
@@ -114,7 +114,7 @@ Visualization Manager:
       Name: Odometry
       Enabled: false
       Topic:
-        Value: /odom
+        Value: /iwhub_0/odom
         Reliability Policy: Best Effort
       Keep: 1
       Covariance:
@@ -124,11 +124,11 @@ Visualization Manager:
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/SetInitialPose
       Topic:
-        Value: /initialpose
+        Value: /iwhub_0/initialpose
     - Class: nav2_rviz_plugins/GoalTool
     - Class: rviz_default_plugins/PublishPoint
       Topic:
-        Value: /clicked_point
+        Value: /iwhub_0/clicked_point
   Views:
     Current:
       Class: rviz_default_plugins/Orbit

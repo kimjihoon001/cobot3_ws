@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from robot_base import Driver, ros_fail
 from robots.iwhub import IwHub
+from scene.ground import COMMON_FLOOR_Z
 
 # 임시 배치 — 온실 앞마당(MM 옆). 물류 동선 확정 후 조정.
-POSE = (2.0, -12.0, 0.0)
+POSE = (2.0, -12.0, COMMON_FLOOR_Z)
 
 
 class IwDriver(Driver):
@@ -63,9 +64,8 @@ def build_nav(stage, iw, art_path: str, nav, opts) -> None:
             for m in nav.lidars:                      # 앞/뒤 라이다 각 1기 → /scan + TF
                 res = iw.attach_lidar(stage, m)
                 if res:
-                    lidar_prim, rp = res              # (라이다 prim, 렌더프로덕트)
-                    RB.build_tf_sensor_iw(stage, f"/World/Nav_tf_{m.name}",
-                                       chassis, lidar_prim, nav, m.frame)
+                    _lidar_prim, rp = res             # (라이다 prim, 렌더프로덕트)
+                    # 고정 마운트 TF는 iwhub_base.launch.py가 /tf_static으로 발행.
                     RB.build_lidar_scan_iw(stage, f"/World/Nav_scan_{m.name}",
                                         rp, m.scan_topic, m.frame)
     except Exception:

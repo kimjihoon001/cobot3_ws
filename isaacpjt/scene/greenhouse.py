@@ -17,8 +17,10 @@ class Greenhouse:
         self._cfg = cfg
 
     def spawn(self, stage: Usd.Stage, root: str = "/World/Greenhouse",
-              back_wall: bool = True) -> None:
+              back_wall: bool = True, elevation: float = 0.0) -> None:
         UsdGeom.Xform.Define(stage, root)
+        UsdGeom.Xformable(stage.GetPrimAtPath(root)).AddTranslateOp().Set(
+            Gf.Vec3d(0.0, 0.0, elevation))
         c = self._cfg
         half_w, half_l = c.width / 2.0, c.length / 2.0
         t = c.frame_size
