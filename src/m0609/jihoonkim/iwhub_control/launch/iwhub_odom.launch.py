@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""iw.hub Nav2 — 정적 맵 표시 + 고정 map→odom TF (AMCL 없음). 반복 온실 aliasing 회피.
+"""iw.hub Nav2 — 정적 맵 표시 + 고정 map→odom TF (AMCL 없음, 진단용).
 
 핵심: 시뮬 odom 은 슬립이 없어 거의 정확 → AMCL 로 보정할 필요가 없다. 대신 로봇 시작
 포즈(2,-12)를 고정 map→odom TF 로 박아 맵과 로봇을 정렬한다. 그러면:
@@ -9,7 +9,9 @@
 전역 계획은 정적 맵(식물줄·벽) 위에서, 실시간 회피는 로컬 코스트맵(라이다)으로.
 
   Isaac : main.py --iw --nav-scan   (로봇은 항상 (2,-12) 에 스폰돼야 TF 가 맞음)
-  실행  : ros2 launch iwhub_control iwhub_odom.launch.py   (rviz 자동, Fixed Frame=map)
+⚠ 바퀴 헛돌기·충돌이 있으면 맵과 라이다가 누적적으로 틀어진다.
+  진단  : ros2 launch iwhub_control iwhub_odom.launch.py
+  실제 주행: ros2 launch iwhub_control iwhub_nav2.launch.py   (AMCL로 스캔↔맵 보정)
 """
 import os
 
@@ -25,13 +27,18 @@ def generate_launch_description():
     pkg = get_package_share_directory("iwhub_control")
     nav2_bringup = get_package_share_directory("nav2_bringup")
     nav2_params = os.path.join(pkg, "config", "nav2_params.yaml")
-    map_yaml = os.path.join(pkg, "maps", "greenhouse.yaml")
+    # IW 전용 월드 정렬 맵. 실행 시 map:=... 으로 다른 맵을 덮어쓸 수 있다.
+    default_map = os.path.join(pkg, "maps", "greenhouse.yaml")
+    map_yaml = LaunchConfiguration("map")
     with open(os.path.join(pkg, "urdf", "iwhub.urdf")) as f:
         robot_desc = f.read()
     use_sim_time = LaunchConfiguration("use_sim_time")
 
     return LaunchDescription([
         DeclareLaunchArgument("use_sim_time", default_value="true"),
+        DeclareLaunchArgument(
+            "map", default_value=default_map,
+            description="IW가 사용할 정적 map yaml"),
 
         # 0. 로봇 모델(URDF) 발행 — RViz RobotModel 에 실제 크기(몸체+적재)를 보이게.
         #    base_link→deck_cargo(fixed) TF 도 여기서 냄. Nav2 회피는 nav2_params 의
@@ -50,8 +57,8 @@ def generate_launch_description():
             launch_arguments={"use_sim_time": use_sim_time}.items(),
         ),
 
-        # 2. 고정 map→odom TF — 로봇 시작 포즈(2,-12) = odom 원점. AMCL 대체(시뮬 odom 정확).
-        #    로봇이 다른 위치에 스폰되면 이 값을 그 위치로 바꿀 것.
+        # 2. 고정 map→odom TF — IW 전용 맵은 Isaac 월드 좌표에 정렬되어 있으므로
+        #    로봇 시작 포즈 (2,-12)를 그대로 사용한다.
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",

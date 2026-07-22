@@ -12,6 +12,7 @@
 파라미터(기본값 = isaacpjt IwHubNavConfig; wheel_* 는 [4] iw.hub 실측 필요 — odom 정확도 직결):
   wheel_radius=0.1  wheel_separation=0.5  ns=iwhub_0
   odom_frame=odom   base_frame=base_link
+  publish_odom=true — false이면 바퀴 odom을 끄고 Isaac chassis odom을 사용.
   left_wheel_joint=left_wheel_joint  right_wheel_joint=right_wheel_joint
   cmd_timeout=0.5 (s) — cmd_vel 이 끊기면 바퀴를 0 으로 세운다(안전).
 
@@ -47,6 +48,9 @@ class BaseNode(Node):
         self.declare_parameter("left_wheel_joint", "left_wheel_joint")
         self.declare_parameter("right_wheel_joint", "right_wheel_joint")
         self.declare_parameter("cmd_timeout", 0.5)
+        self.declare_parameter("publish_odom", True)
+        self.declare_parameter("cmd_vel_topic", "/iwhub_0/cmd_vel")
+        self.declare_parameter("odom_topic", "/iwhub_0/odom")
 
         self._r = self.get_parameter("wheel_radius").value
         self._sep = self.get_parameter("wheel_separation").value
@@ -56,21 +60,33 @@ class BaseNode(Node):
         self._lname = self.get_parameter("left_wheel_joint").value
         self._rname = self.get_parameter("right_wheel_joint").value
         self._cmd_timeout = self.get_parameter("cmd_timeout").value
+        self._publish_odom = self.get_parameter("publish_odom").value
+        self._cmd_vel_topic = self.get_parameter("cmd_vel_topic").value
+        self._odom_topic = self.get_parameter("odom_topic").value
 
         self._odom = DiffDriveOdometry(self._r, self._sep)
         self._tf = TransformBroadcaster(self)
         self._last_cmd_t = None
 
         self._cmd_pub = self.create_publisher(JointState, f"/{ns}/joint_command", 10)
-        self._odom_pub = self.create_publisher(Odometry, "/odom", 10)
-        self.create_subscription(Twist, "/cmd_vel", self._on_cmd, 10)
-        self.create_subscription(JointState, f"/{ns}/joint_states", self._on_joints, 10)
+        self.create_subscription(Twist, self._cmd_vel_topic, self._on_cmd, 10)
+        if self._publish_odom:
+            self._odom_pub = self.create_publisher(Odometry, self._odom_topic, 10)
+            self.create_subscription(
+                JointState, f"/{ns}/joint_states", self._on_joints, 10)
+        else:
+            self._odom_pub = None
         # cmd_vel 끊김 감시 — 끊기면 바퀴 0 (Nav2 가 멈출 때 0 을 보내지만 안전용)
         self.create_timer(0.1, self._watchdog)
 
+        odom_mode = (
+            f"/{ns}/joint_states→/odom+TF "
+            f"({self._odom_frame}→{self._base_frame})"
+            if self._publish_odom
+            else "Isaac chassis odom/TF 사용(바퀴 odom 비활성)"
+        )
         self.get_logger().info(
-            f"iwhub_base_node: /cmd_vel→/{ns}/joint_command, "
-            f"/{ns}/joint_states→/odom+TF ({self._odom_frame}→{self._base_frame}) "
+            f"iwhub_base_node: {self._cmd_vel_topic}→/{ns}/joint_command, {odom_mode}, "
             f"r={self._r} sep={self._sep}")
 
     # ── /cmd_vel → 좌/우 바퀴 속도 → Isaac joint_command ──
@@ -97,6 +113,8 @@ class BaseNode(Node):
 
     # ── Isaac joint_states(바퀴 각도) → 오도메트리 → /odom + TF ──
     def _on_joints(self, msg: JointState) -> None:
+        if not self._publish_odom or self._odom_pub is None:
+            return
         try:
             li = msg.name.index(self._lname)
             ri = msg.name.index(self._rname)

@@ -72,7 +72,7 @@ local_costmap:
       #   적재 상태 실측 크기: iw.hub 몸체 1.431×0.659 + 데크 팔레트 1.2×0.8 → 합산 1.5×0.84m.
       #   base_link(로봇 중심) 기준 반치수 ±0.75(길이,x) × ±0.42(폭,y). robot_radius 로는
       #   팔레트 오버행을 못 담아 좁은 길로 계획→처박음(2026-07-21 사용자 지적).
-      footprint: "[[0.75, 0.42], [0.75, -0.42], [-0.75, -0.42], [-0.75, 0.42]]"
+      footprint: "[[0.3975, 0.376], [0.3975, -0.376], [-1.0335, -0.376], [-1.0335, 0.376]]"
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -113,7 +113,7 @@ global_costmap:
       #   적재 상태 실측 크기: iw.hub 몸체 1.431×0.659 + 데크 팔레트 1.2×0.8 → 합산 1.5×0.84m.
       #   base_link(로봇 중심) 기준 반치수 ±0.75(길이,x) × ±0.42(폭,y). robot_radius 로는
       #   팔레트 오버행을 못 담아 좁은 길로 계획→처박음(2026-07-21 사용자 지적).
-      footprint: "[[0.75, 0.42], [0.75, -0.42], [-0.75, -0.42], [-0.75, 0.42]]"
+      footprint: "[[0.4475, 0.451], [0.4475, -0.451], [-1.0335, -0.401], [-1.0335, 0.401]]"
       track_unknown_space: false    # 미탐색을 free 로 → 롤링 창 내 계획 가능
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:

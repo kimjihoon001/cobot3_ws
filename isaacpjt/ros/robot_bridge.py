@@ -266,8 +266,10 @@ def build_odometry(stage, graph_path: str, chassis_prim: str, nav,
           [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("SimTime", T["SimTime"]),
            ("Odom", T["ComputeOdom"]), ("Pub", T["PubOdom"]), ("RawTf", T["PubRawTf"])],
           [("OnTick.outputs:tick", "Odom.inputs:execIn"),
-           ("OnTick.outputs:tick", "Pub.inputs:execIn"),
-           ("OnTick.outputs:tick", "RawTf.inputs:execIn"),
+           # Nova Carter 공식 그래프와 같이 계산 완료 후 발행한다.
+           # OnTick에 모두 물리면 이전 프레임 odom/TF가 발행될 수 있다.
+           ("Odom.outputs:execOut", "Pub.inputs:execIn"),
+           ("Odom.outputs:execOut", "RawTf.inputs:execIn"),
            ("Ctx.outputs:context", "Pub.inputs:context"),
            ("Ctx.outputs:context", "RawTf.inputs:context"),
            ("SimTime.outputs:simulationTime", "Pub.inputs:timeStamp"),
