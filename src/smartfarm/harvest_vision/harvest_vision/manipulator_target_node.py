@@ -74,6 +74,11 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("basket_workspace_max", [1.25, 0.80, 1.80])
         self.declare_parameter("workspace_min", [0.15, -0.75, 0.15])
         self.declare_parameter("workspace_max", [1.25, 0.75, 1.80])
+        # 데모: 성공/실패 무관 매 시도 후 홈 복귀 → 팔이 안 굳고 다음 과실을 계속 시도한다.
+        self.declare_parameter("home_after_attempt", True)
+        # h 원샷: 한 사이클(인식→수확→홈) 끝나면 게이트를 스스로 끈다. 계속 재인식·재시작
+        # 하지 않고 h 를 다시 눌러야 다음 과실을 잡는다.
+        self.declare_parameter("single_shot_harvest", True)
 
         self._buffer = Buffer()
         self._listener = TransformListener(self._buffer, self)
@@ -255,16 +260,25 @@ class ManipulatorTargetNode(Node):
             return
         if not target_class:
             self._transition("NO_TARGET", stop=True)
-        elif target_class == "tomato":
-            self._transition("APPROACH")
-        elif target_class == "quality_check":
-            self._transition("QUALITY_CHECK", stop=True)
-        elif target_class == "ripe":
+        elif target_class in ("tomato", "ripe"):
+            # 데모(A): 원거리 "tomato" 검출로 **바로 파지**. near(ripe 판정) 모델이 시뮬 크롭에서
+            # 검출을 못 해 APPROACH 에서 멈추던 문제 우회(2026-07-22). 익음구분은 생략한다.
             changed = self._transition("RIPE_READY", stop=True)
             if (changed and bool(self.get_parameter("command_enabled").value)
                     and bool(self.get_parameter("auto_grasp_enabled").value)
                     and self._harvest_enabled):
                 self._start_grasp_sequence()
+        # ── 원래 2단계(익음구분) 동작. 되살리려면 위 elif 를 지우고 아래 둘을 활성화 ──
+        # elif target_class == "tomato":
+        #     self._transition("APPROACH")          # 다가가서 near 모델로 ripe/spoiled 판정
+        # elif target_class == "ripe":
+        #     changed = self._transition("RIPE_READY", stop=True)
+        #     if (changed and bool(self.get_parameter("command_enabled").value)
+        #             and bool(self.get_parameter("auto_grasp_enabled").value)
+        #             and self._harvest_enabled):
+        #         self._start_grasp_sequence()
+        elif target_class == "quality_check":
+            self._transition("QUALITY_CHECK", stop=True)
         elif target_class == "spoiled":
             self._transition("SKIP_SPOILED", stop=True)
         else:
@@ -326,6 +340,10 @@ class ManipulatorTargetNode(Node):
         pregrasp = target - ray * clearance
         self._pregrasp_target = pregrasp
         self._grasp_target = target
+        # 파지 전 그리퍼를 연다 — 닫힌 채로 다가가면 손가락이 과실을 못 감싼다("잡는 느낌이
+        # 아니다", 2026-07-22). 직전 사이클에서 닫혀 있어도 여기서 확실히 벌린다.
+        self._isaac_command_pub.publish(
+            String(data=json.dumps({"gripper": {"closed": False}})))
         self._send_rmp_goal(pregrasp, "PREGRASP")
 
     def _sim_tomato_callback(self, msg: String) -> None:
@@ -440,7 +458,10 @@ class ManipulatorTargetNode(Node):
                 self._send_rmp_goal(self._pregrasp_target, "RETRACT")
             else:
                 self._deadline_ns = 0
-                self._transition("ERROR_CUT", stop=True)
+                if bool(self.get_parameter("home_after_attempt").value):
+                    self._abort_to_home("cut")
+                else:
+                    self._transition("ERROR_CUT", stop=True)
             return
         try:
             status_id = int(status.get("id", -1))
@@ -463,11 +484,14 @@ class ManipulatorTargetNode(Node):
                 String(data=json.dumps({"gripper": {"closed": True}}))
             )
         elif self._state == "RETRACT":
-            if self._basket_place is None:
+            if self._basket_place is not None:
+                self._start_place()
+            elif bool(self.get_parameter("home_after_attempt").value):
+                self._deadline_ns = 0
+                self._send_home()
+            else:
                 self._deadline_ns = 0
                 self._transition("WAIT_BASKET", stop=True)
-            else:
-                self._start_place()
         elif self._state == "BASKET_APPROACH":
             self._send_rmp_goal(self._basket_place, "BASKET_PLACE")
         elif self._state == "BASKET_PLACE":
@@ -482,6 +506,7 @@ class ManipulatorTargetNode(Node):
             self._deadline_ns = 0
             self._transition("HOME_READY", stop=True)
             self._mobility_pub.publish(Bool(data=True))
+            self._maybe_single_shot_off()
 
     def _basket_callback(self, msg: PoseStamped) -> None:
         """IW가 선택한 빈 바스켓 슬롯의 tool-release pose를 base 좌표로 저장한다."""
@@ -532,6 +557,25 @@ class ManipulatorTargetNode(Node):
             "rmp_home": {"id": self._pending_id},
         })))
 
+    def _maybe_single_shot_off(self) -> None:
+        """h 원샷: 사이클 끝나면 게이트를 끈다 — 다시 h 를 눌러야 다음 과실을 잡는다.
+        계속 켜두면 이동 중 재인식으로 시퀀스가 흔들리는 걸 막는다."""
+        if bool(self.get_parameter("single_shot_harvest").value):
+            self._harvest_enabled = False
+            self.get_logger().info("원샷 수확 완료 — h 다시 눌러야 다음 과실")
+
+    def _abort_to_home(self, reason: str) -> None:
+        """실패해도 팔을 홈으로 돌려 다음 과실을 계속 시도하게 한다(데모 연속 사이클).
+        이미 홈 복귀 중(GO_HOME)에 또 실패하면 무한루프 방지로 멈추기만 한다."""
+        self.get_logger().warning(f"수확 실패({reason}) — 홈 복귀 후 다음 시도")
+        if self._state == "GO_HOME":
+            self._deadline_ns = 0
+            self._transition("HOME_READY", stop=True)
+            self._mobility_pub.publish(Bool(data=True))
+            self._maybe_single_shot_off()
+            return
+        self._send_home()
+
     def _begin_cut(self) -> None:
         self._gripper_command_at_ns = 0
         self._transition("CUTTING", stop=True)
@@ -572,7 +616,10 @@ class ManipulatorTargetNode(Node):
         if now <= self._deadline_ns:
             return
         self._deadline_ns = 0
-        self._transition("ERROR_TIMEOUT", stop=True)
+        if bool(self.get_parameter("home_after_attempt").value):
+            self._abort_to_home("timeout")
+        else:
+            self._transition("ERROR_TIMEOUT", stop=True)
 
     def _is_stale(self, msg: PoseStamped) -> bool:
         # stamp=0은 ros2 topic pub 등 수동 시험을 허용한다.

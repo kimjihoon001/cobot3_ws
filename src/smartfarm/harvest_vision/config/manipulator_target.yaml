@@ -18,13 +18,13 @@ manipulator_target_node:
     command_enabled: false
     max_target_age_sec: 0.5
     tf_timeout_sec: 0.2
-    max_jump_m: 0.15
+    max_jump_m: 0.5
     auto_grasp_enabled: true
     pregrasp_clearance_m: 0.15
     tool_grasp_reach_m: 0.115
     motion_timeout_sec: 10.0
     blade_close_delay_sec: 0.6
-    cut_match_tolerance_m: 0.10
+    cut_match_tolerance_m: 0.4
     basket_approach_height_m: 0.15
     basket_workspace_min: [-0.80, -0.80, 0.15]
     basket_workspace_max: [1.25, 0.80, 1.80]

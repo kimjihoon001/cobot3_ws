@@ -14,7 +14,7 @@ from pxr import Usd
 from isaacsim.core.api.tasks import BaseTask
 
 from pjt_config.settings import SceneConfig
-from scene import pedicel
+from scene import pedicel, physics
 from scene.ground import Ground
 from scene.lighting import Lighting
 from scene.greenhouse import Greenhouse
@@ -115,11 +115,15 @@ class GreenhouseTask(BaseTask):
         """
         if path in self._harvested:
             return False
-        joint = self._joint_of(path)
-        if joint is None:
-            return False
         stage = omni.usd.get_context().get_stage()
-        if not pedicel.cut(stage, joint):
+        fruit = stage.GetPrimAtPath(path)
+        if not fruit.IsValid():
             return False
+        # kinematic(고정) 과실을 dynamic 으로 전환 = 줄기에서 분리·낙하/그리퍼 파지
+        # (§5.3: 절단 순간에만). 조인트 없이 이것만으로 매달림이 풀린다.
+        physics.set_kinematic(fruit, False)
+        joint = self._joint_of(path)          # 옛 조인트 방식 호환 — 있으면 같이 끊는다
+        if joint:                             # ""(조인트 없음)·None 이면 건너뜀
+            pedicel.cut(stage, joint)
         self._harvested.add(path)
         return True

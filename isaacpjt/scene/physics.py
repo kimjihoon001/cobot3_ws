@@ -176,3 +176,13 @@ def create_physics_material(stage: Usd.Stage, path: str,
 def bind_physics_material(prim: Usd.Prim, material: UsdShade.Material) -> None:
     UsdShade.MaterialBindingAPI.Apply(prim).Bind(
         material, UsdShade.Tokens.weakerThanDescendants, "physics")
+
+
+def add_sphere_collider(stage: Usd.Stage, path: str, radius: float) -> None:
+    """파지용 작은 구 콜라이더 — 시각 메시(convexHull)보다 작게 둬 그리퍼가 어긋나도
+    손가락이 과실을 안 때리고 감싸게 한다(2026-07-22). 안 보이는 해석적 구(정확).
+    radius 는 프림 로컬 단위(부모 스케일이 곱해져 월드 크기가 된다)."""
+    sph = UsdGeom.Sphere.Define(stage, path)
+    sph.CreateRadiusAttr(float(radius))
+    UsdGeom.Imageable(sph.GetPrim()).MakeInvisible()   # 충돌 전용, 시각 숨김
+    UsdPhysics.CollisionAPI.Apply(sph.GetPrim())

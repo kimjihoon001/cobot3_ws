@@ -127,9 +127,12 @@ class HarvestMM:
         self._blade_joint: str | None = None       # 단일 날 RevoluteJoint 경로(= 서보)
         self._tool0_m: Gf.Matrix4d | None = None   # 툴0(플랜지) 월드 포즈 — CAD 지그 부착 기준
         self._grasp_tcp: str | None = None         # 실제 파지 중심 프레임
-        self._blade_target_attr = None             # 가동날 드라이브 목표각 attr (§5.6 ROS2 제어점)
         self._blade_shaft_w: Gf.Vec3d | None = None  # 가동날 절단점(서보축) 월드좌표 (줄기 배치용)
-        self._blade_rel: Gf.Matrix4d | None = None   # 날 사본 ← grip_base 상대포즈 (정지 중 재배치용)
+        self._blade_path: str | None = None          # 가동날 프림 경로 (grip_base 자식)
+        self._blade_L_rest: Gf.Matrix4d | None = None  # 날 rest 로컬(grip_base 기준) — 스윙 기준
+        self._shaft_rel: Gf.Vec3d | None = None      # 서보 피벗 ← grip_base 로컬 (스윙 회전 중심)
+        self._axis_rel: Gf.Vec3d | None = None       # 서보축 방향 ← grip_base 로컬
+        self._blade_deg: float = self.BLADE_OPEN_DEG  # 현재 가동날 각도 [deg] (키네마틱 서보)
 
     @property
     def root(self) -> str | None:
@@ -186,6 +189,7 @@ class HarvestMM:
             tcp = UsdGeom.Xform.Define(stage, self._grasp_tcp)
             tcp.AddTranslateOp().Set(Gf.Vec3d(
                 0.0, 0.0, self._cfg.end_effector.grasp_reach_z))
+            self._bind_gripper_friction(stage, gripper_path, log)
 
         # 커터·카메라 = 사용자 CAD 커터 지그(커플러 링 + 서보 가위 + 실물 D455).
         # 프리미티브 커터/카메라(_add_cutter/_add_camera)는 남겨두되 안 쓰고 CAD 로 대체.
@@ -316,6 +320,29 @@ class HarvestMM:
         j.CreateLocalRot1Attr().Set(Gf.Quatf(1.0))
         log(f"[Harvester] 팔 장착: root_joint → {chassis} "
             f"(섀시 좌표 오프셋 {tuple(round(v, 3) for v in pos)})")
+
+    def _bind_gripper_friction(self, stage: Usd.Stage, gripper_path: str, log) -> None:
+        """그리퍼 손가락·패드 콜라이더에 마찰 재질을 건다 — §5.1 마찰 파지의 그리퍼 쪽.
+
+        ★ grip_base(base_link)나 컨테이너에 weakerThanDescendants 로 걸면 그 자식인 가동날
+          (CutterBlade)까지 물려받아 블레이드가 깨진다(2026-07-22 실측). 그래서 grip_base 는
+          건너뛰고 개별 콜라이더에만 직접 바인딩한다 — 손가락 μ 를 과실(0.9)과 맞춰 spike01
+          (μ≥0.5 → 2N 유지)이 검증한 파지가 실제로 성립하게 한다.
+        """
+        from scene.physics import create_physics_material, bind_physics_material
+        ee = self._cfg.end_effector
+        mat = create_physics_material(
+            stage, "/World/PhysicsMaterials/gripper_pad",
+            ee.pad_static_friction, ee.pad_dynamic_friction)
+        n = 0
+        for p in Usd.PrimRange(stage.GetPrimAtPath(gripper_path)):
+            if str(p.GetPath()) == self._grip_base:        # 블레이드가 이 자식 → 건너뜀
+                continue
+            if p.HasAPI(UsdPhysics.CollisionAPI):
+                bind_physics_material(p, mat)
+                n += 1
+        log(f"[Harvester] 그리퍼 콜라이더 {n}개 마찰 바인딩 μs={ee.pad_static_friction} "
+            f"(grip_base 제외 — 블레이드 보호)")
 
     def _attach_gripper(self, stage: Usd.Stage, arm_path: str,
                         gripper_path: str, log) -> str | None:
@@ -889,97 +916,65 @@ class HarvestMM:
         self._blade_shaft_w = Gf.Vec3d(shaft_w)                          # 절단점 저장(줄기 배치용)
         blade.SetActive(False)                                           # 시각용 원본 숨김
 
-        hinge = f"{self._root}_CutterBlade"                              # 최상위(/World 아래)
+        # ★ 커터·카메라(CadJig·D455)처럼 grip_base **자식**으로 넣는다 → 씬 그래프가 그리퍼를
+        # 자동 추종(재생 중에도, 물리·sync 불필요). 최상위 강체였던 유일한 이유는 강체 중첩(§8)
+        # 인데, 물리를 뺀 순수 시각 프림이라 그 제약이 사라졌다 (2026-07-22).
+        hinge = f"{self._grip_base}/CutterBlade"
         UsdGeom.Xform.Define(stage, hinge)
         add_reference_to_stage(os.path.join(_CAD_JIG_DIR, "blade_dummy.usd"), hinge + "/asset")
         omni.kit.app.get_app().update()                                 # metricsAssembler 반영
         asset = stage.GetPrimAtPath(hinge + "/asset")
         U = UsdGeom.Xformable(asset).GetLocalTransformation()
-        _set_full_pose(stage.GetPrimAtPath(hinge), U.GetInverse() * M_orig)  # 사본 월드=원본 월드
-        UsdPhysics.RigidBodyAPI.Apply(asset)
-        mass = UsdPhysics.MassAPI.Apply(asset)
-        mass.CreateMassAttr(0.05)
-        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(2e-4, 2e-4, 2e-4))
-        blade_physx = PhysxSchema.PhysxRigidBodyAPI.Apply(asset)
-        blade_physx.CreateDisableGravityAttr(True)
-        blade_physx.CreateAngularDampingAttr(5.0)
-        for p in Usd.PrimRange(asset):                                  # jig 흰색에 안 묻히게 색칠
+        # 자식 로컬 rest: asset_world = U·L_rest·M_gb = M_orig → L_rest = U⁻¹·M_orig·M_gb⁻¹
+        M_gb_inv = cache.GetLocalToWorldTransform(
+            stage.GetPrimAtPath(self._grip_base)).GetInverse()
+        L_rest = U.GetInverse() * M_orig * M_gb_inv
+        _set_full_pose(stage.GetPrimAtPath(hinge), L_rest)             # 사본 월드=원본 월드
+        for p in Usd.PrimRange(asset):                                # 물리 벗김(시각 전용) + 마젠타
+            if p.HasAPI(UsdPhysics.RigidBodyAPI):
+                p.RemoveAPI(UsdPhysics.RigidBodyAPI)
+            if p.HasAPI(PhysxSchema.PhysxRigidBodyAPI):
+                p.RemoveAPI(PhysxSchema.PhysxRigidBodyAPI)
+            if p.HasAPI(UsdPhysics.CollisionAPI):
+                p.RemoveAPI(UsdPhysics.CollisionAPI)
             if p.IsA(UsdGeom.Mesh):
                 UsdShade.MaterialBindingAPI.Apply(p).UnbindAllBindings()
                 UsdGeom.Gprim(p).CreateDisplayColorAttr([Gf.Vec3f(0.9, 0.1, 0.9)])
-
-        # 리볼루트 조인트 프레임: 원점=shaft_w, X축=axis_w(회전축) → AxisAttr("X")
-        ref = Gf.Vec3d(0, 0, 1) if abs(axis_w[2]) < 0.9 else Gf.Vec3d(1, 0, 0)
-        yw = Gf.Cross(ref, axis_w).GetNormalized()
-        zw = Gf.Cross(axis_w, yw)
-        Jw = Gf.Matrix4d(axis_w[0], axis_w[1], axis_w[2], 0, yw[0], yw[1], yw[2], 0,
-                         zw[0], zw[1], zw[2], 0, shaft_w[0], shaft_w[1], shaft_w[2], 1)
-        # ★ 마젠타 사본엔 CAD 스케일(≈0.001)이 붙어 있어 조인트 프레임 계산이 까다롭다:
-        #   - 위치(localPos1)는 스케일 **포함** 행렬로 뽑아야 한다(PhysX 가 지오메트리 좌표에
-        #     바디 스케일을 곱해 월드 위치를 구하므로). 안 그러면 피벗이 5cm 뜬다.
-        #   - 회전(localRot1)은 스케일 **벗긴**(직교정규화) 행렬로 뽑아야 한다. 스케일 섞이면
-        #     회전축이 X↔Y 로 꼬여 드라이브가 날을 엉뚱한(수평) 축으로 넘긴다.
-        #   (2026-07-19 측정 확인 — 둘을 섞으면 축·위치 다 맞는다.)
-        def _rigid(M: Gf.Matrix4d) -> Gf.Matrix4d:
-            return Gf.Matrix4d(M.ExtractRotationMatrix().GetOrthonormalized(),
-                               M.ExtractTranslation())
-        M_gb = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(self._grip_base))
-        # 정지 중 재배치용 상대포즈 — sync_blade_pose() 가 매 정지 프레임 이걸로 다시 놓는다.
-        self._blade_rel = (cache.GetLocalToWorldTransform(stage.GetPrimAtPath(hinge))
-                           * M_gb.GetInverse())
-        M_bl_s = cache.GetLocalToWorldTransform(asset)      # 스케일 포함(위치용)
-        M_bl_r = _rigid(M_bl_s)                             # 스케일 벗김(회전용)
-        J0 = Jw * M_gb.GetInverse()
-        J1_pos = Jw * M_bl_s.GetInverse()                  # localPos1
-        J1_rot = Jw * M_bl_r.GetInverse()                  # localRot1
-        rev = UsdPhysics.RevoluteJoint.Define(stage, hinge + "/ServoJoint")
-        rev.CreateBody0Rel().SetTargets([self._grip_base])
-        rev.CreateBody1Rel().SetTargets([asset.GetPath()])
-        rev.CreateAxisAttr("X")
-        rev.CreateExcludeFromArticulationAttr().Set(True)   # 독립 강체(아티큘레이션 DOF 흡수 방지)
-        rev.CreateLocalPos0Attr().Set(Gf.Vec3f(J0.ExtractTranslation()))
-        rev.CreateLocalRot0Attr().Set(Gf.Quatf(J0.ExtractRotationQuat()))
-        rev.CreateLocalPos1Attr().Set(Gf.Vec3f(J1_pos.ExtractTranslation()))
-        rev.CreateLocalRot1Attr().Set(Gf.Quatf(J1_rot.ExtractRotationQuat()))
-        rev.CreateLowerLimitAttr(-5.0)
-        rev.CreateUpperLimitAttr(45.0)      # 열림 0° ~ 닫힘 35° + 여유
-        drive = UsdPhysics.DriveAPI.Apply(rev.GetPrim(), "angular")
-        drive.CreateTypeAttr("force")
-        # 10g급 강체에 stiffness 2000은 reset 첫 프레임의 작은 오차도 폭발적인
-        # 토크로 바꿔 날을 날려 보낸다. 서보 응답에 충분한 범위로 제한한다.
-        drive.CreateStiffnessAttr(120.0)
-        drive.CreateDampingAttr(20.0)
-        drive.CreateMaxForceAttr(15.0)
-        drive.CreateTargetPositionAttr(self.BLADE_OPEN_DEG)
-        self._blade_target_attr = drive.GetTargetPositionAttr()
-        log(f"[Harvester] 가동날 서보 힌지 부착: {hinge} (축 Y, 피벗 (0,53,132), "
-            f"열림 {self.BLADE_OPEN_DEG:.0f}°~닫힘 {self.BLADE_CLOSED_DEG:.0f}°)")
+        self._blade_path = hinge
+        self._blade_L_rest = L_rest                                   # rest 로컬(grip_base 기준)
+        self._shaft_rel = M_gb_inv.Transform(Gf.Vec3d(shaft_w))       # 피벗 ← grip_base 로컬
+        self._axis_rel = Gf.Vec3d(
+            M_gb_inv.TransformDir(Gf.Vec3d(axis_w))).GetNormalized()  # 축 ← grip_base 로컬
+        self._blade_deg = self.BLADE_OPEN_DEG                         # rest = 열림(export 자세)
+        log(f"[Harvester] 가동날 그리퍼-자식 부착: {hinge} (피벗 (0,53,132), 씬그래프 자동 추종)")
         return True
 
     def sync_blade_pose(self, stage: Usd.Stage) -> None:
-        """정지 중 가동날 사본을 현재 그리퍼 자세에 맞춰 다시 놓는다 (부착 시 상대포즈 유지).
+        """가동날(grip_base 자식)의 로컬 포즈를 서보각에 맞춰 갱신한다.
 
-        왜 필요한가 (사용자 지적 2026-07-20): 날 사본은 강체 중첩(§8)을 피하려고 grip_base
-        **밖** 최상위에 두는데, 정지 중에는 조인트가 안 걸려 USD 에 적힌 자리에 그대로 그려진다.
-        그 자리는 attach_blade_hinge() 시점(정착 자세) 값이라, 이후 reset 으로 팔이 default_state
-        로 돌아가면 날만 남아 떠 보이고 → Play 하면 조인트가 끌어와 붙는다.
-        CadJig·D455 는 grip_base 자식이라 이 문제가 없다 — 날 사본만 손으로 따라가게 한다.
+        그리퍼 추종은 씬 그래프가 자동으로 한다(커터·카메라와 동일) — 여기선 rest(열림) 로컬에서
+        (현재각-열림각)만큼 피벗축 회전만 얹는다. grip_base **월드 좌표를 안 읽으므로** 재생 중
+        낡은 USD 문제(2026-07-21)가 없다. 실제 절단은 detach_fruit 로 처리한다(§5.3).
         """
-        if self._blade_rel is None or not self._grip_base:
+        if self._blade_L_rest is None or not self._blade_path:
             return
-        hp = stage.GetPrimAtPath(f"{self._root}_CutterBlade")
+        hp = stage.GetPrimAtPath(self._blade_path)
         if not hp.IsValid():
             return
-        cache = UsdGeom.XformCache()
-        M_gb = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(self._grip_base))
-        M_par = cache.GetParentToWorldTransform(hp)
-        _set_full_pose(hp, self._blade_rel * M_gb * M_par.GetInverse())
+        theta = self._blade_deg - self.BLADE_OPEN_DEG        # 열림 기준 서보 변위 [deg]
+        if abs(theta) > 1e-6:                                # 피벗축(grip_base 로컬) 중심 회전
+            swing = (Gf.Matrix4d().SetTranslate(-self._shaft_rel)
+                     * Gf.Matrix4d().SetRotate(Gf.Rotation(self._axis_rel, theta))
+                     * Gf.Matrix4d().SetTranslate(self._shaft_rel))
+            L = self._blade_L_rest * swing
+        else:
+            L = self._blade_L_rest
+        _set_full_pose(hp, L)
 
     def set_blade_deg(self, deg: float) -> None:
-        """가동날 각도 명령 [deg]. ★§5.6: 나중에 ROS2 노드가 토픽 받아 이 메서드를 부른다.
-        열림 100° ~ 닫힘 135°(=절단). attach_blade_hinge() 선행 필요."""
-        if self._blade_target_attr is not None:
-            self._blade_target_attr.Set(float(deg))
+        """가동날 각도 명령 [deg]. ★§5.6: ROS2 노드가 토픽 받아 이 메서드를 부른다.
+        열림 0° ~ 닫힘 35°(=절단). 다음 sync_blade_pose() 가 이 각으로 날을 회전 배치한다."""
+        self._blade_deg = float(deg)
 
     def open_blade(self) -> None:
         """가동날 열기 (미부착이면 no-op)."""
@@ -990,19 +985,13 @@ class HarvestMM:
         self.set_blade_deg(self.BLADE_CLOSED_DEG)
 
     def move_blade(self, d_deg: float) -> None:
-        """가동날 각도 증분 [deg] — 텔레옵/증분 제어용. [열림, 닫힘]로 제한.
-        control.py 의 move_gripper 와 같은 패턴 (붙어야 동작, 미부착이면 no-op)."""
-        if self._blade_target_attr is None:
-            return
-        cur = float(self._blade_target_attr.Get() or self.BLADE_OPEN_DEG)
+        """가동날 각도 증분 [deg] — 텔레옵/증분 제어용. [열림, 닫힘]로 제한."""
         self.set_blade_deg(max(self.BLADE_OPEN_DEG,
-                               min(self.BLADE_CLOSED_DEG, cur + d_deg)))
+                               min(self.BLADE_CLOSED_DEG, self._blade_deg + d_deg)))
 
     def blade_deg(self) -> float:
-        """현재 가동날 목표각 [deg]. 미부착이면 열림각."""
-        if self._blade_target_attr is None:
-            return self.BLADE_OPEN_DEG
-        return float(self._blade_target_attr.Get() or self.BLADE_OPEN_DEG)
+        """현재 가동날 각도 [deg]."""
+        return self._blade_deg
 
     @property
     def blade_cut_point(self):

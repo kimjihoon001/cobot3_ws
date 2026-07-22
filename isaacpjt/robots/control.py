@@ -178,6 +178,9 @@ class RmpFlowTargetController:
             # 놓기점 BASKET_PLACE만 기존 2 cm 정밀도를 유지한다.
             phase_tolerance = {
                 "PREGRASP": 0.04,
+                # rmpflow(반응형)는 과실 코앞에서 2cm 정밀도를 못 내 파지 직전 멈춘다.
+                # 과실 반지름 3.4cm — 4cm 안이면 그리퍼 span 에 들어와 파지 가능(2026-07-22).
+                "GRASP": 0.04,
                 "RETRACT": 0.04,
                 "BASKET_APPROACH": 0.04,
             }.get(self._phase, position_tolerance)

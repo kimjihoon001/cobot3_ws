@@ -294,11 +294,15 @@ class TomatoPlants:
             ripeness.apply_flat_color(stage, path + "/Calyx", ripeness.GREEN)
 
         # 물리: 몸통 메시에만 콜라이더 (꼭지는 장식이라 제외 = 비용 절감).
-        # A안: 과실은 dynamic — 꽃자루 파단 조인트가 매단다 (kinematic 아님).
-        physics.add_mesh_colliders(stage, path + "/Body",
-                                   self._phys.fruit_approximation)
+        # 파지 중엔 kinematic(고정) — 그리퍼가 다가가며 밀어도 안 밀린다(§5.3/§5.4,
+        # 2026-07-22 되돌림). 절단 순간 detach_fruit 가 set_kinematic(False) → dynamic 낙하.
+        # 충돌은 시각 몸통(convexHull, 전체크기) 대신 **중심의 작은 구** — 그리퍼 접근 여유
+        # 확보(2026-07-22). 반지름은 월드 m 를 과실 스케일로 나눠 로컬 단위로.
+        physics.add_sphere_collider(
+            stage, path + "/Collision",
+            self._phys.fruit_collision_radius_m / self._assets.scale)
         prim = stage.GetPrimAtPath(path)
-        physics.add_rigid_body(prim, self._phys.fruit_density, kinematic=False)
+        physics.add_rigid_body(prim, self._phys.fruit_density, kinematic=True)
         # sleep 비활성 — 과실이 매달려 가만히 있으면 PhysX 가 잠재우는데, 잠든 강체는
         # 조인트를 끊어도(pedicel.cut) 안 깨어나 안 떨어진다. 절단=낙하가 보장돼야 한다.
         PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateSleepThresholdAttr(0.0)
@@ -315,11 +319,13 @@ class TomatoPlants:
         # 매달림엔 상향된 hold_force/hold_torque 를 쓴다 — 옆매달림 굽힘·스폰 겹침 충돌이
         # 실제 파단값(40.262N / 0.067N·m)을 넘겨 끊기기 때문(spike 02). settings 주석 참고.
         # 절단은 jointEnabled=False(pedicel.cut)로 하므로 이 값과 무관.
+        # kinematic 과실이라 조인트는 안 만든다 — 정적끼리라 "joint between static bodies"
+        # 에러가 난다(2026-07-22). 시각 꽃자루만 두고, 절단은 detach_fruit 가 set_kinematic 로.
         joint = pedicel.spawn(stage, plant_path + "/Stem", path, stem_pt,
                               calyx, self._ped_cfg,
                               self._phys.pedicel_hold_force,
                               self._phys.pedicel_hold_torque,
-                              viz_root=plant_path)
+                              viz_root=plant_path, make_joint=False)
 
         self._fruits.append({
             "path": path,

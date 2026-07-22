@@ -88,7 +88,14 @@ class MMDriver(Driver):
         kds = np.asarray(kds, dtype=float).copy()
         kps[arm_indices] = np.maximum(kps[arm_indices] * 2.0, 10000.0)
         kds[arm_indices] = np.maximum(kds[arm_indices] * 2.0, 1000.0)
+        # 그리퍼(finger_joint) 게인 — 에셋 기본값이 너무 약해 열림/닫힘이 안 먹는다.
+        # 올려서 확실히 여닫는다. 튕김 걱정 없음: 과실이 파지 중 kinematic(고정)이라
+        # 세게 닫아도 안 밀리고, 절단 순간 dynamic 될 땐 마찰(μ0.9)이 붙잡는다(2026-07-22).
+        gi = self._gripper_idx
+        kps[gi] = max(kps[gi], 5.0e4)
+        kds[gi] = max(kds[gi], 1.0e3)
         controller.set_gains(kps=kps, kds=kds)
+        print(f"[MM] 그리퍼 게인: kp={kps[gi]:.0f} (여닫기 확보, kinematic 과실이라 안전)")
         print(f"[MM] UR10e drive gain 강화: kp={kps[arm_indices].tolist()} "
               f"kd={kds[arm_indices].tolist()}")
 
@@ -156,8 +163,8 @@ class MMDriver(Driver):
             self._rmpflow.reset()
             self._cut_status = {}
         self._was_playing = is_playing
-        if not is_playing and self._stage is not None:
-            # 정지 중엔 조인트가 안 걸린다 — 가동날 사본을 그리퍼에 손으로 붙여둔다.
+        if self._stage is not None:
+            # 가동날(키네마틱)을 매 프레임 그리퍼 포즈+서보각으로 배치 (재생·정지 무관).
             self._mm.sync_blade_pose(self._stage)
         if self._teleop is not None:                 # 키보드 텔레옵 (재생 중에만 적용)
             self._teleop(is_playing)
@@ -203,6 +210,8 @@ class MMDriver(Driver):
                         self._gripper_target = 0.80 if closed else 0.0
                     if "cut_fruit" in cmd:
                         self._handle_cut(cmd["cut_fruit"])
+                    if "foliage" in cmd:
+                        self._toggle_foliage(bool(cmd["foliage"]))
         if is_playing and self._rmpflow is not None:
             self._rmpflow.apply()
             if self._status_pub is not None:
@@ -256,8 +265,10 @@ class MMDriver(Driver):
         """로봇 주변 ripe 과실의 실제 base-frame 좌표를 한 개씩 발행한다."""
         if self._fruit_pub is None or self._task is None or self._stage is None:
             return
-        from pxr import Gf, UsdGeom
+        from pxr import Gf, Usd, UsdGeom
         cache = UsdGeom.XformCache()
+        bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
         base = self._stage.GetPrimAtPath(f"{self.root}/Base/base_link")
         if not base.IsValid():
             return
@@ -269,7 +280,12 @@ class MMDriver(Driver):
             prim = self._stage.GetPrimAtPath(fruit["path"])
             if not prim.IsValid():
                 continue
-            world = cache.GetLocalToWorldTransform(prim).ExtractTranslation()
+            # 파지점 = 과실 원점이 아니라 **몸통 메시의 기하 중심**(bbox 미드포인트).
+            # 토마토 USD 원점이 중심 정렬 안 돼 있어(00_convert 미centering) 원점을 쓰면
+            # 그리퍼가 빗나간다 — 실제 과실 중심을 겨냥해야 파지가 맞는다(2026-07-22).
+            body = self._stage.GetPrimAtPath(fruit["path"] + "/Body")
+            geom = body if body.IsValid() else prim
+            world = bbox_cache.ComputeWorldBound(geom).ComputeAlignedRange().GetMidpoint()
             p = world_to_base.Transform(Gf.Vec3d(world))
             # 매 프레임 수백 개를 순회 발행하지 않고 현재 팔 작업영역만 보낸다.
             if 0.0 <= p[0] <= 1.5 and abs(p[1]) <= 0.9 and 0.1 <= p[2] <= 1.9:
@@ -284,6 +300,19 @@ class MMDriver(Driver):
             "position": [round(v, 4) for v in position],
         }, separators=(",", ":"))
         self._fruit_pub.publish(payload)
+
+    def _toggle_foliage(self, visible: bool) -> None:
+        """잎(Foliage) 프림 표시/숨김 — 카메라 가림 확인용 런타임 토글."""
+        from pxr import UsdGeom
+        if self._stage is None:
+            return
+        n = 0
+        for p in self._stage.Traverse():
+            if p.GetName() == "Foliage":
+                img = UsdGeom.Imageable(p)
+                (img.MakeVisible if visible else img.MakeInvisible)()
+                n += 1
+        print(f"[Foliage] 잎 {'표시' if visible else '숨김'} ({n}개)")
 
     def _handle_cut(self, request) -> None:
         """닫힌 커터 근처 ripe 과실의 pedicel FixedJoint를 해제한다."""

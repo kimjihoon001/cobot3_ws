@@ -95,7 +95,8 @@ def spawn(stage: Usd.Stage, stem_path: str, fruit_path: str,
           stem_point: tuple[float, float, float],
           fruit_point: tuple[float, float, float],
           cfg: PedicelConfig, break_force: float, break_torque: float,
-          joint_path: str | None = None, viz_root: str | None = None) -> str:
+          joint_path: str | None = None, viz_root: str | None = None,
+          make_joint: bool = True) -> str:
     """줄기와 과실 사이에 꽃자루를 놓고 파단 조인트로 잇는다.
 
     stem_point  : 줄기 쪽 부착점 (월드)
@@ -134,6 +135,10 @@ def spawn(stage: Usd.Stage, stem_path: str, fruit_path: str,
     # 과실이 달고 가는 부분 (커터가 p2 를 자른다)
     _segment(stage, dist_p, p2, b, cfg.distal_diameter)
 
+    if not make_joint:
+        # kinematic 과실은 조인트 없이 스스로 매달린다 — 시각 꽃자루만 남긴다.
+        # (정적끼리 FixedJoint 는 "joint between static bodies" 에러, 2026-07-22).
+        return ""
     # 이탈층을 대표하는 조인트. 여기서 끊어진다.
     jp = joint_path or f"{fruit_path}/PedicelJoint"
     joint = UsdPhysics.FixedJoint.Define(stage, jp)
