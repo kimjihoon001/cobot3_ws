@@ -14,9 +14,10 @@ from pxr import UsdPhysics
 from robot_base import Driver, ros_fail
 from robots.control import TransporterController
 from robots.transporter import TransporterAMR
+from scene.ground import COMMON_FLOOR_Z
 
 # 창고 입구 중앙축의 내부 대기점. 창고 입구 경계는 Y=13이고 대기점은 그 안쪽이다.
-POSE = (0.0, 14.5, 0.0)
+POSE = (0.0, 14.5, COMMON_FLOOR_Z)
 # ForkliftB 포크는 모델 로컬 -X 방향이다. +90°로 놓으면 포크가 월드 -Y,
 # 즉 창고 밖 입구 중앙의 AMR을 향한다.
 YAW_DEG = 90.0

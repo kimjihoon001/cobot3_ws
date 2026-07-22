@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from robot_base import Driver, ros_fail
 from robots.iwhub import IwHub
+from scene.ground import COMMON_FLOOR_Z
 
 # 임시 배치 — 온실 앞마당(MM 옆). 물류 동선 확정 후 조정.
-POSE = (2.0, -12.0, 0.0)
+POSE = (2.0, -12.0, COMMON_FLOOR_Z)
 
 
 class IwDriver(Driver):

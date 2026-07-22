@@ -10,12 +10,13 @@ from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 from robot_base import Driver, ros_fail
 from robots.iwhub import IwHub
+from scene.ground import COMMON_FLOOR_Z
 
 # 일반 통합 실행 위치와 창고 자동화 단독 시험용 도킹 위치.
-POSE = (2.0, -12.0, 0.0)
+POSE = (2.0, -12.0, COMMON_FLOOR_Z)
 # 창고 입구(Y=13) 밖 중앙축. 지게차 대기점 (0, 14.5)에서 월드 -Y로 2m
 # 이동했을 때 포크가 insertion_depth=0.65m 들어가는 AMR 중심 좌표.
-WAREHOUSE_DOCK_POSE = (0.0, 10.84885, 0.0)
+WAREHOUSE_DOCK_POSE = (0.0, 10.84885, COMMON_FLOOR_Z)
 
 
 def _fix_articulation_to_world(stage: Usd.Stage, body_path: str) -> bool:

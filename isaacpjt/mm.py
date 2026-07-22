@@ -14,9 +14,10 @@ from isaacsim.core.utils.types import ArticulationAction
 
 from robot_base import Driver, ros_fail
 from robots.harvester import HOME_POSE_DEG, HarvestMM
+from scene.ground import COMMON_FLOOR_Z
 
 # 임시 배치 — 온실 앞마당(빈 홀 바닥, 온실 y −10 앞). 물류 동선 확정 후 조정.
-POSE = (0.0, -12.0, 0.0)
+POSE = (0.0, -12.0, COMMON_FLOOR_Z)
 # 키네마틱 베이스 조인트 (JSON base 명령용 — 텔레포트만 먹는다, 2026-07-18 실측)
 BASE_JOINTS = ("dummy_base_prismatic_x_joint",
                "dummy_base_prismatic_y_joint",
