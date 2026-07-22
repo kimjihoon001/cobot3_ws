@@ -69,6 +69,7 @@ class Step:
     duration: float = 0.0
     max_drive: float = 0.0
     position_tolerance: float = 0.0
+    x_tolerance: float = 0.0
     yaw_tolerance: float = 0.0
     timeout: float = 60.0
     pallet_id: int = -1
@@ -195,6 +196,14 @@ class ForkLiftNode(Node):
         self.declare_parameter(
             "alignment_recovery_max_steering", math.radians(8.0)
         )
+        # 랙 직선 삽입 전 최종 정렬 조건. 잔진동 제거 뒤 남는 정적 오차를
+        # 재진입으로 보정하되, X ±4cm / yaw ±3° 안에서만 삽입을 허용한다.
+        self.declare_parameter("rack_entry_x_tolerance", 0.04)
+        self.declare_parameter(
+            "rack_entry_yaw_tolerance", math.radians(3.0)
+        )
+        # 랙 재진입과 IW 공통축 보정에 동일한 상한을 적용한다.
+        self.declare_parameter("max_reentry_attempts", 5)
         # spike 06처럼 후륜 swivel을 크게 꺾어 좁게 회전한다. 25°에서는 반경이
         # 약 4.4m지만 70°에서는 약 0.75m다.
         self.declare_parameter("max_steering_angle", math.radians(70.0))
@@ -385,6 +394,23 @@ class ForkLiftNode(Node):
         self._alignment_recovery_max_steer = float(
             self.get_parameter("alignment_recovery_max_steering").value
         )
+        self._rack_entry_x_tol = float(
+            self.get_parameter("rack_entry_x_tolerance").value
+        )
+        self._rack_entry_yaw_tol = float(
+            self.get_parameter("rack_entry_yaw_tolerance").value
+        )
+        self._max_reentry_attempts = int(
+            self.get_parameter("max_reentry_attempts").value
+        )
+        if self._rack_entry_x_tol <= 0.0:
+            raise ValueError("rack_entry_x_tolerance은 0보다 커야 합니다")
+        if not 0.0 < self._rack_entry_yaw_tol <= math.radians(3.0):
+            raise ValueError(
+                "rack_entry_yaw_tolerance은 0보다 크고 3도 이하여야 합니다"
+            )
+        if not 0 <= self._max_reentry_attempts <= 5:
+            raise ValueError("max_reentry_attempts는 0부터 5 사이여야 합니다")
         self._max_steer = float(
             self.get_parameter("max_steering_angle").value
         )
@@ -1540,8 +1566,11 @@ class ForkLiftNode(Node):
             # 가운데/오른쪽 랙 S자 합류는 중심선 진입과 차체 복원 회전량을
             # 모두 누적하므로 최대 약 60°가 필요하다. 70°에서 안전 제한한다.
             max_rotation=math.radians(70.0),
+            # 목표 Y 도달은 기존 삽입 허용오차를 유지하고, 랙 중심 X 오차는
+            # 별도의 더 엄격한 기준으로 판정한다.
             position_tolerance=self._insert_tol,
-            yaw_tolerance=self._yaw_tol,
+            x_tolerance=self._rack_entry_x_tol,
+            yaw_tolerance=self._rack_entry_yaw_tol,
             timeout=min(30.0, self._step_timeout),
             attempt=attempt,
         )
@@ -1873,7 +1902,7 @@ class ForkLiftNode(Node):
 
     def _run_pallet_approach(self, step: Step) -> bool:
         """U턴 후 선택 랙 중심선으로 완만한 S자 합류를 수행한다."""
-        max_alignment_retries = 5
+        max_alignment_retries = self._max_reentry_attempts
         if self._arc_last_yaw is None:
             self._arc_last_yaw = self._yaw
         else:
@@ -1896,7 +1925,10 @@ class ForkLiftNode(Node):
         # 정지한다. 이때 직선 삽입 가능한 횡·각도 오차인지 함께 검증한다.
         if self._y >= step.y - step.position_tolerance:
             self._publish_command(0.0, 0.0)
-            if abs(dx) <= 0.08 and abs(yaw_error) <= math.radians(3.0):
+            if (
+                abs(dx) <= step.x_tolerance
+                and abs(yaw_error) <= step.yaw_tolerance
+            ):
                 self.get_logger().info(
                     f"[APPROACH] aligned at ({self._x:.3f}, {self._y:.3f}), "
                     f"x_error={dx:.3f}m, "
@@ -1952,7 +1984,7 @@ class ForkLiftNode(Node):
             straighten_ratio = clamp((2.5 - dy) / 1.5, 0.0, 1.0)
             lookahead = 1.5 + 10.5 * straighten_ratio
         else:
-            # 단 한 번의 재진입에서는 마지막 1.0m까지 X 보정을 유지한다.
+            # 재진입에서는 마지막 1.0m까지 X 보정을 유지한다.
             # 이후에도 미리보기를 8m까지만 늘려 조향을 완전히 약화시키지
             # 않으면서 차체 각도를 3° 안으로 함께 수렴시킨다.
             straighten_ratio = clamp((1.0 - dy) / 0.7, 0.0, 1.0)
@@ -2078,7 +2110,7 @@ class ForkLiftNode(Node):
 
     def _run_iw_axis_gate(self, step: Step) -> bool:
         """공통 대기 자세를 검사하고 최대 다섯 번의 3점 보정을 예약한다."""
-        max_attempts = 5
+        max_attempts = self._max_reentry_attempts
         dx = step.x - self._x
         dy = step.y - self._y
         yaw_error = wrap_angle(step.yaw - self._yaw)
