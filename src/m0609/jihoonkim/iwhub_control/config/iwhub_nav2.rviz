@@ -47,8 +47,17 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /iwhub_0/global_costmap/costmap
+        Depth: 1
         Durability Policy: Transient Local
+        History Policy: Keep Last
         Reliability Policy: Reliable
+      Update Topic:
+        Value: /iwhub_0/global_costmap/costmap_updates
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Use Timestamp: false
       Color Scheme: costmap
       Alpha: 0.4
     - Class: rviz_default_plugins/Map
@@ -56,8 +65,17 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /iwhub_0/local_costmap/costmap
-        Durability Policy: Volatile
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
         Reliability Policy: Reliable
+      Update Topic:
+        Value: /iwhub_0/local_costmap/costmap_updates
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Use Timestamp: false
       Color Scheme: costmap
       Alpha: 0.4
     - Class: rviz_default_plugins/LaserScan

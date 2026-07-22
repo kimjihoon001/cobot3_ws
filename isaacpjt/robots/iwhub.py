@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import random
 
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from pjt_config.settings import RobotConfig
 from pjt_utils.xform import set_pose, set_scale, set_translate
@@ -30,6 +30,12 @@ class IwHub:
     # 실측 DOF 이름 (2026-07-19) — ROS2 JointState 의 name 필드에 이대로 쓴다.
     DRIVE_JOINTS = ("left_wheel_joint", "right_wheel_joint")   # 속도 명령(차동)
     LIFT_JOINT = "lift_joint"                                   # 위치 명령(승강)
+    # 적재 팔레트의 접지 마찰을 이기고 좌우 바퀴를 반대로 돌릴 수 있는 velocity drive.
+    # angular drive의 damping은 속도 오차에 대한 구동 토크 이득, maxForce는 토크 상한이다.
+    DRIVE_DAMPING = 1500.0
+    DRIVE_MAX_FORCE = 2500.0
+    WHEEL_STATIC_FRICTION = 1.2
+    WHEEL_DYNAMIC_FRICTION = 1.0
 
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
@@ -52,8 +58,75 @@ class IwHub:
         # 참조 prim 은 자체 xformOp 을 가질 수 있다 → 기존 op 재사용(§8)
         set_translate(stage.GetPrimAtPath(root), position)
         self._root = root
+        self._configure_drive_torque(stage, log)
         log(f"[IwHub] 배치 완료: {root} @ {tuple(round(v, 2) for v in position)}")
         return root
+
+    def _configure_drive_torque(self, stage: Usd.Stage, log=print) -> None:
+        """적재 상태에서도 제자리 회전하도록 wheel drive와 접지 마찰을 보강한다."""
+        if not self._root:
+            return
+        material = UsdShade.Material.Define(
+            stage, "/World/PhysicsMaterials/IwHubDriveWheel")
+        material_api = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+        material_api.CreateStaticFrictionAttr(self.WHEEL_STATIC_FRICTION)
+        material_api.CreateDynamicFrictionAttr(self.WHEEL_DYNAMIC_FRICTION)
+        material_api.CreateRestitutionAttr(0.0)
+        try:
+            physx_material = PhysxSchema.PhysxMaterialAPI.Apply(material.GetPrim())
+            physx_material.CreateFrictionCombineModeAttr("max")
+            physx_material.CreateRestitutionCombineModeAttr("min")
+        except Exception as exc:
+            log(f"[IwHub] ⚠ PhysX 마찰 결합 모드 설정 생략: {exc}")
+
+        configured = []
+        wheel_bodies = []
+        root_prim = stage.GetPrimAtPath(self._root)
+        for prim in Usd.PrimRange(root_prim):
+            if prim.GetName() not in self.DRIVE_JOINTS:
+                continue
+            drive = UsdPhysics.DriveAPI.Get(prim, "angular")
+            if not drive:
+                log(f"[IwHub] ⚠ {prim.GetName()} angular drive 없음 — 토크 보강 생략")
+                continue
+            # stiffness=0이면 위치를 붙잡지 않고 ROS velocityCommand만 추종한다.
+            drive.GetStiffnessAttr().Set(0.0)
+            drive.GetDampingAttr().Set(self.DRIVE_DAMPING)
+            drive.GetMaxForceAttr().Set(self.DRIVE_MAX_FORCE)
+            configured.append(prim.GetName())
+
+            # 조인트가 연결한 두 body 중 wheel 쪽에 강한 물리 재질을 상속시킨다.
+            joint = UsdPhysics.Joint(prim)
+            targets = (
+                list(joint.GetBody0Rel().GetTargets())
+                + list(joint.GetBody1Rel().GetTargets())
+            )
+            wheel_targets = [p for p in targets if "wheel" in p.name.lower()]
+            if not wheel_targets and targets:
+                wheel_targets = [targets[-1]]
+            for target in wheel_targets:
+                wheel_prim = stage.GetPrimAtPath(target)
+                if not wheel_prim.IsValid() or str(target) in wheel_bodies:
+                    continue
+                UsdShade.MaterialBindingAPI.Apply(wheel_prim).Bind(
+                    material, UsdShade.Tokens.strongerThanDescendants, "physics")
+                wheel_bodies.append(str(target))
+        if configured:
+            log(
+                "[IwHub] 구동륜 토크 보강: "
+                f"joints={configured}, damping={self.DRIVE_DAMPING:.0f}, "
+                f"maxForce={self.DRIVE_MAX_FORCE:.0f}"
+            )
+            if wheel_bodies:
+                log(
+                    "[IwHub] 구동륜 드리프트 억제: "
+                    f"bodies={wheel_bodies}, μs={self.WHEEL_STATIC_FRICTION:.2f}, "
+                    f"μd={self.WHEEL_DYNAMIC_FRICTION:.2f}, combine=max"
+                )
+            else:
+                log("[IwHub] ⚠ wheel body를 못 찾아 마찰 재질을 적용하지 못함")
+        else:
+            log("[IwHub] ⚠ 좌우 구동 조인트를 못 찾아 토크 보강을 적용하지 못함")
 
     def load_cargo(self, stage: Usd.Stage, tomato_cfg, phys_cfg,
                    deck_z: float = 0.225, log=print) -> int:
@@ -98,9 +171,10 @@ class IwHub:
                                  calyx if os.path.exists(calyx) else None))
 
         # ── iw.hub 데크 월드 포즈 (적재 세트 원점) ──
-        # 컨테이너 root 원점은 실제 차체 기하 중심과 일치하지 않는다. root XY를 그대로 쓰면
-        # 팔레트가 뒤쪽으로 쏠리고, 무거운 Load의 무게중심까지 치우쳐 회전이 불안정해진다.
-        # cargo XY는 움직이는 chassis의 월드 bbox 중심에 맞추고 Z만 기존 데크 실측값을 쓴다.
+        # 컨테이너 root 원점은 실제 차체 기하 중심과 일치하지 않는다. 적재물 중심을 차체
+        # 중심에 맞추면 짧은 팔레트(1.213m)의 앞면이 IW 앞면보다 10.9cm 뒤로 들어간다.
+        # 사용자 지정대로 두 앞면이 같은 수직면이 되게 chassis bbox의 +X 앞면에서
+        # 팔레트 길이 절반을 빼 cargo 중심을 정한다. Z는 기존 데크 실측값을 쓴다.
         src = f"{self._root}/base_link"
         if not stage.GetPrimAtPath(src).IsValid():
             src = self._root
@@ -115,16 +189,18 @@ class IwHub:
                     Usd.TimeCode.Default(),
                     [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
                 )
-                chassis_center = (
-                    bbox_cache.ComputeWorldBound(chassis_prim)
-                    .ComputeAlignedRange()
-                    .GetMidpoint()
+                chassis_range = (
+                    bbox_cache.ComputeWorldBound(chassis_prim).ComputeAlignedRange()
                 )
-                cargo_x, cargo_y = float(chassis_center[0]), float(chassis_center[1])
+                chassis_center = chassis_range.GetMidpoint()
+                chassis_front_x = float(chassis_range.GetMax()[0])
+                cargo_x = chassis_front_x - PALLET_SIZE[0] / 2.0
+                cargo_y = float(chassis_center[1])
                 log(
-                    "[IwHub] 카고 중심 정렬: "
+                    "[IwHub] 팔레트/IW 앞면 정렬: "
                     f"root 대비 dx={cargo_x - float(bp[0]):+.3f}m, "
-                    f"dy={cargo_y - float(bp[1]):+.3f}m"
+                    f"dy={cargo_y - float(bp[1]):+.3f}m, "
+                    f"front_x={chassis_front_x:.3f}m"
                 )
             except Exception as e:
                 log(f"[IwHub] ⚠ chassis bbox 중심 계산 실패 — root 중심 사용: {e}")
