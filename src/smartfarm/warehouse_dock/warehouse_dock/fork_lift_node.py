@@ -1873,6 +1873,7 @@ class ForkLiftNode(Node):
 
     def _run_pallet_approach(self, step: Step) -> bool:
         """U턴 후 선택 랙 중심선으로 완만한 S자 합류를 수행한다."""
+        max_alignment_retries = 5
         if self._arc_last_yaw is None:
             self._arc_last_yaw = self._yaw
         else:
@@ -1902,36 +1903,42 @@ class ForkLiftNode(Node):
                     f"yaw_error={math.degrees(yaw_error):.1f}deg"
                 )
                 return True
-            if step.attempt == 0:
+            if step.attempt < max_alignment_retries:
                 recovery_y = step.y - self._alignment_recovery_distance
                 recovery = self._alignment_recovery(
                     step.x,
                     recovery_y,
                     step.yaw,
-                    "alignment retry: reverse 2.5m with small steering",
+                    f"alignment retry {step.attempt + 1}/"
+                    f"{max_alignment_retries}: reverse 2.5m with small steering",
                 )
                 retry = self._approach_pallet(
                     step.x,
                     step.y,
                     step.yaw,
-                    "alignment retry: re-enter rack centerline once",
-                    attempt=1,
+                    f"alignment retry {step.attempt + 1}/"
+                    f"{max_alignment_retries}: re-enter rack centerline",
+                    attempt=step.attempt + 1,
                 )
-                # 현재 단계 뒤에 후진 복구와 단 한 번의 재진입을 예약한다.
+                # 현재 단계 뒤에 후진 복구와 재진입을 예약한다. 각 재진입은
+                # 같은 랙 앞 목표를 사용하므로 삽입점 쪽으로 계속 전진하지 않는다.
                 self._steps.insert(1, retry)
                 self._steps.insert(1, recovery)
                 self.get_logger().warning(
-                    "[ALIGNMENT RETRY 1/1] "
+                    f"[ALIGNMENT RETRY {step.attempt + 1}/"
+                    f"{max_alignment_retries}] "
                     f"x_error={dx:.3f}m, "
                     f"yaw_error={math.degrees(yaw_error):.1f}deg: "
                     f"{self._alignment_recovery_distance:.1f}m 후진 후 재진입"
                 )
                 self._publish_status(
-                    "정렬 재시도 1/1: 작은 조향으로 2.5m 후진 후 재진입"
+                    f"정렬 재시도 {step.attempt + 1}/"
+                    f"{max_alignment_retries}: 작은 조향으로 2.5m 후진 후 재진입"
                 )
                 return True
             self._fail(
-                "랙 중심선 정렬 재시도 실패, 현재 위치에서 정지: "
+                f"랙 중심선 정렬 {max_alignment_retries}회 재시도 실패, "
+                "현재 위치에서 정지: "
                 f"x_error={dx:.3f}m, "
                 f"yaw_error={math.degrees(yaw_error):.1f}deg"
             )
