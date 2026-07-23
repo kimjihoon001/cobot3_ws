@@ -5,10 +5,9 @@
   physics:kinematicEnabled / physics:approximation / physics:mass
   physics:staticFriction / physics:dynamicFriction / physics:breakForce
 
-과실 설계 (성능 + 재현성):
-  매달린 과실은 kinematic RigidBody 로 둔다. 물리 솔버가 매 스텝 풀지 않으므로
-  수백 개를 놔둬도 비용이 거의 없고, Play/Stop 반복 시 항상 같은 자리에 있다.
-  수확 순간에만 kinematic 을 꺼서 dynamic 으로 전환한다 (= 줄기에서 분리).
+과실 설계 (접촉 연속성 + 재현성):
+  과실은 dynamic RigidBody로 두고 꽃자루 FixedJoint가 줄기에 매단다.
+  수확 순간 물리 모드는 바꾸지 않고 jointEnabled만 꺼서 분리한다.
   -> 트라이앵글 메시 충돌 금지. 콜라이더는 convexHull 로 근사.
 """
 from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
@@ -81,8 +80,8 @@ def add_rigid_body(prim: Usd.Prim, density: float,
     과실마다 계산한다. 변형별 부피가 6배까지 차이나므로(작은 unripe ~
     큰 ripe) 질량을 상수로 박으면 작은 과실이 납덩어리가 된다.
 
-    kinematic=True  : 중력/충돌로 움직이지 않음 (매달린 과실)
-    kinematic=False : 물리로 움직임 (수확된 과실)
+    kinematic=True  : 중력/충돌로 움직이지 않음
+    kinematic=False : 꽃자루 조인트/접촉/중력에 반응하는 과실
     """
     rb = UsdPhysics.RigidBodyAPI.Apply(prim)
     rb.CreateKinematicEnabledAttr(kinematic)
@@ -90,11 +89,7 @@ def add_rigid_body(prim: Usd.Prim, density: float,
 
 
 def set_kinematic(prim: Usd.Prim, kinematic: bool) -> None:
-    """수확 순간 호출 — kinematic 을 꺼서 과실을 줄기에서 분리한다.
-
-    물리적 breakForce 대신 이 방식을 쓰는 이유:
-      breakForce 로 끊으면 매번 결과가 미세하게 달라져 재현성이 깨진다.
-      코드로 끊으면 결정적이라 Play/Stop 반복 시 동일 결과가 나온다.
+    """호환용 rigid-body 모드 전환. 현재 정상 수확 경로에서는 사용하지 않는다.
     """
     rb = UsdPhysics.RigidBodyAPI(prim)
     if rb:
@@ -179,8 +174,7 @@ def bind_physics_material(prim: Usd.Prim, material: UsdShade.Material) -> None:
 
 
 def add_sphere_collider(stage: Usd.Stage, path: str, radius: float) -> None:
-    """파지용 작은 구 콜라이더 — 시각 메시(convexHull)보다 작게 둬 그리퍼가 어긋나도
-    손가락이 과실을 안 때리고 감싸게 한다(2026-07-22). 안 보이는 해석적 구(정확).
+    """파지용 구 콜라이더 — 시각 과실 표면 크기에 맞춘 안 보이는 해석적 구.
     radius 는 프림 로컬 단위(부모 스케일이 곱해져 월드 크기가 된다)."""
     sph = UsdGeom.Sphere.Define(stage, path)
     sph.CreateRadiusAttr(float(radius))

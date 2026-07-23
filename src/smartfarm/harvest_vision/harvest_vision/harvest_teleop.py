@@ -48,7 +48,7 @@ class HarvestTeleop(Node):
             String, str(self.get_parameter("isaac_command_topic").value), 10)
         self._frame = str(self.get_parameter("base_frame").value)
         self.lin = 0.25    # m/s
-        self.ang = 0.5     # rad/s
+        self.ang = 1.5     # rad/s (기존 0.5의 3배)
         self.step = 0.05   # m, 팔 TCP 스텝
         self.foliage_on = True   # 잎 표시 상태 (f 로 토글)
         # 팔 TCP 목표 (base_link). 첫 조작 전엔 안 보냄 — 첫 키에서 이 기본점부터 시작.
@@ -152,7 +152,7 @@ def main() -> None:
                 node.lin = max(0.05, min(1.0, node.lin + (0.05 if k == "x" else -0.05)))
                 print(f"[속도] 선속 {node.lin:.2f} m/s")
             elif k in ("c", "v"):
-                node.ang = max(0.1, min(2.0, node.ang + (0.1 if k == "v" else -0.1)))
+                node.ang = max(0.1, min(6.0, node.ang + (0.3 if k == "v" else -0.3)))
                 print(f"[속도] 각속 {node.ang:.2f} rad/s")
             elif k in (",", "."):
                 node.step = max(0.01, min(0.20, node.step + (0.01 if k == "." else -0.01)))

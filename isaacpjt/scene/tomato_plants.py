@@ -4,8 +4,8 @@
 - 과실은 tomato_assets_usd 의 모양 변형 중 랜덤 선택 (인스턴스별 참조)
 - 익음 클래스(green/half_ripe/fully_ripe/old)를 가중치 랜덤 배정, 색은 ripeness 로 적용
 - 줄기/트렐리스 = static collider (로봇이 통과 못 함)
-- 과실 = kinematic RigidBody (매달림). 수확 순간 kinematic 을 꺼서 분리한다.
-  physics.set_kinematic(prim, False) 참고.
+- 과실 = dynamic RigidBody + 꽃자루 FixedJoint (매달림).
+  수확 순간 jointEnabled=False 로 꽃자루만 끊는다.
 """
 import math
 import os
@@ -85,6 +85,10 @@ class TomatoPlants:
         col_xs = self._column_row_xs()      # 섹터 열별 이랑 x  [[x,x],[x,x]]
         seg_ys = self._segment_ys()         # 섹터 구획별 그루 y [[y..],[y..],[y..]]
         n_sectors = len(col_xs) * len(seg_ys)
+        # 루프의 첫 베드는 min X, min Y인 Sector_00/Row_00이다. 이 시점의 RNG 상태를
+        # 모든 베드 시작 전에 복원하면 식물 높이·회전과 과실 수·높이·방향·메쉬·숙도가
+        # 첫 베드와 정확히 같은 상대 패턴으로 생성된다. 월드 x/y와 USD path만 달라진다.
+        reference_bed_rng_state = self._rng.getstate()
 
         for sc, rxs in enumerate(col_xs):              # 섹터 열 (X)
             for sr, ys in enumerate(seg_ys):           # 섹터 구획 (Y)
@@ -98,18 +102,35 @@ class TomatoPlants:
                     UsdGeom.Xform.Define(stage, rp)
                     self._spawn_bed(stage, rp + "/Bed", x, cy, seg_span)
                     self._spawn_trellis_bar(stage, rp + "/Trellis", x, cy, seg_span)
-                    for pi, y in enumerate(ys):
-                        # 잎은 일부 그루만(덜 무성하게). 결정적 패턴 → rng 안 흔듦.
-                        foliage = ((ri * 37 + pi * 17) % 100) < int(c.foliage_fraction * 100)
-                        self._spawn_plant(stage, f"{rp}/Plant_{pi:02d}", x, y,
-                                          variants, foliage, si)
+                    self._rng.setstate(reference_bed_rng_state)
+                    for pi in self._active_plant_indices(len(ys)):
+                        y = ys[pi]
+                        # 기준 베드의 local plant index만 사용해 모든 베드의 표시 여부도 동일.
+                        foliage = ((pi * 17) % 100) < int(c.foliage_fraction * 100)
+                        self._spawn_plant(
+                            stage, f"{rp}/Plant_{pi:02d}", x, y,
+                            variants, foliage, si)
 
         n_rows = c.sector_cols * c.rows_per_col
-        n_plants = n_rows * c.sector_rows * c.plants_per_seg
+        plants_per_bed = len(self._active_plant_indices(c.plants_per_seg))
+        n_plants = n_rows * c.sector_rows * plants_per_bed
         print("[Scene] %d섹터(2x3) · %d그루 · 과실 %d개 "
               "(통로 주%.1f/교차%.1f/수확%.1fm)"
               % (n_sectors, n_plants, self._fruit_count,
                  c.aisle_x, c.aisle_y, c.row_spacing))
+        print("[Scene] 베드 복제 기준: Sector_00/Row_00 (min X, min Y) — "
+              "식물·토마토 상대 패턴 전 베드 동일")
+
+    def _active_plant_indices(self, total: int) -> list[int]:
+        """베드 전체 길이를 유지하며 지정 비율만 균등하게 선택한다."""
+        if total <= 0:
+            return []
+        fraction = max(0.0, min(1.0, float(self._cfg.plant_spawn_fraction)))
+        count = max(1, min(total, int(round(total * fraction))))
+        if count == 1:
+            return [total // 2]
+        return [int(round(i * (total - 1) / (count - 1)))
+                for i in range(count)]
 
     def _column_row_xs(self) -> list[list[float]]:
         """섹터 열별 이랑 x 좌표. 열 사이 aisle_x(주 통로)."""
@@ -222,7 +243,9 @@ class TomatoPlants:
         # aoc 배경 식물(잎+가지) — 시각 전용. 원기둥 줄기(콜라이더)는 그대로 두고 위에 얹는다.
         # foliage=False 인 그루는 잎 없이 줄기만(레퍼런스처럼 덜 무성하게).
         if self._aoc_bg and foliage:
-            self._spawn_background(stage, path + "/Foliage", x, y)
+            self._spawn_background(
+                stage, path + "/Foliage", x, y,
+                self._rng.uniform(0.8, 1.2))
 
         # 과실
         if not variants:
@@ -234,7 +257,7 @@ class TomatoPlants:
         self._fruit_count += n_fruits
 
     def _spawn_background(self, stage: Usd.Stage, path: str,
-                          x: float, y: float) -> None:
+                          x: float, y: float, height_scale: float) -> None:
         """aoc 배경 식물 (잎+가지 메시). **시각 배경 전용** — 콜라이더도 강체도 없다.
 
         수확 대상은 obj 과실(위 _spawn_fruit)이다. 이 식물의 열매 메시는 배경 장식일
@@ -250,13 +273,17 @@ class TomatoPlants:
         q = Gf.Rotation(Gf.Vec3d(0, 0, 1), rng.uniform(0.0, 360.0)).GetQuat()
         set_pose(stage.GetPrimAtPath(path), (x, y, c.foliage_z),
                  Gf.Quatd(q.GetReal(), q.GetImaginary()))
-        set_scale(stage.GetPrimAtPath(path), c.foliage_scale * rng.uniform(0.8, 1.2))
+        set_scale(stage.GetPrimAtPath(path), c.foliage_scale * height_scale)
         # 변환된 USD 메시엔 흰색 기본 재질이 바인딩돼 있어 루트 무광재질을 덮는다.
-        # 바인딩을 풀어 루트 재질을 상속받게 한 뒤 잎 색(초록)을 displayColor 로 준다.
+        # reference 180개가 재구성될 때 루트의 상속 바인딩이 간헐적으로 회색 fallback으로
+        # 남으므로, 각 mesh에 초록 primvar와 무광 재질을 직접 바인딩한다.
         for prim in Usd.PrimRange(stage.GetPrimAtPath(path)):
             if prim.IsA(UsdGeom.Mesh):
                 UsdShade.MaterialBindingAPI(prim).UnbindAllBindings()
         ripeness.apply_flat_color(stage, path, FOLIAGE_COLOR)
+        for prim in Usd.PrimRange(stage.GetPrimAtPath(path)):
+            if prim.IsA(UsdGeom.Mesh):
+                ripeness.bind_matte_material(stage, str(prim.GetPath()))
 
     def _spawn_fruit(self, stage: Usd.Stage, plant_path: str, path: str,
                      stem_x: float, stem_y: float,
@@ -298,15 +325,30 @@ class TomatoPlants:
             ripeness.apply_flat_color(stage, path + "/Calyx", ripeness.GREEN)
 
         # 물리: 몸통 메시에만 콜라이더 (꼭지는 장식이라 제외 = 비용 절감).
-        # 파지 중엔 kinematic(고정) — 그리퍼가 다가가며 밀어도 안 밀린다(§5.3/§5.4,
-        # 2026-07-22 되돌림). 절단 순간 detach_fruit 가 set_kinematic(False) → dynamic 낙하.
-        # 충돌은 시각 몸통(convexHull, 전체크기) 대신 **중심의 작은 구** — 그리퍼 접근 여유
-        # 확보(2026-07-22). 반지름은 월드 m 를 과실 스케일로 나눠 로컬 단위로.
+        # 과실은 처음부터 dynamic이고 꽃자루 FixedJoint가 매단다. 예전 kinematic 방식은
+        # 집게가 닫히며 쌓인 침투/압축 임펄스가 절단 순간 dynamic 전환과 함께 풀려 과실을
+        # 사출했다. 동역학 모드를 바꾸지 않고 조인트만 끊어 이 불연속을 제거한다.
+        # 충돌은 안정적인 해석적 구를 쓰되 반지름을 시각 몸통 표면과 맞춘다. 보이는
+        # 토마토보다 작은 구는 손가락이 메시를 관통한 뒤에야 접촉하는 빈손 파지를 만든다.
+        # 반지름은 월드 m 를 과실 스케일로 나눠 로컬 단위로 지정한다.
         physics.add_sphere_collider(
             stage, path + "/Collision",
             self._phys.fruit_collision_radius_m / self._assets.scale)
+        # 충돌구를 **시각 몸통 중심**으로 옮긴다 — 토마토 USD 원점이 몸통 중심과 안 맞아
+        # (미centering) 원점에 두면 겨냥점(sim/tomato 발행=bbox 중심)과 어긋나 그리퍼가
+        # 손가락 사이에 과실 없이 완전히 닫힌다(2026-07-23 빈손 파지 원인). bbox 유효할 때만.
+        _rng = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
+        ).ComputeWorldBound(stage.GetPrimAtPath(path + "/Body")).ComputeAlignedRange()
+        if not _rng.IsEmpty():
+            _cl = UsdGeom.XformCache().GetLocalToWorldTransform(
+                stage.GetPrimAtPath(path)).GetInverse().Transform(
+                    Gf.Vec3d(_rng.GetMidpoint()))
+            UsdGeom.Xformable(
+                stage.GetPrimAtPath(path + "/Collision")).AddTranslateOp().Set(
+                    Gf.Vec3d(_cl))
         prim = stage.GetPrimAtPath(path)
-        physics.add_rigid_body(prim, self._phys.fruit_density, kinematic=True)
+        physics.add_rigid_body(prim, self._phys.fruit_density, kinematic=False)
         # sleep 비활성 — 과실이 매달려 가만히 있으면 PhysX 가 잠재우는데, 잠든 강체는
         # 조인트를 끊어도(pedicel.cut) 안 깨어나 안 떨어진다. 절단=낙하가 보장돼야 한다.
         PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateSleepThresholdAttr(0.0)
@@ -320,18 +362,18 @@ class TomatoPlants:
         # 은 세그먼트용이라 조인트 프레임엔 영향 없다.)
         calyx = (pos[0], pos[1], pos[2] + c.fruit_calyx_up)
 
-        # 매달림엔 상향된 hold_force/hold_torque 를 쓴다 — 옆매달림 굽힘·스폰 겹침 충돌이
-        # 실제 파단값(40.262N / 0.067N·m)을 넘겨 끊기기 때문(spike 02). settings 주석 참고.
-        # 절단은 jointEnabled=False(pedicel.cut)로 하므로 이 값과 무관.
-        # kinematic 과실이라 조인트는 안 만든다 — 정적끼리라 "joint between static bodies"
-        # 에러가 난다(2026-07-22). 시각 꽃자루만 두고, 절단은 detach_fruit 가 set_kinematic 로.
+        # dynamic 과실을 static 줄기에 **비파단** FixedJoint로 매단다. 팔 kp=1e5에서는
+        # 2cm 접촉 오차만으로도 기존 hold_force=2000N 수준에 도달해 접촉 순간 과실이
+        # 떨어졌다. 실제 수확은 커터가 jointEnabled=False로만 결정적으로 절단한다.
         joint = pedicel.spawn(stage, plant_path + "/Stem", path, stem_pt,
                               calyx, self._ped_cfg,
                               self._phys.pedicel_hold_force,
                               self._phys.pedicel_hold_torque,
-                              viz_root=plant_path, make_joint=False)
+                              viz_root=plant_path, make_joint=True,
+                              breakable=False)
 
         self._fruits.append({
+            "id": len(self._fruits),
             "path": path,
             "class_name": class_name,
             # GroundTruth 좌표는 월드 좌표여야 한다. Plants 루트 상승분도 포함한다.

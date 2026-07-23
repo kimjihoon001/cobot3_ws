@@ -1,0 +1,136 @@
+<?xml version="1.0"?>
+<!--
+  Doosan M0617 FULL URDF (visual+collision 메시 포함) — Isaac URDF Importer 전용.
+  워크스페이스 반입 m0617.usd 가 손상돼(이 Isaac 이 크레이트를 못 읽음) 못 쓰므로,
+  공식 dsr_description2 xacro+메시로 아티큘레이션 USD 를 새로 임포트한다.
+  [1] 출처 — macro.m0617.white.xacro(joint origin/axis/limit/inertial, mesh 매핑) 그대로.
+  메시는 robots/m0617/meshes/{visual,collision}/ 에 업스트림 .dae 반입본. scale 0.001(mm→m).
+  조인트 값은 lula 용 m0617.urdf 와 같은 소스(둘 다 이 xacro) — 분기 없음.
+-->
+<robot name="m0617">
+    <link name="base_link">
+        <inertial>
+            <mass value="4.12"/>
+            <origin xyz="-3.4e-05 -0.004815 0.048482"/>
+            <inertia ixx="0.020415" ixy="-3.9311e-06" ixz="2.3764e-06" iyy="0.014927" iyz="-0.00051388" izz="0.023376"/>
+        </inertial>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_0_0.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_0_0.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+    </link>
+
+    <joint name="joint_1" type="revolute">
+        <parent link="base_link"/><child link="link_1"/>
+        <origin rpy="0 0 0" xyz="0 0 0.1530"/><axis xyz="0 0 1"/>
+        <limit effort="346" lower="-6.2832" upper="6.2832" velocity="1.7453"/>
+    </joint>
+    <link name="link_1">
+        <inertial>
+            <mass value="7.8"/>
+            <origin xyz="0.000119 0.0428 -0.006383"/>
+            <inertia ixx="0.047267" ixy="4.1409e-05" ixz="-5.3877e-05" iyy="0.03119" iyz="-0.0019953" izz="0.047021"/>
+        </inertial>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_1_0.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_1_0.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+    </link>
+
+    <joint name="joint_2" type="revolute">
+        <parent link="link_1"/><child link="link_2"/>
+        <origin rpy="0 -1.571 -1.571" xyz="0 0.0345 0"/><axis xyz="0 0 1"/>
+        <limit effort="346" lower="-6.2832" upper="6.2832" velocity="1.7453"/>
+    </joint>
+    <link name="link_2">
+        <inertial>
+            <mass value="11.55"/>
+            <origin xyz="0.35752 -5e-05 0.1582"/>
+            <inertia ixx="0.039245" ixy="-0.00050916" ixz="-0.0099927" iyy="1.6244" iyz="4.4298e-05" izz="1.626"/>
+        </inertial>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_2_0.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_2_0.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_2_1.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_2_1.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_2_2.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_2_2.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+    </link>
+
+    <joint name="joint_3" type="revolute">
+        <parent link="link_2"/><child link="link_3"/>
+        <origin rpy="0 0 1.571" xyz="0.845 0 0"/><axis xyz="0 0 1"/>
+        <limit effort="163" lower="-2.8798" upper="2.8798" velocity="2.618"/>
+    </joint>
+    <link name="link_3">
+        <inertial>
+            <mass value="3.68"/>
+            <origin xyz="-1.5e-05 -0.006702 0.044608"/>
+            <inertia ixx="0.020579" ixy="1.0111e-05" ixz="-6.784e-07" iyy="0.019181" iyz="-0.0009947" izz="0.014379"/>
+        </inertial>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_3_0.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_3_0.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+    </link>
+
+    <joint name="joint_4" type="revolute">
+        <parent link="link_3"/><child link="link_4"/>
+        <origin rpy="1.571 0 0" xyz="0 -0.734 0"/><axis xyz="0 0 1"/>
+        <limit effort="50" lower="-6.2832" upper="6.2832" velocity="3.927"/>
+    </joint>
+    <link name="link_4">
+        <inertial>
+            <mass value="4.28"/>
+            <origin xyz="5.7e-05 0.091288 -0.25319"/>
+            <inertia ixx="0.35652" ixy="-1.8897e-05" ixz="-4.9971e-05" iyy="0.33627" iyz="-0.076995" izz="0.029844"/>
+        </inertial>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_4_0.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_4_0.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_4_1.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_4_1.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+    </link>
+
+    <joint name="joint_5" type="revolute">
+        <parent link="link_4"/><child link="link_5"/>
+        <origin rpy="-1.571 0 0" xyz="0 0 0"/><axis xyz="0 0 1"/>
+        <limit effort="50" lower="-6.2832" upper="6.2832" velocity="3.927"/>
+    </joint>
+    <link name="link_5">
+        <inertial>
+            <mass value="2.8"/>
+            <origin xyz="-0.000273 0.003651 0.032087"/>
+            <inertia ixx="0.012016" ixy="2.1647e-05" ixz="-4.85e-06" iyy="0.013232" iyz="0.00042654" izz="0.010423"/>
+        </inertial>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_5_0.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_5_0.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+    </link>
+
+    <joint name="joint_6" type="revolute">
+        <parent link="link_5"/><child link="link_6"/>
+        <origin rpy="1.571 0 0" xyz="0 -0.121 0"/><axis xyz="0 0 1"/>
+        <limit effort="50" lower="-6.2832" upper="6.2832" velocity="3.927"/>
+    </joint>
+    <link name="link_6">
+        <inertial>
+            <mass value="1.16"/>
+            <origin xyz="-0.000292 7e-06 -0.0539"/>
+            <inertia ixx="0.0086448" ixy="3.5791e-06" ixz="5.1469e-06" iyy="0.0045613" iyz="5.8483e-06" izz="0.0086768"/>
+        </inertial>
+        <collision><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/collision/MF0617_6_0.dae" scale="0.001 0.001 0.001"/></geometry></collision>
+        <visual><origin rpy="0 0 0" xyz="0 0 0"/><geometry>
+            <mesh filename="meshes/visual/MF0617_6_0.dae" scale="0.001 0.001 0.001"/></geometry></visual>
+    </link>
+</robot>

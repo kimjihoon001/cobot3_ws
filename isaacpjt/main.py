@@ -34,8 +34,8 @@ ROS2 토픽 (§5.6: 판단은 ROS2 = dev 머신, 실행만 여기. domain 108):
   로봇별  /{ns}/joint_command  sensor_msgs/JointState  ← 관절 명령 (이름 지정)
           /{ns}/joint_states   sensor_msgs/JointState  → 관절 상태
           ns = harvester_0 / forklift_0 / iwhub_0
-  MM 전용 /harvester_0/cmd     std_msgs/String(JSON)   ← 아티큘레이션 밖 자유도:
-          {"blade": 0~35}      가동날 각도[deg] (별도 리볼루트 — JointState 에 안 잡힘)
+  MM 전용 /harvester_0/cmd     std_msgs/String(JSON):
+          {"gripper":{"closed":true}}  OnRobot RG2 닫기
           {"base": [x,y,yaw]}  홀로노믹 베이스 (키네마틱 — 위치드라이브 무시, 텔레포트만)
   공용    /clock
 
@@ -61,7 +61,10 @@ NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
 # ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로(main 이 예외 잡음).
 CAMERA = "--no-camera" not in sys.argv
 RMPFLOW = "--rmpflow" in sys.argv
-# MM 키보드 텔레옵 (팔·베이스·그리퍼·블레이드 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
+LEGACY_IK = "--legacy-ik" in sys.argv
+if LEGACY_IK and not RMPFLOW:
+    raise SystemExit("--legacy-ik는 --rmpflow와 함께 사용해야 합니다.")
+# MM 키보드 텔레옵 (팔·베이스·RG2 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
 # MM 키보드 입력은 명시적인 전용 플래그만 사용한다. --mm와 --iw를 같이 띄워도
 # 키 입력이 iw.hub에 전달되거나 전역 teleop 상태를 공유하지 않는다.
 MM_TELEOP = "--mm-teleop" in sys.argv
@@ -213,6 +216,7 @@ class Opts:
         self.gui = GUI
         self.mm_teleop = MM_TELEOP
         self.rmpflow = RMPFLOW
+        self.legacy_ik = LEGACY_IK
         self.camera = CAMERA
         self.nav_drive = NAV_DRIVE
         self.nav_odom = NAV_ODOM
@@ -224,8 +228,8 @@ def build_drivers(cfg, task=None) -> list:
     아예 불러오지 않는다(팀원이 그 파일을 깨뜨려도 내 로봇은 돌아간다)."""
     drivers = []
     if "--mm" in sys.argv:
-        from mm import MMDriver
-        drivers.append(MMDriver(cfg, task=task))
+        from rmp_mm import RmpMMDriver
+        drivers.append(RmpMMDriver(cfg, task=task))
     if "--iw" in sys.argv:
         if WAREHOUSE_TEST:                       # --iw --fork (--mm 없음) → 창고 상차 단독 시험
             from iw_test import IwDriver
@@ -318,7 +322,7 @@ def run_loaded(path: str) -> None:
         for _ in range(15):
             world.step(render=False)
         if MM_TELEOP:
-            from mm import build_teleop, find_blade_setter
+            from rmp_mm import build_teleop, find_blade_setter
             teleop = build_teleop(mm_robot, find_blade_setter(stage), GUI)
     else:
         print("[Load] Harvester 아티큘레이션을 못 찾음 — 텔레옵 불가.")

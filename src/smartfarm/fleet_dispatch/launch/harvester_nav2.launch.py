@@ -107,11 +107,28 @@ def _params_with_initial_pose(context, params_file: str) -> str:
     return tmp.name
 
 
+def _params_with_forward_only_bt(params_file: str) -> str:
+    """후진 복구가 없는 NavigateToPose BT를 런타임 파라미터에 주입한다."""
+    with open(params_file, encoding="utf-8") as stream:
+        params = yaml.safe_load(stream)
+    navigator = params.setdefault("bt_navigator", {}).setdefault(
+        "ros__parameters", {})
+    navigator["default_nav_to_pose_bt_xml"] = os.path.join(
+        get_package_share_directory("fleet_dispatch"), "behavior_trees",
+        "navigate_to_pose_forward_only.xml")
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False,
+                                      encoding="utf-8")
+    yaml.safe_dump(params, tmp, sort_keys=False)
+    tmp.close()
+    return tmp.name
+
+
 def _bringup(context, *_args, **_kwargs):
     distro = os.environ.get("ROS_DISTRO", "")
     params_file = _params_for_distro(
         LaunchConfiguration("params_file").perform(context))
     params_file = _params_with_initial_pose(context, params_file)
+    params_file = _params_with_forward_only_bt(params_file)
     args = {
         "namespace": LaunchConfiguration("namespace").perform(context),
         "slam": _pybool(context, "slam"),

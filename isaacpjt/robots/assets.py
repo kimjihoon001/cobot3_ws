@@ -9,6 +9,8 @@ verify.py / ros/graph.py 와 같은 후보 시도 패턴.
 """
 from __future__ import annotations
 
+import os
+
 from pxr import Usd
 
 _ROOT_CANDIDATES = [
@@ -47,7 +49,9 @@ def resolve(candidates: tuple[str, ...], what: str) -> str:
     root = assets_root()
     tried = []
     for rel in candidates:
-        url = root + rel
+        # 로컬 절대경로(워크스페이스 반입 에셋, 예: m0617.usd)는 에셋 루트를 붙이지
+        # 않고 그대로 연다. 그 외는 Isaac 서버 기준 상대경로로 본다.
+        url = rel if (os.path.isabs(rel) and os.path.exists(rel)) else root + rel
         tried.append(url)
         try:
             if Usd.Stage.Open(url) is not None:

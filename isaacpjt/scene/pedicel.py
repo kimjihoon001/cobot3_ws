@@ -96,7 +96,7 @@ def spawn(stage: Usd.Stage, stem_path: str, fruit_path: str,
           fruit_point: tuple[float, float, float],
           cfg: PedicelConfig, break_force: float, break_torque: float,
           joint_path: str | None = None, viz_root: str | None = None,
-          make_joint: bool = True) -> str:
+          make_joint: bool = True, breakable: bool = True) -> str:
     """줄기와 과실 사이에 꽃자루를 놓고 파단 조인트로 잇는다.
 
     stem_point  : 줄기 쪽 부착점 (월드)
@@ -144,8 +144,11 @@ def spawn(stage: Usd.Stage, stem_path: str, fruit_path: str,
     joint = UsdPhysics.FixedJoint.Define(stage, jp)
     joint.CreateBody0Rel().SetTargets([stem_path])
     joint.CreateBody1Rel().SetTargets([fruit_path])
-    joint.CreateBreakForceAttr(break_force)
-    joint.CreateBreakTorqueAttr(break_torque)
+    # 실제 수확 씬은 커터 명령으로만 결정적으로 절단하므로 breakable=False를 쓴다.
+    # 접촉 충격으로 우발 파단되는 것을 막되, spike/실패모드 시험은 기본 True로 유지한다.
+    if breakable:
+        joint.CreateBreakForceAttr(break_force)
+        joint.CreateBreakTorqueAttr(break_torque)
     joint.CreateJointEnabledAttr(True)
 
     # 조인트 로컬 프레임을 현재 상대 포즈로 작성한다. 안 하면 프레임이 identity 라

@@ -14,7 +14,7 @@ from pxr import Usd
 from isaacsim.core.api.tasks import BaseTask
 
 from pjt_config.settings import SceneConfig
-from scene import pedicel, physics
+from scene import pedicel
 from scene.ground import COMMON_FLOOR_Z, Ground
 from scene.lighting import Lighting
 from scene.greenhouse import Greenhouse
@@ -110,7 +110,8 @@ class GreenhouseTask(BaseTask):
     def detach_fruit(self, path: str) -> bool:
         """과실을 줄기에서 분리 (= 커터가 distal 꽃자루를 자른 순간).
 
-        꽃자루 조인트를 끊는다(jointEnabled=False). 과실은 이미 dynamic 이라 낙하한다.
+        꽃자루 조인트를 끊는다(jointEnabled=False). 과실은 처음부터 dynamic이므로
+        절단 순간 물리 모드 변화나 저장된 침투 임펄스의 급격한 방출이 없다.
         물리 breakForce 로 자연히 끊기길 기다리지 않는 이유는 그쪽이 비결정적이라
         Play/Stop 재현성이 깨지기 때문 — cut 은 코드로 끊어 결정적이다.
         """
@@ -120,11 +121,8 @@ class GreenhouseTask(BaseTask):
         fruit = stage.GetPrimAtPath(path)
         if not fruit.IsValid():
             return False
-        # kinematic(고정) 과실을 dynamic 으로 전환 = 줄기에서 분리·낙하/그리퍼 파지
-        # (§5.3: 절단 순간에만). 조인트 없이 이것만으로 매달림이 풀린다.
-        physics.set_kinematic(fruit, False)
-        joint = self._joint_of(path)          # 옛 조인트 방식 호환 — 있으면 같이 끊는다
-        if joint:                             # ""(조인트 없음)·None 이면 건너뜀
-            pedicel.cut(stage, joint)
+        joint = self._joint_of(path)
+        if not joint or not pedicel.cut(stage, joint):
+            return False
         self._harvested.add(path)
         return True
