@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import random
 
@@ -38,6 +39,18 @@ class IwHub:
     DRIVE_MAX_FORCE = 5000.0
     WHEEL_STATIC_FRICTION = 1.2
     WHEEL_DYNAMIC_FRICTION = 1.0
+    # position[2]는 에셋 루트 높이가 아니라 "주행 바닥 높이"로 취급한다.
+    # iw_hub.usd 원점이 차체 중앙 근처라 루트를 바닥 높이에 그대로 놓으면 하부가
+    # 약 반 높이만큼 바닥에 박힌다. 로컬 bbox 최저점을 바닥보다 5mm 위에 놓고
+    # reset 뒤 중력으로 짧게 정착시켜 초기 관통/반발을 없앤다.
+    GROUND_CLEARANCE = 0.005
+    # 정지 중 접촉 솔버가 만드는 미세 병진·회전을 빨리 안정화한다. 구동 중에는
+    # wheel drive가 아티큘레이션을 깨우므로 주행 응답을 막지 않는다.
+    SLEEP_THRESHOLD = 0.01
+    STABILIZATION_THRESHOLD = 0.002
+    SOLVER_POSITION_ITERATIONS = 16
+    SOLVER_VELOCITY_ITERATIONS = 4
+    MAX_DEPENETRATION_VELOCITY = 0.5
 
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
@@ -57,20 +70,151 @@ class IwHub:
         url = assets.resolve(self._cfg.assets.iwhub, "운반 AMR(iw.hub)")
         log(f"[IwHub] 에셋 {url}")
         add_reference_to_stage(url, root)
+        grounded_position = self._grounded_position(
+            stage, root, position, log=log
+        )
         # 참조 prim 은 자체 xformOp 을 가질 수 있다 → 기존 op 재사용(§8).
         # yaw=180°이면 긴 후방 오버행이 MM 반대쪽을 향해 추종 회전 시 충돌하지 않는다.
         yaw = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), yaw_deg).GetQuat()
         set_pose(
-            stage.GetPrimAtPath(root), position,
+            stage.GetPrimAtPath(root), grounded_position,
             Gf.Quatd(yaw.GetReal(), yaw.GetImaginary()),
         )
         self._root = root
         self._configure_drive_torque(stage, log)
+        self._configure_rest_stability(stage, log)
         log(
             f"[IwHub] 배치 완료: {root} @ "
-            f"{tuple(round(v, 2) for v in position)}, yaw={yaw_deg:.1f}°"
+            f"{tuple(round(v, 3) for v in grounded_position)}, "
+            f"yaw={yaw_deg:.1f}°"
         )
         return root
+
+    def _grounded_position(
+        self,
+        stage: Usd.Stage,
+        root: str,
+        position: tuple[float, float, float],
+        log=print,
+    ) -> tuple[float, float, float]:
+        """에셋 로컬 bbox 최저점을 주행 바닥 바로 위로 맞춘 루트 pose를 반환한다."""
+        prim = stage.GetPrimAtPath(root)
+        try:
+            bbox_cache = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(),
+                [
+                    UsdGeom.Tokens.default_,
+                    UsdGeom.Tokens.render,
+                ],
+            )
+            local_range = (
+                bbox_cache.ComputeLocalBound(prim).ComputeAlignedRange()
+            )
+            local_min_z = float(local_range.GetMin()[2])
+            if not math.isfinite(local_min_z):
+                raise ValueError(f"유효하지 않은 bbox min z: {local_min_z}")
+        except Exception as exc:
+            log(
+                "[IwHub] ⚠ 로컬 bbox 접지 높이 계산 실패 — 요청 높이를 그대로 사용: "
+                f"{exc}"
+            )
+            return tuple(float(v) for v in position)
+
+        floor_z = float(position[2])
+        root_z = floor_z - local_min_z + self.GROUND_CLEARANCE
+        log(
+            "[IwHub] 바닥 관통 방지 자동 보정: "
+            f"floor_z={floor_z:.3f}m, local_min_z={local_min_z:+.3f}m, "
+            f"root_z={root_z:.3f}m, clearance={self.GROUND_CLEARANCE:.3f}m"
+        )
+        return float(position[0]), float(position[1]), root_z
+
+    @staticmethod
+    def _set_physx_attr(api, creator: str, value, log=print) -> bool:
+        """Isaac/PhysX 버전별 선택 속성을 지원되는 경우에만 설정한다."""
+        fn = getattr(api, creator, None)
+        if fn is None:
+            log(f"[IwHub] ⚠ PhysX 속성 API 없음: {creator}")
+            return False
+        fn(value)
+        return True
+
+    def _configure_rest_stability(self, stage: Usd.Stage, log=print) -> None:
+        """IW 아티큘레이션의 초기 관통 반발과 정지 잔진동을 줄인다."""
+        if not self._root:
+            return
+        root_prim = stage.GetPrimAtPath(self._root)
+        articulation_prim = next(
+            (
+                prim
+                for prim in Usd.PrimRange(root_prim)
+                if prim.HasAPI(UsdPhysics.ArticulationRootAPI)
+            ),
+            None,
+        )
+        if articulation_prim is None:
+            log("[IwHub] ⚠ 안정화할 articulation root를 찾지 못했습니다")
+            return
+
+        articulation = PhysxSchema.PhysxArticulationAPI.Apply(
+            articulation_prim
+        )
+        settings = (
+            ("CreateSleepThresholdAttr", self.SLEEP_THRESHOLD),
+            ("CreateStabilizationThresholdAttr", self.STABILIZATION_THRESHOLD),
+            (
+                "CreateSolverPositionIterationCountAttr",
+                self.SOLVER_POSITION_ITERATIONS,
+            ),
+            (
+                "CreateSolverVelocityIterationCountAttr",
+                self.SOLVER_VELOCITY_ITERATIONS,
+            ),
+        )
+        for creator, value in settings:
+            try:
+                self._set_physx_attr(articulation, creator, value, log=log)
+            except Exception as exc:
+                log(f"[IwHub] ⚠ {creator} 설정 실패: {exc}")
+
+        # 초기 bbox 오차가 남더라도 한 프레임에 큰 관통 보정 속도가 생기지 않게
+        # 섀시 강체의 depenetration 속도를 제한한다.
+        chassis = stage.GetPrimAtPath(f"{self._root}/chassis")
+        if (
+            not chassis.IsValid()
+            or not chassis.HasAPI(UsdPhysics.RigidBodyAPI)
+        ):
+            chassis = next(
+                (
+                    prim
+                    for prim in Usd.PrimRange(root_prim)
+                    if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                    and "chassis" in prim.GetName().lower()
+                ),
+                None,
+            )
+        if chassis is not None and chassis.IsValid():
+            rigid = PhysxSchema.PhysxRigidBodyAPI.Apply(chassis)
+            try:
+                self._set_physx_attr(
+                    rigid,
+                    "CreateMaxDepenetrationVelocityAttr",
+                    self.MAX_DEPENETRATION_VELOCITY,
+                    log=log,
+                )
+            except Exception as exc:
+                log(f"[IwHub] ⚠ chassis depenetration 제한 설정 실패: {exc}")
+            chassis_path = str(chassis.GetPath())
+        else:
+            chassis_path = "찾지 못함"
+
+        log(
+            "[IwHub] 정지 안정화: "
+            f"sleep={self.SLEEP_THRESHOLD:.3f}, "
+            f"stabilization={self.STABILIZATION_THRESHOLD:.3f}, "
+            f"solver={self.SOLVER_POSITION_ITERATIONS}/"
+            f"{self.SOLVER_VELOCITY_ITERATIONS}, chassis={chassis_path}"
+        )
 
     def _configure_drive_torque(self, stage: Usd.Stage, log=print) -> None:
         """적재 상태에서도 제자리 회전하도록 wheel drive와 접지 마찰을 보강한다."""

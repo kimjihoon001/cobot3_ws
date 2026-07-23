@@ -27,6 +27,48 @@ def wheel_speeds_to_twist(
     return v, w
 
 
+def stabilize_twist(
+    v: float,
+    w: float,
+    was_stopped: bool,
+    *,
+    linear_stop: float,
+    angular_stop: float,
+    linear_start: float,
+    angular_start: float,
+) -> tuple[float, float, bool]:
+    """정지 근처의 작은 ``cmd_vel`` 왕복을 히스테리시스로 0에 고정한다.
+
+    정지 상태에서는 더 큰 start 문턱을 넘어야 다시 움직이고, 이동 상태에서는
+    더 작은 stop 문턱 아래에서만 정지한다. Nav2 목표점 근처에서 부호가 바뀌는
+    미세 명령이 좌우 바퀴를 계속 깨워 차체를 떨게 만드는 현상을 막는다.
+    """
+    values = (v, w, linear_stop, angular_stop, linear_start, angular_start)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("twist와 deadband 값은 모두 유한해야 합니다")
+    if min(linear_stop, angular_stop, linear_start, angular_start) < 0.0:
+        raise ValueError("deadband 값은 0 이상이어야 합니다")
+    if linear_start < linear_stop or angular_start < angular_stop:
+        raise ValueError("start deadband는 stop deadband보다 작을 수 없습니다")
+
+    started_from_rest = was_stopped
+    if started_from_rest:
+        stopped = abs(v) < linear_start and abs(w) < angular_start
+    else:
+        stopped = abs(v) <= linear_stop and abs(w) <= angular_stop
+    if stopped:
+        return 0.0, 0.0, True
+
+    # 정지 상태에서 한 축만 start 문턱을 넘었다면 다른 축에 섞인 작은 노이즈는
+    # 그 축의 start 문턱으로 제거한다. 예: 제자리 회전 재개 시 0.019m/s의 미세
+    # 직진을 함께 살리지 않는다. 이미 이동 중이면 작은 stop 문턱을 사용한다.
+    linear_threshold = linear_start if started_from_rest else linear_stop
+    angular_threshold = angular_start if started_from_rest else angular_stop
+    stable_v = 0.0 if abs(v) < linear_threshold else float(v)
+    stable_w = 0.0 if abs(w) < angular_threshold else float(w)
+    return stable_v, stable_w, False
+
+
 def _wrap_angle(a: float) -> float:
     """(-pi, pi] 로 정규화."""
     return math.atan2(math.sin(a), math.cos(a))

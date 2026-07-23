@@ -28,7 +28,11 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
-from iwhub_control.kinematics import DiffDriveOdometry, twist_to_wheel_speeds
+from iwhub_control.kinematics import (
+    DiffDriveOdometry,
+    stabilize_twist,
+    twist_to_wheel_speeds,
+)
 
 
 def _yaw_to_quat(yaw: float):
@@ -51,6 +55,12 @@ class BaseNode(Node):
         self.declare_parameter("publish_odom", True)
         self.declare_parameter("cmd_vel_topic", "/iwhub_0/cmd_vel")
         self.declare_parameter("odom_topic", "/iwhub_0/odom")
+        # Nav2가 목표점 근처에서 내는 극소 정/역회전 명령을 0으로 고정한다.
+        # start > stop 히스테리시스로 경계값 부근의 on/off 채터링도 막는다.
+        self.declare_parameter("linear_stop_deadband", 0.01)
+        self.declare_parameter("angular_stop_deadband", 0.02)
+        self.declare_parameter("linear_start_deadband", 0.02)
+        self.declare_parameter("angular_start_deadband", 0.04)
 
         self._r = self.get_parameter("wheel_radius").value
         self._sep = self.get_parameter("wheel_separation").value
@@ -63,6 +73,30 @@ class BaseNode(Node):
         self._publish_odom = self.get_parameter("publish_odom").value
         self._cmd_vel_topic = self.get_parameter("cmd_vel_topic").value
         self._odom_topic = self.get_parameter("odom_topic").value
+        self._linear_stop_deadband = float(
+            self.get_parameter("linear_stop_deadband").value
+        )
+        self._angular_stop_deadband = float(
+            self.get_parameter("angular_stop_deadband").value
+        )
+        self._linear_start_deadband = float(
+            self.get_parameter("linear_start_deadband").value
+        )
+        self._angular_start_deadband = float(
+            self.get_parameter("angular_start_deadband").value
+        )
+        # 잘못된 launch override는 첫 cmd_vel이 올 때까지 숨기지 않고 시작 시 실패시킨다.
+        stabilize_twist(
+            0.0,
+            0.0,
+            True,
+            linear_stop=self._linear_stop_deadband,
+            angular_stop=self._angular_stop_deadband,
+            linear_start=self._linear_start_deadband,
+            angular_start=self._angular_start_deadband,
+        )
+        # 시작 시 바퀴가 정지해 있으므로 start 문턱을 넘는 명령만 운동을 시작한다.
+        self._motion_stopped = True
 
         self._odom = DiffDriveOdometry(self._r, self._sep)
         self._tf = TransformBroadcaster(self)
@@ -86,13 +120,28 @@ class BaseNode(Node):
             else "Isaac chassis odom/TF 사용(바퀴 odom 비활성)"
         )
         self.get_logger().info(
-            f"iwhub_base_node: {self._cmd_vel_topic}→/{ns}/joint_command, {odom_mode}, "
-            f"r={self._r} sep={self._sep}")
+            f"iwhub_base_node: {self._cmd_vel_topic}→/"
+            f"{ns}/joint_command, {odom_mode}, "
+            f"r={self._r} sep={self._sep}, "
+            f"deadband linear={self._linear_stop_deadband:.3f}/"
+            f"{self._linear_start_deadband:.3f}m/s angular="
+            f"{self._angular_stop_deadband:.3f}/"
+            f"{self._angular_start_deadband:.3f}rad/s"
+        )
 
     # ── /cmd_vel → 좌/우 바퀴 속도 → Isaac joint_command ──
     def _on_cmd(self, msg: Twist) -> None:
+        linear, angular, self._motion_stopped = stabilize_twist(
+            msg.linear.x,
+            msg.angular.z,
+            self._motion_stopped,
+            linear_stop=self._linear_stop_deadband,
+            angular_stop=self._angular_stop_deadband,
+            linear_start=self._linear_start_deadband,
+            angular_start=self._angular_start_deadband,
+        )
         left, right = twist_to_wheel_speeds(
-            msg.linear.x, msg.angular.z, self._r, self._sep)
+            linear, angular, self._r, self._sep)
         self._publish_wheels(left, right)
         self._last_cmd_t = self.get_clock().now()
 
@@ -110,6 +159,13 @@ class BaseNode(Node):
         if dt > self._cmd_timeout:
             self._publish_wheels(0.0, 0.0)      # 명령 끊김 → 정지
             self._last_cmd_t = None
+            self._motion_stopped = True
+
+    def stop_wheels(self) -> None:
+        """종료 직전 마지막 drive target을 0으로 덮어 Isaac에 잔류하지 않게 한다."""
+        self._publish_wheels(0.0, 0.0)
+        self._last_cmd_t = None
+        self._motion_stopped = True
 
     # ── Isaac joint_states(바퀴 각도) → 오도메트리 → /odom + TF ──
     def _on_joints(self, msg: JointState) -> None:
@@ -159,6 +215,8 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if rclpy.ok():
+            node.stop_wheels()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

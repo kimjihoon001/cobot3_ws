@@ -85,6 +85,12 @@ def generate_launch_description():
                 "cmd_vel_topic": "/iwhub_0/cmd_vel",
                 "odom_topic": "/iwhub_0/odom",
                 "publish_odom": ParameterValue(publish_odom, value_type=bool),
+                # 정지점의 작은 Nav2 정/역회전 명령을 0으로 고정해 wheel drive와
+                # 차체가 계속 깨어나는 잔진동을 막는다(start > stop = 히스테리시스).
+                "linear_stop_deadband": 0.01,
+                "angular_stop_deadband": 0.02,
+                "linear_start_deadband": 0.02,
+                "angular_start_deadband": 0.04,
             }],
         ),
     ])
