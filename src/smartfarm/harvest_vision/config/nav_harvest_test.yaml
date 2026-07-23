@@ -35,7 +35,7 @@ nav_harvest_test_node:
     basket_pose_topic: /iw/basket/empty_slot_pose
     basket_frame: base_link
     # IW가 없을 때만 쓰는 tool0 release pose [x,y,z] in basket_frame.
-    mock_basket_release_xyz: [0.45, -0.35, 0.45]
+    mock_basket_release_xyz: [1.32, -0.20, 0.45]
     # 디버깅 중 confidence/모델을 조절해도 게이트가 먼저 닫히지 않게 충분히 둔다.
     search_timeout_sec: 300.0
     # 통합시험 노드를 로봇 도착 후 켜도 마지막 SUCCEEDED 목표에서 수확을 이어간다.

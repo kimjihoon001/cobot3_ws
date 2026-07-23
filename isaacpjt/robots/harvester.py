@@ -40,7 +40,8 @@ HOME_POSE_DEG = (("joint_1", 0.0),
                  ("joint_2", 0.0),
                  ("joint_3", 60.0),
                  ("joint_4", 0.0),
-                 ("joint_5", 60.0),
+                 # 기존 60°에서 손목을 아래로 15° 더 내린 홈 자세.
+                 ("joint_5", 75.0),
                  # [사용자] TCP 방향(link_6 +Z)을 바라볼 때 기준 반시계 90° = +Z 축 −90°
                  # (오른손 법칙: 시선이 축과 같은 방향이면 양의 회전이 시계방향).
                  # 렌더에서 반대로 돌면 +90 으로 뒤집을 것.
@@ -364,26 +365,19 @@ class HarvestMM:
         그 앞에 맞춘다 — 흡착컵의 끝이 토마토 표면에 닿는 접근을 위해서다(사용자 2026-07-23).
         """
         ee = self._cfg.end_effector
-        # 1) RG2 손가락/너클 링크·조인트를 **통째로 비활성**(SetActive False)해 렌더·물리·
-        #    아티큘레이션에서 완전히 제거한다(2026-07-23 사용자: 손가락이 매번 방해). 남는
-        #    RG2 본체 메시는 숨겨 흡착컵만 보이게 한다. 트리 수정 전에 경로를 먼저 모은다.
-        finger_paths, body_meshes = [], []
+        # 1) RG2 손가락을 **숨김 + 콜라이더 비활성**으로 사실상 제거한다. 관절을
+        #    SetActive(False)로 죽이면 타임라인 Stop→Play 재파싱 때 아티큘레이션 DOF/기본
+        #    자세가 틀어져 팔이 홈 대신 0(수직)으로 펴진다(2026-07-23 실측). 그래서 구조는
+        #    건드리지 않고 메시만 숨기고 손가락 콜라이더만 꺼(과실을 안 치게) 흡착컵만 보인다.
+        hidden, cols = 0, 0
         for p in Usd.PrimRange(stage.GetPrimAtPath(gripper_path)):
+            if p.IsA(UsdGeom.Gprim):
+                UsdGeom.Imageable(p).MakeInvisible()
+                hidden += 1
             name = p.GetName().lower()
-            if "finger" in name or "knuckle" in name:
-                finger_paths.append(p.GetPath())
-            elif p.IsA(UsdGeom.Gprim):
-                body_meshes.append(p)
-        hidden = 0
-        for p in body_meshes:
-            UsdGeom.Imageable(p).MakeInvisible()
-            hidden += 1
-        removed = 0
-        for path in finger_paths:
-            pr = stage.GetPrimAtPath(path)
-            if pr.IsValid():
-                pr.SetActive(False)
-                removed += 1
+            if ("finger" in name or "knuckle" in name) and p.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr().Set(False)
+                cols += 1
 
         # 2) 흡착컵 절차 생성 — grip_base 로컬(+Z=접근축, X=손가락 중심선).
         x = ee.grasp_center_x
@@ -408,8 +402,8 @@ class HarvestMM:
         cxf.AddTranslateOp().Set(Gf.Vec3d(x, 0.0, tip_z - 0.010))   # 입구 평면 z=tip_z
         cxf.AddRotateXYZOp().Set(Gf.Vec3f(180.0, 0.0, 0.0))
         # 콜라이더는 안 붙인다 — 파지는 웰드가 하고, 컵 콜라이더는 접근 중 과실을 밀어낸다.
-        log(f"[Harvester] 흡착 그리퍼로 교체: RG2 손가락/너클 prim {removed}개 제거, "
-            f"본체 메시 {hidden}개 숨김, 흡착컵 tip z={tip_z:.3f} (=TCP)")
+        log(f"[Harvester] 흡착 그리퍼로 교체: RG2 메시 {hidden}개 숨김, 손가락 콜라이더 "
+            f"{cols}개 비활성, 흡착컵 tip z={tip_z:.3f} (=TCP)")
 
     def _attach_gripper(self, stage: Usd.Stage, arm_path: str,
                         gripper_path: str, log) -> str | None:

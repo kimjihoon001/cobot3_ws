@@ -91,7 +91,7 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("grasp_one_side_max_retries", 1)
         self.declare_parameter("basket_approach_height_m", 0.15)
         self.declare_parameter("basket_workspace_min", [-0.80, -0.80, 0.15])
-        self.declare_parameter("basket_workspace_max", [1.25, 0.80, 1.80])
+        self.declare_parameter("basket_workspace_max", [1.35, 0.80, 1.80])
         self.declare_parameter("workspace_min", [0.15, -1.05, 0.15])
         self.declare_parameter("workspace_max", [1.25, 1.05, 1.80])
         # 데모: 성공/실패 무관 매 시도 후 홈 복귀 → 팔이 안 굳고 다음 과실을 계속 시도한다.

@@ -21,7 +21,7 @@ from isaacsim.core.utils.types import ArticulationAction
 
 # 파지(흡착) 후 플레이스 전 자세(2026-07-23 사용자): 홈에서 joint_3·joint_5 만 조절해
 # 그리퍼를 지면과 수직으로 세우고 그리퍼 길이 절반쯤 들어올린다.
-# [4] 임의 — 시뮬에서 맞춰야 하는 값(홈: joint_3=60°, joint_5=60°). 절대각(deg).
+# [4] 임의 — 시뮬에서 맞춰야 하는 값(홈: joint_3=60°, joint_5=75°). 절대각(deg).
 PREPLACE_JOINT3_DEG = 80.0   # 홈 60→40: 전완을 펴 TCP를 살짝 들어올린다(그리퍼 길이 절반쯤)
 PREPLACE_JOINT5_DEG = 120.0   # 그리퍼(link_6 +Z)를 지면과 수직(하향)으로 세운다
 

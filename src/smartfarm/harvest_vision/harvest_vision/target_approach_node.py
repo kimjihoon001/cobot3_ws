@@ -21,7 +21,7 @@ ARM_JOINTS = (
 )
 # isaacpjt/robots/harvester.py::HOME_POSE_DEG. --mm 스폰 직후 대기·이동 자세다.
 OBSERVATION_POSE_RAD = tuple(
-    math.radians(value) for value in (0.0, 0.0, 60.0, 0.0, 60.0, -90.0)
+    math.radians(value) for value in (0.0, 0.0, 60.0, 0.0, 75.0, -90.0)
 )
 
 

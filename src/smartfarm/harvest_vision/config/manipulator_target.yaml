@@ -36,7 +36,7 @@ manipulator_target_node:
     home_after_attempt: true
     basket_approach_height_m: 0.15
     basket_workspace_min: [-0.80, -0.80, 0.15]
-    basket_workspace_max: [1.25, 0.80, 1.80]
+    basket_workspace_max: [1.35, 0.80, 1.80]
 
     # base_frame 기준 허용 작업영역 [x, y, z] (m). 실제 로봇/환경에 맞춰 축소한다.
     # 팔을 대각선으로 완전히 펴는 자세도 허용한다. 최종 안전 한계는 별도의
