@@ -52,13 +52,20 @@ class VisionNode(Node):
         self.declare_parameter("detections_topic", "vision/tomato_detections")
         self.declare_parameter("detector_model_path", os.path.join(share, "finetuned_far.pt"))
         self.declare_parameter("quality_model_path", os.path.join(share, "finetuned_near.pt"))
-        self.declare_parameter("detector_confidence", 0.25)
+        # 0.25→0.45: 잎사귀 오탐 억제(val P 0.77→0.96, 오탐 4.5→0.5/img). 수확은 여러
+        # 프레임 투표라 재현율(0.80→0.59)보다 정밀도가 중요. (2026-07-23 threshold 스윕 근거)
+        self.declare_parameter("detector_confidence", 0.45)
         self.declare_parameter("quality_confidence", 0.55)
         self.declare_parameter("near_distance_m", 0.50)
         self.declare_parameter("far_resume_distance_m", 0.60)
         self.declare_parameter("near_box_ratio", 0.025)
         self.declare_parameter("crop_padding_ratio", 0.20)
         self.declare_parameter("quality_vote_frames", 5)
+        # 근거리 품질(ripe/spoiled) 모델 사용 여부. **기본 false = 원거리(tomato) 탐지만**
+        # 쓰고 near 스테이지를 건너뛴다 → control_class 가 계속 "tomato" 라 파지로 바로 이어짐.
+        # (2026-07-22 사용자: near 모델 검출 실패 블로커 회피 — far-only 를 기본으로.)
+        # 근거리 품질판정을 다시 켜려면 param use_quality_model:=true.
+        self.declare_parameter("use_quality_model", False)
 
         self._bridge = CvBridge()
         self._latest_depth: Image | None = None
@@ -67,10 +74,12 @@ class VisionNode(Node):
             maxlen=int(self.get_parameter("quality_vote_frames").value)
         )
         self._near_latched = False
+        self._use_quality = bool(self.get_parameter("use_quality_model").value)
 
         self._detector = self._load_model("detector_model_path", expected={"tomato"})
-        self._quality_model = self._load_model(
-            "quality_model_path", expected=QUALITY_CLASSES
+        self._quality_model = (
+            self._load_model("quality_model_path", expected=QUALITY_CLASSES)
+            if self._use_quality else None
         )
 
         rgb_topic = str(self.get_parameter("rgb_topic").value)
@@ -96,6 +105,8 @@ class VisionNode(Node):
 
         self.get_logger().info(
             "2단계 비전 시작: 원거리=tomato 탐지, 근거리=ripe/spoiled 판정"
+            if self._use_quality else
+            "비전 시작: 원거리(tomato) 탐지만 사용 — 근거리 품질 스테이지 OFF"
         )
 
     def _load_model(self, parameter: str, expected: set[str]):
@@ -242,6 +253,9 @@ class VisionNode(Node):
         return messages, annotated, target_pose, control_class
 
     def _is_near(self, candidate: dict, shape: tuple[int, ...]) -> bool:
+        if not self._use_quality:      # 근거리 품질 스테이지 비활성 → 항상 far(tomato)
+            self._near_latched = False
+            return False
         distance = candidate["distance"]
         if distance is not None:
             threshold = (

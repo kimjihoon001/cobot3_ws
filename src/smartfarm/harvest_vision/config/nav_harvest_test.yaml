@@ -9,9 +9,24 @@ manipulator_target_node:
     # YOLO 빼고 맵 좌표로 젤 가까운 토마토를 바로 잡는다(검출 불필요, 집기 1순위 2026-07-22).
     direct_sim_grasp: true
     # 카메라 검출 광선과 GT 과실 중심 사이 허용 횡거리.
-    sim_match_radius_m: 0.25
+    sim_match_radius_m: 0.08
     # 모바일 매니퓰레이터 RMPflow는 자세에 따라 10초를 넘길 수 있어 단계별 여유를 둔다.
-    motion_timeout_sec: 30.0
+    # Nav 정차 위치에서 PREGRASP까지 약 1m인 경우도 있다. 마지막 15cm 저속 직선
+    # 접근까지 정상 완료되도록 충분한 시간을 주고, 발산은 Isaac의 별도 감시가 즉시 막는다.
+    motion_timeout_sec: 120.0
+    # 파지 성공 = 양손 접촉 + Isaac의 30N 예압 0.5초 연속 유지 + TCP 거리.
+    # 성공 확정 뒤 FixedJoint를 해제하고 3cm 후퇴하여 상대거리 유지까지 검증한다.
+    grasp_tcp_max_distance_m: 0.09
+    grasp_verify_retract_m: 0.03
+    grasp_follow_max_delta_m: 0.015
+    grasp_one_side_yaw_deg: 5.0
+    grasp_one_side_max_retries: 1
+    # 팔 작업영역 밖 GT가 선택되면 토마토 중심이 base x=0.9m 안에 오도록 Nav2로
+    # 재정차한다. 재정차 요청은 한 번에 최대 0.6m로 제한한다.
+    reposition_target_x_m: 0.90
+    reposition_target_abs_y_m: 0.45
+    # UR10e를 최대한 펴고 joint_4 대체 IK를 먼저 사용한다. 1.50m를 넘는 목표만 재정차한다.
+    workspace_max_xy_radius_m: 1.50
 
 nav_harvest_test_node:
   ros__parameters:
@@ -22,10 +37,21 @@ nav_harvest_test_node:
     basket_pose_topic: /iw/basket/empty_slot_pose
     basket_frame: base_link
     # IW가 없을 때만 쓰는 tool0 release pose [x,y,z] in basket_frame.
-    mock_basket_release_xyz: [0.45, -0.35, 0.45]
+    mock_basket_release_xyz: [1.32, -0.20, 0.45]
     # 디버깅 중 confidence/모델을 조절해도 게이트가 먼저 닫히지 않게 충분히 둔다.
     search_timeout_sec: 300.0
     # 통합시험 노드를 로봇 도착 후 켜도 마지막 SUCCEEDED 목표에서 수확을 이어간다.
     accept_initial_succeeded_goal: true
     # launch를 목표 도착 뒤 재시작해도 수동 enable 없이 현재 위치에서 검색 재개.
     resume_search_after_start_sec: 2.0
+    # Nav2 도착 직후 주행 관성으로 흐트러진 팔을 실제 홈 오차 0.03rad 안으로
+    # 다시 수렴시킨 뒤에만 비전/수확 게이트를 연다.
+    home_after_nav: true
+    home_settle_timeout_sec: 30.0
+    home_command_retry_sec: 1.0
+    reposition_request_topic: /harvester_0/nav/reposition_request
+    navigate_to_pose_action: /navigate_to_pose
+    map_frame: map
+    base_frame: base_link
+    reposition_max_translation_m: 0.60
+    reposition_tf_timeout_sec: 0.5

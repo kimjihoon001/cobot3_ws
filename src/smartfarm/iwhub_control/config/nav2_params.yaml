@@ -1,0 +1,265 @@
+# iw.hub Nav2 파라미터 (ROS2 Humble). 위치추정 = AMCL(정적 맵 + 라이다 매칭).
+#   맵 = maps/greenhouse.yaml (IW 전용, Isaac 월드 좌표에 정렬).
+# ★ Nova Carter 규칙 스캔 2기: /front_2d_lidar/scan + /back_2d_lidar/scan.
+#   AMCL 은 전방 스캔 1개로 맵 매칭, 코스트맵은 둘 다 사용한다.
+# TF: map(amcl)→odom(base_node)→base_link→laser_front/back(Isaac).
+
+amcl:
+  ros__parameters:
+    use_sim_time: true
+    base_frame_id: "iwhub_0/base_link"
+    odom_frame_id: "iwhub_0/odom"
+    global_frame_id: "iwhub_0/map"
+    scan_topic: front_2d_lidar/scan
+    # IW 전용 맵은 Isaac 월드 좌표에 정렬되어 있다.
+    set_initial_pose: true
+    initial_pose: {x: 1.6955, y: -12.0, z: 0.0, yaw: 3.141592653589793}
+    laser_model_type: "likelihood_field"
+    max_beams: 180
+    min_particles: 800
+    max_particles: 3000
+    # 실제 코스트맵 관측 범위와 맞춰 멀리서 들어온 노이즈의 영향을 줄인다.
+    laser_max_range: 25.0
+    laser_min_range: 0.05                   # Nova Carter RPLIDAR S2E 프로파일
+    # 바퀴 odom의 누적 회전/직진 오차가 코스트맵에 쌓이기 전에 자주 보정한다.
+    update_min_a: 0.05
+    update_min_d: 0.05
+    resample_interval: 1
+    transform_tolerance: 1.0
+    # 충돌·헛돌기가 있는 시뮬 차체의 엔코더 odom을 과신하지 않도록
+    # 이동 노이즈를 높이고, 정적맵과 맞는 라이다 점에 더 큰 가중치를 준다.
+    alpha1: 0.35
+    alpha2: 0.35
+    alpha3: 0.30
+    alpha4: 0.30
+    z_hit: 0.80
+    z_rand: 0.20
+    sigma_hit: 0.12
+    do_beamskip: true
+    beam_skip_distance: 0.5
+    beam_skip_threshold: 0.3
+    beam_skip_error_threshold: 0.9
+    tf_broadcast: true
+
+map_server:
+  ros__parameters:
+    use_sim_time: true
+    frame_id: "iwhub_0/map"
+    yaml_filename: ""                       # launch 에서 map 인자로 채움
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: iwhub_0/map
+    robot_base_frame: iwhub_0/base_link
+    odom_topic: odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      # 움직이는 FOLLOW goal을 후진으로 추종할 때 곡선 정렬 구간을 실패로
+      # 오인하지 않되, 실제 정지는 계속 검출한다.
+      required_movement_radius: 0.10
+      movement_time_allowance: 15.0
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+      stateful: true
+    FollowPath:
+      # DWB는 로컬 costmap의 장애물을 반영해 여러 전진/회전 속도 궤적을 비교한다.
+      # 충돌 시 정지만 하던 RPP와 달리 유효한 좌우 원호를 선택해 능동 회피한다.
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: false
+      min_vel_x: -0.25
+      max_vel_x: 0.50
+      max_vel_theta: 0.80
+      min_speed_xy: 0.0
+      max_speed_xy: 0.50
+      min_speed_theta: 0.0
+      acc_lim_x: 1.2
+      acc_lim_theta: 1.6
+      decel_lim_x: -1.5
+      decel_lim_theta: -2.0
+      vx_samples: 25
+      vtheta_samples: 35
+      sim_time: 2.0
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.2
+      xy_goal_tolerance: 0.25
+      trans_stopped_velocity: 0.05
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
+                "PathAlign", "PathDist", "GoalDist"]
+      BaseObstacle.scale: 0.05
+      PathAlign.scale: 24.0
+      PathAlign.forward_point_distance: 0.35
+      GoalAlign.scale: 18.0
+      GoalAlign.forward_point_distance: 0.35
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      RotateToGoal.scale: 20.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      # RViz가 시뮬 시간 재시작 직후의 첫 full map을 오래된 TF로 폐기해도 다음 주기에
+      # 최신 전체 맵을 다시 받을 수 있게 한다(증분 업데이트만으로는 복구되지 않는다).
+      always_send_full_costmap: true
+      # 로컬 제어는 연속적인 odom 기준으로 계산해 AMCL(map→odom) 보정 점프가
+      # 즉시 조향 명령을 흔들지 않게 한다. 정적맵은 global_costmap에서 사용한다.
+      global_frame: iwhub_0/odom
+      robot_base_frame: iwhub_0/base_link
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      # 전역 계획은 실제 팔레트 폭(0.802m)을 사용한다. 로컬 충돌 검사는 5cm 격자의
+      # 경계 셀 때문에 물리 접촉 전 정지하지 않도록 좌우 합계 5cm(각 2.5cm)만 줄인다.
+      # 앞뒤 길이는 실제 IW 외곽을 그대로 유지한다.
+      footprint: "[[0.3975, 0.376], [0.3975, -0.376], [-1.0335, -0.376], [-1.0335, 0.376]]"
+      # 추가 외곽 여유를 제거하고 실측 footprint만 충돌 검사에 사용한다.
+      footprint_padding: 0.0
+      # 중앙 측면은 두 라이다 모두 최소 감지거리 안쪽이 될 수 있다. 정적 벽이 스캔에서
+      # 사라져도 ObstacleFootprint가 계속 검사하도록 static layer를 로컬에도 유지한다.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan_front scan_back
+        scan_front:
+          topic: front_2d_lidar/scan
+          data_type: "LaserScan"
+          marking: true
+          clearing: true
+          max_obstacle_height: 2.0
+          obstacle_max_range: 20.0
+          raytrace_max_range: 25.0
+        scan_back:
+          topic: back_2d_lidar/scan
+          data_type: "LaserScan"
+          marking: true
+          clearing: true
+          max_obstacle_height: 2.0
+          obstacle_max_range: 20.0
+          raytrace_max_range: 25.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # 실제 footprint 충돌 검사는 유지하고, 그 바깥의 선제 정지 띠만 1cm로 최소화한다.
+        # 전역 코스트맵의 5cm 회피 여유는 그대로라 경로 계획은 장애물에 붙지 않는다.
+        cost_scaling_factor: 30.0
+        inflation_radius: 0.01
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      # RViz가 시뮬 타임라인 재시작 직후 첫 latched map을 놓쳐도 다음 주기에
+      # 전체 글로벌 코스트맵을 다시 발행해 스스로 복구하게 한다.
+      always_send_full_costmap: true
+      global_frame: iwhub_0/map
+      robot_base_frame: iwhub_0/base_link
+      # 계획 단계에서는 회전 중 팔레트 앞 모서리가 베드에 붙지 않도록 실제 외곽보다
+      # 앞/좌우로 5cm 넓힌다. 로컬 정지 footprint와 분리해 조기 정지는 만들지 않는다.
+      footprint: "[[0.4475, 0.451], [0.4475, -0.451], [-1.0335, -0.401], [-1.0335, 0.401]]"
+      footprint_padding: 0.0
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan_front scan_back
+        scan_front:
+          topic: front_2d_lidar/scan
+          data_type: "LaserScan"
+          marking: true
+          clearing: true
+          obstacle_max_range: 20.0
+          raytrace_max_range: 25.0
+        scan_back:
+          topic: back_2d_lidar/scan
+          data_type: "LaserScan"
+          marking: true
+          clearing: true
+          obstacle_max_range: 20.0
+          raytrace_max_range: 25.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 12.0
+        inflation_radius: 0.05
+
+planner_server:
+  ros__parameters:
+    use_sim_time: true
+    expected_planner_frequency: 20.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      # 차동구동의 제자리 회전을 활용한다. Hybrid-A*는 목표 자세를 곡률 경로로
+      # 만족시키려 큰 원을 만들므로, A*는 위치 경로만 만들고 방향은 RPP가 제자리에서 맞춘다.
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.25
+      use_astar: true
+      allow_unknown: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    # Humble 기본 BT는 활성화할 때 spin action server의 존재를 요구한다. 서버는 등록하되
+    # 정상 경로 추종은 Smac+PurePursuit 원호 주행이며, spin은 BT 복구 단계에서만 저속 사용한다.
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    global_frame: iwhub_0/odom
+    robot_base_frame: iwhub_0/base_link
+    transform_tolerance: 0.1
+    cycle_frequency: 10.0
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.60
+    min_rotational_vel: 0.10
+    rotational_acc_lim: 1.2
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: true
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.50, 0.0, 0.80]
+    min_velocity: [-0.25, 0.0, -0.80]
+    max_accel: [1.2, 0.0, 1.6]
+    max_decel: [-1.5, 0.0, -2.0]
+    odom_topic: "odom"
+    odom_duration: 0.1

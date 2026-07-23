@@ -14,8 +14,8 @@ from pxr import Usd
 from isaacsim.core.api.tasks import BaseTask
 
 from pjt_config.settings import SceneConfig
-from scene import pedicel, physics
-from scene.ground import Ground
+from scene import pedicel
+from scene.ground import COMMON_FLOOR_Z, Ground
 from scene.lighting import Lighting
 from scene.greenhouse import Greenhouse
 from scene.tomato_plants import TomatoPlants
@@ -49,11 +49,12 @@ class GreenhouseTask(BaseTask):
         # 기본 지면의 파란 격자가 지평선에도 안 보이게 시야보다 훨씬 넉넉히 깐다.
         ground.spawn_hall(stage, center=(0.0, 1.5), size=(60.0, 60.0))
         Lighting(cfg.lighting).spawn(stage)
-        Greenhouse(g).spawn(stage, back_wall=False)   # 뒷벽은 창고와 공유(벽 하나로 붙임)
+        Greenhouse(g).spawn(stage, back_wall=False, elevation=COMMON_FLOOR_Z)
+        # 베드·줄기·과실 전체를 공통 바닥과 함께 올린다.
 
         self._plants = TomatoPlants(cfg.plants, cfg.tomato_assets,
                                     g, cfg.physics, rng)
-        self._plants.spawn(stage)
+        self._plants.spawn(stage, elevation=COMMON_FLOOR_Z)
 
         # 창고 방 — 온실 뒷벽에 **벽 하나로 붙인다**(gap 없음, 팀 피드백 2026-07-20).
         # 방 중심 x=0, 방 앞벽(-y)이 온실 뒷벽(+y=length/2)과 겹쳐 공유 칸막이가 된다.
@@ -109,7 +110,8 @@ class GreenhouseTask(BaseTask):
     def detach_fruit(self, path: str) -> bool:
         """과실을 줄기에서 분리 (= 커터가 distal 꽃자루를 자른 순간).
 
-        꽃자루 조인트를 끊는다(jointEnabled=False). 과실은 이미 dynamic 이라 낙하한다.
+        꽃자루 조인트를 끊는다(jointEnabled=False). 과실은 처음부터 dynamic이므로
+        절단 순간 물리 모드 변화나 저장된 침투 임펄스의 급격한 방출이 없다.
         물리 breakForce 로 자연히 끊기길 기다리지 않는 이유는 그쪽이 비결정적이라
         Play/Stop 재현성이 깨지기 때문 — cut 은 코드로 끊어 결정적이다.
         """
@@ -119,11 +121,8 @@ class GreenhouseTask(BaseTask):
         fruit = stage.GetPrimAtPath(path)
         if not fruit.IsValid():
             return False
-        # kinematic(고정) 과실을 dynamic 으로 전환 = 줄기에서 분리·낙하/그리퍼 파지
-        # (§5.3: 절단 순간에만). 조인트 없이 이것만으로 매달림이 풀린다.
-        physics.set_kinematic(fruit, False)
-        joint = self._joint_of(path)          # 옛 조인트 방식 호환 — 있으면 같이 끊는다
-        if joint:                             # ""(조인트 없음)·None 이면 건너뜀
-            pedicel.cut(stage, joint)
+        joint = self._joint_of(path)
+        if not joint or not pedicel.cut(stage, joint):
+            return False
         self._harvested.add(path)
         return True

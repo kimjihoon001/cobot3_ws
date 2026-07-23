@@ -1,0 +1,76 @@
+# Lula robot descriptor — Doosan M0617 (MM 수확 팔).
+# [1] 출처 — cspace/joint 한계는 공식 macro.m0617.white.xacro 그대로.
+# [4]/[3] 충돌구(collision_spheres)·default_q 는 시드값 → Isaac GUI 의
+#   "Lula Robot Description Editor" 로 실 링크에 맞춰 튜닝할 것. 아래 구는 링크 길이
+#   (upper arm 0.845m, forearm 0.734m)에 맞춰 대략 배치한 출발점이다.
+
+api_version: 1.0
+
+cspace:
+    - joint_1
+    - joint_2
+    - joint_3
+    - joint_4
+    - joint_5
+    - joint_6
+
+root_link: base_link
+
+# [4] 시드 — 팔꿈치-업 대기자세(솔버 null-space 바이어스). GUI 로 수확 접근에 맞게 확정.
+default_q: [0.0, 0.0, 1.5708, 0.0, 1.5708, 0.0]
+
+# [1] 속도 한계는 xacro velocity 태그: j1/j2=1.7453, j3=2.618, j4~6=3.927 (rad/s).
+# [3] accel/jerk 는 m0609 시드를 대형 팔에 맞게 소폭 낮춤 — 스윕으로 확정.
+cspace_to_urdf_rules: []
+
+acceleration_limits: [6.0, 6.0, 8.0, 10.0, 10.0, 10.0]
+jerk_limits: [3000.0, 3000.0, 4000.0, 5000.0, 5000.0, 5000.0]
+
+collision_spheres:
+    - base_link:
+        - "center": [0.0, 0.0, 0.05]
+          "radius": 0.11
+        - "center": [0.0, 0.0, 0.13]
+          "radius": 0.11
+    - link_1:
+        - "center": [0.0, 0.04, 0.0]
+          "radius": 0.10
+        - "center": [0.0, 0.0, -0.03]
+          "radius": 0.10
+    # link_2 = 상완(local +X 로 0 → 0.845m).
+    - link_2:
+        - "center": [0.10, 0.0, 0.0]
+          "radius": 0.10
+        - "center": [0.27, 0.0, 0.02]
+          "radius": 0.09
+        - "center": [0.44, 0.0, 0.04]
+          "radius": 0.09
+        - "center": [0.61, 0.0, 0.06]
+          "radius": 0.09
+        - "center": [0.78, 0.0, 0.08]
+          "radius": 0.09
+        - "center": [0.845, 0.0, 0.10]
+          "radius": 0.09
+    # link_3 = 전완(local -Y 로 0 → 0.734m).
+    - link_3:
+        - "center": [0.0, -0.10, 0.0]
+          "radius": 0.08
+        - "center": [0.0, -0.27, 0.0]
+          "radius": 0.07
+        - "center": [0.0, -0.44, 0.0]
+          "radius": 0.07
+        - "center": [0.0, -0.61, 0.0]
+          "radius": 0.07
+        - "center": [0.0, -0.734, 0.0]
+          "radius": 0.07
+    - link_4:
+        - "center": [0.0, 0.02, 0.0]
+          "radius": 0.06
+        - "center": [0.0, 0.02, -0.10]
+          "radius": 0.06
+    - link_5:
+        - "center": [0.0, 0.0, 0.03]
+          "radius": 0.05
+    - link_6:
+        - "center": [0.0, 0.0, -0.03]
+          "radius": 0.05

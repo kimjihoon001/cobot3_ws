@@ -12,16 +12,16 @@ from sensor_msgs.msg import JointState
 
 
 ARM_JOINTS = (
-    "shoulder_pan_joint",
-    "shoulder_lift_joint",
-    "elbow_joint",
-    "wrist_1_joint",
-    "wrist_2_joint",
-    "wrist_3_joint",
+    "joint_1",
+    "joint_2",
+    "joint_3",
+    "joint_4",
+    "joint_5",
+    "joint_6",
 )
 # isaacpjt/robots/harvester.py::HOME_POSE_DEG. --mm 스폰 직후 대기·이동 자세다.
 OBSERVATION_POSE_RAD = tuple(
-    math.radians(value) for value in (0.0, 225.0, 135.0, 180.0, -90.0, 0.0)
+    math.radians(value) for value in (0.0, 0.0, 60.0, 0.0, 75.0, -90.0)
 )
 
 
@@ -43,9 +43,9 @@ class TargetApproachNode(Node):
         self.declare_parameter("arm_pose_tolerance_deg", 7.0)
         self.declare_parameter("stop_distance_m", 0.50)
         self.declare_parameter("max_linear_speed", 0.15)
-        self.declare_parameter("max_angular_speed", 0.35)
+        self.declare_parameter("max_angular_speed", 1.05)
         self.declare_parameter("linear_gain", 0.5)
-        self.declare_parameter("angular_gain", 1.2)
+        self.declare_parameter("angular_gain", 3.6)
         self.declare_parameter("heading_tolerance_rad", 0.08)
         self.declare_parameter("target_timeout_sec", 0.5)
 

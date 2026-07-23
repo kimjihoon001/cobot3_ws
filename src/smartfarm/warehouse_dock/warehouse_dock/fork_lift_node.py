@@ -3,7 +3,8 @@
 
 작업 순서
 ---------
-1. AMR 도킹 신호를 받으면 빈 ``Pallet_00``을 랙에서 꺼내 IW에 적재한다.
+1. 터미널에서 ``0번``부터 ``5번`` 중 하나를 입력하면 선택한 빈 팔레트를 랙에서
+   꺼내 IW에 적재한다.
 2. 다음 도킹 신호를 받으면 IW의 ``Pallet_00``을 다시 집어
    원래 0번 위치에 내려놓는다.
 3. 이어서 빈 ``Pallet_01``을 랙에서 꺼내 IW에 적재하고
@@ -22,8 +23,12 @@ Warehouse 단독 시험 기본값은 명령 적분 자세를 사용하며 상태
 from __future__ import annotations
 
 import fcntl
+import json
 import math
 import os
+import queue
+import sys
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -65,6 +70,7 @@ class Step:
     duration: float = 0.0
     max_drive: float = 0.0
     position_tolerance: float = 0.0
+    x_tolerance: float = 0.0
     yaw_tolerance: float = 0.0
     timeout: float = 60.0
     pallet_id: int = -1
@@ -73,6 +79,9 @@ class Step:
     max_steering: float = 0.0
     max_rotation: float = 0.0
     attached: bool = False
+    deck_attached: bool = False
+    attempt: int = 0
+    validate_alignment: bool = True
 
 
 class ForkLiftNode(Node):
@@ -117,11 +126,22 @@ class ForkLiftNode(Node):
     FORK_BLADE_CENTER_Z_AT_ZERO = (
         FORK_BLADE_BOTTOM_Z_AT_ZERO + FORK_BLADE_TOP_Z_AT_ZERO
     ) / 2.0
+    # 랙 삽입 때 포크 중심을 구멍 중심보다 6cm 낮춰 잡은 상태로 팔레트가
+    # 연결된다. 따라서 IW에 내려놓을 때도 목표 구멍 높이보다 6cm 낮은 포크
+    # 자세를 사용해야 팔레트 하면이 실제 데크 상면에 닿는다.
+    RACK_PICKUP_UNDERSHOOT = 0.06
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        node_name: str = "fork_lift_node",
+        instance_lock_path: str | None = None,
+        console_enabled: bool = True,
+    ):
         # 같은 PC에서 노드 두 개가 /forklift_0/joint_command에 동시에 명령을
         # 보내는 상황을 막는다. 프로세스가 비정상 종료돼도 flock은 자동 해제된다.
-        self._instance_lock = open(self.INSTANCE_LOCK_PATH, "a+", encoding="utf-8")
+        lock_path = instance_lock_path or self.INSTANCE_LOCK_PATH
+        self._instance_lock = open(lock_path, "a+", encoding="utf-8")
         try:
             fcntl.flock(
                 self._instance_lock.fileno(),
@@ -137,7 +157,7 @@ class ForkLiftNode(Node):
         self._instance_lock.write(str(os.getpid()))
         self._instance_lock.flush()
 
-        super().__init__("fork_lift_node")
+        super().__init__(node_name)
 
         # 좌표 파라미터. 실제 도킹 위치가 정해지면 이 세 항목을 먼저 보정한다.
         self.declare_parameter("initial_pose", [0.0, 14.5, -math.pi / 2.0])
@@ -161,6 +181,8 @@ class ForkLiftNode(Node):
         self.declare_parameter("staging_distance", 1.0)
         # 포크를 구멍에 끝까지 삽입해 팔레트를 연결한 뒤 20cm 들어 올린다.
         self.declare_parameter("pickup_raise", 0.20)
+        # 2층 팔레트는 상부 기둥과 충돌하지 않도록 랙 안에서 5cm만 든다.
+        self.declare_parameter("upper_rack_pickup_raise", 0.05)
 
         # ForkliftB 운동 파라미터. main.py TransporterController와 같은 값이어야 한다.
         self.declare_parameter("wheel_radius", 0.22)
@@ -176,6 +198,18 @@ class ForkLiftNode(Node):
         self.declare_parameter(
             "pallet_approach_max_steering_angle", math.radians(35.0)
         )
+        self.declare_parameter("alignment_recovery_distance", 2.5)
+        self.declare_parameter(
+            "alignment_recovery_max_steering", math.radians(8.0)
+        )
+        # 랙 직선 삽입 전 최종 정렬 조건. 잔진동 제거 뒤 남는 정적 오차를
+        # 재진입으로 보정하되, X ±4cm / yaw ±3° 안에서만 삽입을 허용한다.
+        self.declare_parameter("rack_entry_x_tolerance", 0.04)
+        self.declare_parameter(
+            "rack_entry_yaw_tolerance", math.radians(3.0)
+        )
+        # 랙 재진입과 IW 공통축 보정에 동일한 상한을 적용한다.
+        self.declare_parameter("max_reentry_attempts", 5)
         # spike 06처럼 후륜 swivel을 크게 꺾어 좁게 회전한다. 25°에서는 반경이
         # 약 4.4m지만 70°에서는 약 0.75m다.
         self.declare_parameter("max_steering_angle", math.radians(70.0))
@@ -194,17 +228,24 @@ class ForkLiftNode(Node):
             "initial_yaw_tolerance", math.radians(12.0)
         )
 
-        # Warehouse 단독 시험은 joint-state 연결 후 자동 시작한다. 실제 통합 운용에서는
-        # -p auto_start:=false 로 두고 /handoff/tray_ready 도킹 이벤트를 사용한다.
-        self.declare_parameter("auto_start", True)
+        # 기본 운용은 터미널 번호 입력을 기다린다. 기존 도킹 이벤트 방식 시험이
+        # 필요할 때만 -p auto_start:=true로 0번 자동 작업을 활성화한다.
+        self.declare_parameter("auto_start", False)
         self.declare_parameter("auto_start_delay", 2.0)
+        # 별도 fork_lift_return_node와 함께 실행할 때는 이 노드가 IW 귀환
+        # 이벤트를 처리하지 않는다. 예전 단일 노드 P0→P1 시험이 필요하면 true.
+        self.declare_parameter("enable_internal_return_cycle", False)
         # GUI 차체가 실제로 움직인 사실을 확인한 뒤에만 상태기를 진행한다. 피드백 없이
         # dead reckoning만 쓰면 DDS 도메인이 달라도 ROS 로그상 작업이 끝난 것처럼 보인다.
         self.declare_parameter("require_joint_state_feedback", True)
         self.declare_parameter("require_pose_feedback", True)
         self.declare_parameter("use_pose_feedback", True)
+        # IW가 Isaac에서 측정해 보내는 실제 chassis 상면/팔레트 구멍 높이를
+        # 받은 뒤에만 작업한다. 예전 고정 Z=0.45m로 상차하면 팔레트가 뜬다.
+        self.declare_parameter("require_iw_deck_geometry", True)
 
         self._load_parameters()
+        self._iw_deck_geometry_received = False
 
         self._command_pub = self.create_publisher(
             JointState, "/forklift_0/joint_command", 10
@@ -213,6 +254,9 @@ class ForkLiftNode(Node):
         self._clear_pub = self.create_publisher(Bool, "/forklift/clear", 10)
         self._complete_pub = self.create_publisher(
             Int32, "/forklift/task_complete", 10
+        )
+        self._pallet_on_iw_pub = self.create_publisher(
+            Int32, "/forklift/pallet_on_iw", 10
         )
 
         self.create_subscription(
@@ -223,6 +267,12 @@ class ForkLiftNode(Node):
         )
         self.create_subscription(
             PoseStamped, "/forklift_0/pose", self._on_pose, 10
+        )
+        self.create_subscription(
+            String,
+            "/iwhub_0/deck_geometry",
+            self._on_iw_deck_geometry,
+            10,
         )
         self.create_subscription(
             HandoffEvent, "/handoff/tray_ready", self._on_handoff, 10
@@ -244,6 +294,10 @@ class ForkLiftNode(Node):
         self._drive_command = 0.0
         self._steer_command = 0.0
         self._pallet_attached_command = False
+        self._pallet_deck_attached_command = False
+        # 상하차 중에는 IW를 canonical dock pose에 고정한다. 상차 완료 뒤
+        # 명시적인 dock_lock 해제 단계에서만 IW가 다시 이동할 수 있다.
+        self._iw_dock_locked_command = True
         self._pallet_target_command = 0
 
         self._mode = self.MODE_WAIT_INITIAL
@@ -262,6 +316,7 @@ class ForkLiftNode(Node):
         )
         self._last_tick = time.monotonic()
         self._last_status = ""
+        self._console_requests: queue.Queue[str] = queue.Queue()
 
         period = 1.0 / self._control_rate
         self.create_timer(period, self._tick)
@@ -272,8 +327,18 @@ class ForkLiftNode(Node):
             )
         else:
             self._publish_status(
-                "초기화 완료: AMR 도킹 신호(/handoff/tray_ready 또는 "
-                "/forklift/amr_docked)를 기다립니다"
+                "초기화 완료: ForkliftB 연결 후 터미널에 0~5번을 "
+                "입력하세요"
+            )
+        if console_enabled and sys.stdin.isatty():
+            threading.Thread(
+                target=self._read_console_requests,
+                name="forklift-pallet-selector",
+                daemon=True,
+            ).start()
+        else:
+            self.get_logger().warning(
+                "표준 입력이 터미널이 아니므로 번호 입력 기능을 사용할 수 없습니다"
             )
 
     def _log_rack_geometry(self) -> None:
@@ -325,6 +390,9 @@ class ForkLiftNode(Node):
             self.get_parameter("staging_distance").value
         )
         self._pickup_raise = float(self.get_parameter("pickup_raise").value)
+        self._upper_rack_pickup_raise = float(
+            self.get_parameter("upper_rack_pickup_raise").value
+        )
         self._wheel_radius = float(self.get_parameter("wheel_radius").value)
         self._wheelbase = float(self.get_parameter("wheelbase").value)
         self._max_drive = float(self.get_parameter("max_drive_speed").value)
@@ -340,6 +408,29 @@ class ForkLiftNode(Node):
         self._pallet_approach_max_steer = float(
             self.get_parameter("pallet_approach_max_steering_angle").value
         )
+        self._alignment_recovery_distance = float(
+            self.get_parameter("alignment_recovery_distance").value
+        )
+        self._alignment_recovery_max_steer = float(
+            self.get_parameter("alignment_recovery_max_steering").value
+        )
+        self._rack_entry_x_tol = float(
+            self.get_parameter("rack_entry_x_tolerance").value
+        )
+        self._rack_entry_yaw_tol = float(
+            self.get_parameter("rack_entry_yaw_tolerance").value
+        )
+        self._max_reentry_attempts = int(
+            self.get_parameter("max_reentry_attempts").value
+        )
+        if self._rack_entry_x_tol <= 0.0:
+            raise ValueError("rack_entry_x_tolerance은 0보다 커야 합니다")
+        if not 0.0 < self._rack_entry_yaw_tol <= math.radians(3.0):
+            raise ValueError(
+                "rack_entry_yaw_tolerance은 0보다 크고 3도 이하여야 합니다"
+            )
+        if not 0 <= self._max_reentry_attempts <= 5:
+            raise ValueError("max_reentry_attempts는 0부터 5 사이여야 합니다")
         self._max_steer = float(
             self.get_parameter("max_steering_angle").value
         )
@@ -369,6 +460,9 @@ class ForkLiftNode(Node):
         self._auto_start_delay = float(
             self.get_parameter("auto_start_delay").value
         )
+        self._enable_internal_return_cycle = bool(
+            self.get_parameter("enable_internal_return_cycle").value
+        )
         self._require_pose_feedback = bool(
             self.get_parameter("require_pose_feedback").value
         )
@@ -378,9 +472,74 @@ class ForkLiftNode(Node):
         self._use_pose_feedback = bool(
             self.get_parameter("use_pose_feedback").value
         )
+        self._require_iw_deck_geometry = bool(
+            self.get_parameter("require_iw_deck_geometry").value
+        )
 
     # ------------------------------------------------------------------
     # ROS 입력
+
+    def _read_console_requests(self) -> None:
+        """ROS executor를 막지 않고 터미널에서 팔레트 번호를 읽는다."""
+        while rclpy.ok():
+            try:
+                value = input("\n팔레트 번호 입력 [0번~5번] > ")
+            except (EOFError, KeyboardInterrupt):
+                return
+            self._console_requests.put(value)
+
+    def _process_console_requests(self) -> None:
+        """executor 스레드에서 터미널 입력을 검증하고 선택 작업을 시작한다."""
+        try:
+            raw_value = self._console_requests.get_nowait()
+        except queue.Empty:
+            return
+
+        normalized = "".join(raw_value.strip().split())
+        if normalized.endswith("번"):
+            normalized = normalized[:-1]
+        if normalized not in tuple(str(index) for index in range(self.PALLET_COUNT)):
+            self.get_logger().warning(
+                f"지원하지 않는 입력 '{raw_value}': 0번부터 5번 중 하나를 입력하세요"
+            )
+            return
+
+        pallet = int(normalized)
+        if self._mode != self.MODE_WAIT_INITIAL:
+            self.get_logger().warning(
+                f"현재 상태 {self._mode}에서는 새 팔레트를 선택할 수 없습니다. "
+                "IW가 비어 있고 지게차가 초기 대기 위치에 있어야 합니다"
+            )
+            return
+        if self._require_joint_state_feedback and self._joint_state_time is None:
+            self.get_logger().warning(
+                "ForkliftB joint_states 연결 전입니다. 연결 후 번호를 다시 입력하세요"
+            )
+            return
+        if self._require_pose_feedback and self._pose_feedback_time is None:
+            self.get_logger().warning(
+                "ForkliftB pose 연결 전입니다. 연결 후 번호를 다시 입력하세요"
+            )
+            return
+
+        position_error = math.hypot(
+            self._x - self._wait_pose[0], self._y - self._wait_pose[1]
+        )
+        yaw_error = abs(wrap_angle(self._yaw - self._wait_pose[2]))
+        if (
+            position_error > self._initial_position_tol
+            or yaw_error > self._initial_yaw_tol
+        ):
+            self.get_logger().error(
+                "선택 작업을 시작할 수 없습니다: 지게차가 초기 대기 위치를 "
+                f"벗어났습니다(position_error={position_error:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg). "
+                "Isaac Sim을 초기화한 뒤 다시 실행하세요"
+            )
+            return
+
+        self.get_logger().info(f"사용자 선택: Pallet_{pallet:02d}")
+        self._start_selected_load(pallet)
 
     def _on_joint_states(self, msg: JointState) -> None:
         self._joint_state_time = time.monotonic()
@@ -407,6 +566,48 @@ class ForkLiftNode(Node):
             mode = "경로 제어 사용" if self._use_pose_feedback else "연결 확인 전용"
             self.get_logger().info(f"/forklift_0/pose 연결 완료 ({mode})")
             self._pose_feedback_logged = True
+
+    def _on_iw_deck_geometry(self, msg: String) -> None:
+        """Isaac이 실제 IW 형상에서 측정한 도킹 중심과 구멍 높이를 적용한다."""
+        try:
+            payload = json.loads(msg.data)
+            measured = (
+                float(payload["dock_x"]),
+                float(payload["dock_y"]),
+                float(payload["pallet_hole_center_z"]),
+            )
+            deck_top_z = float(payload["deck_top_z"])
+            if not all(math.isfinite(value) for value in (*measured, deck_top_z)):
+                raise ValueError("유한하지 않은 좌표")
+            if not 0.05 <= deck_top_z <= 1.0:
+                raise ValueError(f"비정상 deck_top_z={deck_top_z:.5f}")
+            if not deck_top_z < measured[2] < deck_top_z + 0.20:
+                raise ValueError(
+                    "팔레트 구멍 높이가 데크 상면 범위를 벗어남: "
+                    f"deck={deck_top_z:.5f}, hole={measured[2]:.5f}"
+                )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.get_logger().warning(
+                f"/iwhub_0/deck_geometry 잘못된 측정값 무시: {exc}"
+            )
+            return
+
+        previous = self._amr_hole
+        self._amr_hole = measured
+        first = not self._iw_deck_geometry_received
+        self._iw_deck_geometry_received = True
+        if first or any(
+            abs(current - old) > 0.002
+            for current, old in zip(measured, previous)
+        ):
+            self.get_logger().info(
+                "[IW Deck Measure] 실측 좌표 적용: "
+                f"center=({measured[0]:.5f}, {measured[1]:.5f}), "
+                f"deck_top_z={deck_top_z:.5f}, "
+                f"pallet_hole_z={measured[2]:.5f}, "
+                f"pickup_lift={self._amr_lift_target():.5f}, "
+                f"place_lift={self._amr_place_lift_target():.5f}"
+            )
 
     def _on_handoff(self, msg: HandoffEvent) -> None:
         self.get_logger().info(
@@ -438,6 +639,14 @@ class ForkLiftNode(Node):
     # 미션 구성
 
     def _handle_amr_docked(self) -> None:
+        if (
+            self._require_iw_deck_geometry
+            and not self._iw_deck_geometry_received
+        ):
+            self.get_logger().warning(
+                "IW 실측 데크 좌표 수신 전이라 도킹 이벤트를 보류합니다"
+            )
+            return
         if self._require_joint_state_feedback and self._joint_state_time is None:
             self.get_logger().warning(
                 "ForkliftB joint_states 연결 전이라 도킹 이벤트를 무시합니다"
@@ -469,6 +678,11 @@ class ForkLiftNode(Node):
                 return
             self._start_initial_load()
         elif self._mode == self.MODE_WAIT_RETURN:
+            if not self._enable_internal_return_cycle:
+                self.get_logger().info(
+                    "IW 귀환 처리는 fork_lift_return_node가 담당합니다"
+                )
+                return
             dx = self._x - self._wait_pose[0]
             dy = self._y - self._wait_pose[1]
             position_error = math.hypot(dx, dy)
@@ -498,16 +712,40 @@ class ForkLiftNode(Node):
             )
 
     def _start_initial_load(self) -> None:
-        pallet = 0
+        self._start_selected_load(0)
+
+    def _start_selected_load(self, pallet: int) -> None:
+        """초기 대기점에서 선택한 0~5번 팔레트를 집어 IW에 올린다."""
+        if (
+            self._require_iw_deck_geometry
+            and not self._iw_deck_geometry_received
+        ):
+            self.get_logger().warning(
+                "IW 실측 데크 좌표 수신 전이라 작업을 시작하지 않습니다. "
+                "Isaac의 /iwhub_0/deck_geometry 연결을 확인하세요"
+            )
+            return
+        if not 0 <= pallet < self.PALLET_COUNT:
+            self._fail(f"아직 지원하지 않는 팔레트 번호입니다: {pallet}")
+            return
         self._publish_clear(False)
-        pre_y, insert_y, _ = self._approach_y(self._rack_front_y)
-        # Pallet_00 시험에서는 GPU 기하 중심값보다 포크를 6cm 낮춰 삽입한다.
-        lift = clamp(self._rack_lift_target(pallet) - 0.06, 0.0, 2.0)
-        # 대기 위치에서 먼저 0번 팔레트 구멍 높이를 맞춘 뒤 움직인다.
+        pre_y, insert_y, stage_y = self._approach_y(self._rack_front_y)
+        # 검증 경로에서는 GPU 기하 중심값보다 포크를 6cm 낮춰 삽입한다.
+        lift = clamp(
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
+            0.0,
+            2.0,
+        )
+        pickup_raise = self._rack_pickup_raise(pallet)
+        rack_carry_lift = lift + pickup_raise
+        # 대기 위치에서 먼저 선택한 팔레트 구멍 높이를 맞춘 뒤 움직인다.
         # 랙 바로 앞에서 포크를 올리면 선반 밑면과 충돌하므로 접근 중에는
         # 이 높이를 그대로 유지한다.
-        steps = [self._lift(lift, "rack 0 hole height at wait pose")]
-        steps += self._turn_from_wait_to_rack()
+        steps = [
+            self._dock_lock(True, "lock IW at canonical handoff pose"),
+            self._lift(lift, f"rack {pallet} hole height at wait pose"),
+        ]
+        steps += self._turn_from_wait_to_rack(pallet)
         # U턴 뒤 안전 후진까지 끝난 다음에만 제한 조향 접근을 시작한다.
         # 접근 단계는 최대 회전량도 제한해 두 번째 U턴으로 이어질 수 없다.
         steps += [
@@ -515,54 +753,101 @@ class ForkLiftNode(Node):
                 self.RACK_CENTER_X[pallet],
                 pre_y,
                 self._rack_heading,
-                "steer and approach Pallet_00 front",
+                f"steer and approach Pallet_{pallet:02d} front",
             )
         ]
-        # Pallet_00을 실제 포크에 연결해 20cm 들어 올린다.
+        # 선택한 팔레트를 실제 포크에 연결한다. 2층(홀수 번호)은 상부
+        # 기둥과의 간격 때문에 5cm만, 1층은 기존처럼 20cm 들어 올린다.
         steps += [
-            self._wait(0.4, "Pallet_00 straight alignment settle"),
+            self._wait(0.4, f"Pallet_{pallet:02d} straight alignment settle"),
             self._straight_y(
                 insert_y,
                 +self._creep_drive,
-                f"rack 0 fork insert straight "
+                f"rack {pallet} fork insert straight "
                 f"{self._rack_fork_insert_travel:.2f}m",
                 expected_x=self.RACK_CENTER_X[pallet],
                 expected_yaw=self._rack_heading,
                 precise=True,
             ),
-            self._wait(0.3, "Pallet_00 insertion settle"),
-            self._coupler(True, pallet, "connect Pallet_00 to fork carriage"),
-            self._wait(0.4, "Pallet_00 coupler settle"),
+            self._wait(0.3, f"Pallet_{pallet:02d} insertion settle"),
+            self._coupler(
+                True, pallet, f"connect Pallet_{pallet:02d} to fork carriage"
+            ),
+            self._wait(0.4, f"Pallet_{pallet:02d} coupler settle"),
         ]
         # 연결 후 총 20cm 상승은 유지하되 2cm씩 나눠 급격히 튀지 않게 올린다.
         steps += [
             self._lift(
-                lift + self._pickup_raise * index / 10.0,
-                f"rack 0 pallet slow raise {index * 2}cm",
+                lift + pickup_raise * index / 10.0,
+                f"rack {pallet} pallet slow raise "
+                f"{pickup_raise * index / 10.0 * 100.0:.1f}cm",
             )
             for index in range(1, 11)
         ]
         steps += [
-            self._wait(0.8, "Pallet_00 lifted hold"),
+            self._wait(0.8, f"Pallet_{pallet:02d} lifted hold"),
         ]
-        # 팔레트 연결과 20cm 상승을 유지한 채 랙에서 충분히 후진한 다음,
-        # 기존 반경 1.2m 궤적으로 U턴을 정확히 한 번만 수행한다.
-        steps += self._turn_from_rack_to_wait()
-        steps += self._move_wait_steps()
+        # 2층 팔레트는 5cm 든 상태로 랙에서 직선 후진해 완전히 빠져나온
+        # 뒤에만 IW 운반 높이로 낮춘다. 높은 상태로 회전하면 벽과 충돌한다.
+        if pallet % 2 == 1:
+            transport_lift = self._amr_lift_target() + pickup_raise
+            lower_distance = max(0.0, rack_carry_lift - transport_lift)
+            lower_steps = max(1, math.ceil(lower_distance / 0.02))
+            steps += [
+                self._straight_y(
+                    stage_y,
+                    -self._creep_drive,
+                    f"rack {pallet} loaded reverse clear of upper rack",
+                    expected_x=self.RACK_CENTER_X[pallet],
+                    expected_yaw=self._rack_heading,
+                    precise=True,
+                ),
+                self._wait(0.4, f"Pallet_{pallet:02d} clear of rack settle"),
+            ]
+            steps += [
+                self._lift(
+                    rack_carry_lift
+                    + (transport_lift - rack_carry_lift) * index / lower_steps,
+                    f"Pallet_{pallet:02d} lower after reverse "
+                    f"{index}/{lower_steps}",
+                )
+                for index in range(1, lower_steps + 1)
+            ]
+            steps += [
+                self._wait(0.5, f"Pallet_{pallet:02d} safe transport height settle")
+            ]
+            carry_lift = transport_lift
+        else:
+            carry_lift = rack_carry_lift
+
+        # 가운데 랙(2·3번)과 오른쪽 랙(4·5번)은 각 랙의 좌우 위치에 맞춘
+        # 두 번의 90° 회전 경로로 복귀한다. 0·1번만 기존 U턴을 유지한다.
+        if pallet in (2, 3):
+            steps += self._stable_center_rack_to_wait(pallet)
+        elif pallet in (4, 5):
+            steps += self._stable_right_rack_to_wait(pallet)
+        else:
+            steps += self._turn_from_rack_to_wait(pallet)
+            steps += self._move_wait_steps()
+        # 팔레트별 복귀 경로의 누적 오차를 제거한 뒤에만 IW로 진입한다.
+        steps += [self._iw_axis_gate(pallet)]
         # 여기까지가 이미 검증된 픽업·복귀 경로다. 대기점에서 포크가 IW(-Y)를
         # 향한 상태를 그대로 이용해 조향 없이 상차하고 다시 대기점으로 후진한다.
         steps += self._place_initial_pallet_on_amr(
             pallet,
-            carry_lift=lift + self._pickup_raise,
+            carry_lift=carry_lift,
         )
         steps += [
             self._event("loaded_on_amr", pallet),
             self._event("forklift_clear", pallet),
         ]
+        self._current_pallet = pallet
         self._start_queue(
             steps,
             result_mode=self.MODE_WAIT_RETURN,
-            status="Pallet_00 픽업·단일 U턴·IW 상차 자동작업 시작",
+            status=(
+                f"Pallet_{pallet:02d} 선택 완료: 픽업·단일 U턴·IW 상차 시작"
+            ),
         )
 
     def _start_return_cycle(self) -> None:
@@ -665,12 +950,17 @@ class ForkLiftNode(Node):
             ),
         ]
 
-    def _turn_from_wait_to_rack(self) -> list[Step]:
-        """대기점 후진 → 단 한 번 U턴 → 조향 0° 안전 후진."""
-        steer, _, turn_x = self._rack_u_turn_geometry()
+    def _turn_from_wait_to_rack(self, pallet: int = 0) -> list[Step]:
+        """선택 랙 방향으로 대기점 후진 → 단 한 번 U턴 → 안전 후진."""
+        steer, _, turn_x = self._rack_u_turn_geometry(pallet)
         drive = min(1.5, self._max_drive)
         wait_x, wait_y, wait_yaw = self._wait_pose
         turn_y = wait_y + self._u_turn_clearance
+        # 가운데/오른쪽 랙은 최소 회전반경 때문에 U턴 종료 X가 랙 중심과
+        # 약 0.69m 어긋난다. 입구 쪽으로 1m 더 물러나 완만한 합류 거리를 만든다.
+        post_turn_reverse = self._post_u_turn_reverse + (
+            1.0 if pallet >= 2 else 0.0
+        )
         return [
             self._move(
                 wait_x,
@@ -680,29 +970,28 @@ class ForkLiftNode(Node):
                 creep=True,
                 precise=True,
             ),
-            # -Y를 보던 차가 우측으로 반 바퀴 돌아 +Y를 보게 된다. 회전 종료
-            # X는 wait_x - 2R라서 왼쪽의 Pallet_00 접근선과도 가깝다.
+            # -Y를 보던 차가 선택 랙 방향으로 반 바퀴 돌아 +Y를 보게 된다.
             self._arc(
                 +drive,
                 steer,
                 self._rack_heading,
-                "right U-turn toward Pallet_00",
+                f"U-turn toward Pallet_{pallet:02d}",
             ),
             # U턴 종료 즉시 조향을 풀고 입구 쪽으로 물러난다. 다음 단계가
             # 조향 접근을 시작하기 전에 랙/뒷벽과 0.8m의 추가 여유를 만든다.
             self._straight_y(
-                turn_y - self._post_u_turn_reverse,
+                turn_y - post_turn_reverse,
                 -self._creep_drive,
-                "reverse straight after the single U-turn",
+                f"reverse straight for Pallet_{pallet:02d} alignment clearance",
                 expected_x=turn_x,
                 expected_yaw=self._rack_heading,
                 precise=True,
             ),
         ]
 
-    def _turn_from_rack_to_wait(self) -> list[Step]:
-        """팔레트를 든 채 후진한 뒤 입구 중앙축으로 좁은 우측 U턴."""
-        steer, _, turn_x = self._rack_u_turn_geometry()
+    def _turn_from_rack_to_wait(self, pallet: int = 0) -> list[Step]:
+        """선택 팔레트를 든 채 후진한 뒤 입구 중앙축으로 좁은 U턴."""
+        steer, _, turn_x = self._rack_u_turn_geometry(pallet)
         drive = min(1.5, self._max_drive)
         wait_x, wait_y, _ = self._wait_pose
         turn_y = wait_y + self._u_turn_clearance
@@ -716,20 +1005,164 @@ class ForkLiftNode(Node):
                 "reverse loaded pallet to U-turn staging",
                 creep=True,
             ),
-            # 시작 X=wait_x-2R에서 우측 반원을 그리면 종료 X=wait_x가 되어
-            # 상하차 위치와 같은 입구 중앙축으로 바로 정렬된다.
+            # 선택 랙별 회전 시작 X에서 역방향 반원을 그리면 종료 X=wait_x가
+            # 되어 상하차 위치와 같은 입구 중앙축으로 정렬된다.
             self._arc(
                 +drive,
                 steer,
                 self._amr_heading,
-                "right U-turn toward AMR",
+                f"U-turn from Pallet_{pallet:02d} toward AMR",
             ),
         ]
 
-    def _rack_u_turn_geometry(self) -> tuple[float, float, float]:
-        """U턴 종료 X를 Pallet_00 접근축에 맞춘 조향각·반경·시작 X."""
+    def _stable_center_rack_to_wait(self, pallet: int) -> list[Step]:
+        """2·3번 랙에서 우회전 90° + 후진 좌조향 90°로 복귀한다."""
+        rack_x = self.RACK_CENTER_X[pallet]
+        wait_x, wait_y, wait_yaw = self._wait_pose
+        finish_y = wait_y + self._u_turn_clearance
+        turn_drive = min(1.2, self._max_drive)
+        second_radius = self._wheelbase / math.tan(self._max_steer)
+        first_radius = second_radius + (wait_x - rack_x)
+        first_steer = -math.atan(self._wheelbase / first_radius)
+        second_steer = +self._max_steer
+        start_y = finish_y - first_radius - second_radius
+        precise_align_y = wait_y - 0.9
+        return [
+            # 랙에서 충분히 멀어질 때까지 후진 방향을 고정하되, 포크 삽입
+            # 과정에서 생긴 X·yaw 오차를 최대 ±8°의 작은 조향으로 보정한다.
+            self._lane_align(
+                rack_x,
+                start_y,
+                self._rack_heading,
+                -self._creep_drive,
+                f"Pallet_{pallet:02d} long reverse alignment before 90deg turn",
+                steering_limit=math.radians(8.0),
+            ),
+            # 넓은 반경으로 전진 우회전 90°. 종료 시 차체는 +X를 본다.
+            self._arc(
+                +turn_drive,
+                first_steer,
+                0.0,
+                f"Pallet_{pallet:02d} forward right 90deg turn",
+                rotation=math.pi / 2.0,
+            ),
+            # 후진하면서 왼쪽 조향을 주면 차체 yaw는 우측으로 90° 더 변한다.
+            # 두 반경 차를 0.8m로 맞춰 종료 X가 정확히 wait_x=0이 된다.
+            self._arc(
+                -turn_drive,
+                second_steer,
+                self._amr_heading,
+                f"Pallet_{pallet:02d} reverse left-steer 90deg alignment",
+                rotation=math.pi / 2.0,
+            ),
+            # 실제 물리 오차를 줄일 수 있도록 대기점을 0.9m 지나칠 때까지
+            # 전진하면서 X=0과 yaw=-90°를 정밀하게 능동 보정한다.
+            self._lane_align(
+                wait_x,
+                precise_align_y,
+                wait_yaw,
+                +self._creep_drive,
+                f"Pallet_{pallet:02d} precise alignment to IW loading axis",
+                steering_limit=math.radians(10.0),
+                # 이 단계는 안전한 대기축 근처까지 복귀만 담당한다.
+                # 최종 3cm/2° 판정과 보정은 모든 팔레트 공통 gate가 수행한다.
+                position_tolerance=0.10,
+                yaw_tolerance=math.radians(5.0),
+            ),
+            # 정밀 정렬 후에는 조향을 완전히 풀고 대기 위치까지 직선 후진한다.
+            self._straight_y(
+                wait_y,
+                -self._creep_drive,
+                f"Pallet_{pallet:02d} straight reverse to exact wait pose",
+                expected_x=wait_x,
+                expected_yaw=wait_yaw,
+                precise=True,
+            ),
+            self._pose_check(
+                wait_x,
+                wait_y,
+                wait_yaw,
+                f"Pallet_{pallet:02d} stable wait pose check",
+            ),
+        ]
+
+    def _stable_right_rack_to_wait(self, pallet: int) -> list[Step]:
+        """4·5번 랙에서 좌회전 90° + 후진 우조향 90°로 복귀한다.
+
+        오른쪽 벽 가까이에서 180° U턴하지 않는다. 랙에서 직선 후진해
+        회전 공간을 확보하고 두 회전을 모두 벽 반대쪽으로 수행한 뒤,
+        대기 위치와 같은 X=0, yaw=-90° 축에 합류한다.
+        """
+        rack_x = self.RACK_CENTER_X[pallet]
+        wait_x, wait_y, wait_yaw = self._wait_pose
+        finish_y = wait_y + self._u_turn_clearance
+        turn_drive = min(1.2, self._max_drive)
+
+        # 2·3번 경로를 X축으로 대칭시킨 기하다. 첫 회전을 더 큰 반경으로
+        # 수행하고 두 반경의 차를 rack_x-wait_x=0.8m로 맞추면 두 번째
+        # 회전 종료점이 공통 대기축 X=0에 놓인다.
+        second_radius = self._wheelbase / math.tan(self._max_steer)
+        first_radius = second_radius + (rack_x - wait_x)
+        first_steer = +math.atan(self._wheelbase / first_radius)
+        second_steer = -self._max_steer
+        start_y = finish_y - first_radius - second_radius
+        precise_align_y = wait_y - 0.9
+
+        return [
+            self._lane_align(
+                rack_x,
+                start_y,
+                self._rack_heading,
+                -self._creep_drive,
+                f"Pallet_{pallet:02d} straight reverse clear of right rack",
+                steering_limit=math.radians(8.0),
+            ),
+            # +Y에서 왼쪽으로 90° 회전해 차체를 -X, 즉 통로 쪽으로 향한다.
+            self._arc(
+                +turn_drive,
+                first_steer,
+                math.pi,
+                f"Pallet_{pallet:02d} forward left 90deg away from wall",
+                rotation=math.pi / 2.0,
+            ),
+            # 통로 쪽에서 후진 우조향으로 나머지 90°를 맞춰 -Y를 향한다.
+            self._arc(
+                -turn_drive,
+                second_steer,
+                self._amr_heading,
+                f"Pallet_{pallet:02d} reverse right-steer 90deg to wait axis",
+                rotation=math.pi / 2.0,
+            ),
+            self._lane_align(
+                wait_x,
+                precise_align_y,
+                wait_yaw,
+                +self._creep_drive,
+                f"Pallet_{pallet:02d} precise alignment to IW loading axis",
+                steering_limit=math.radians(10.0),
+                position_tolerance=0.10,
+                yaw_tolerance=math.radians(5.0),
+            ),
+            self._straight_y(
+                wait_y,
+                -self._creep_drive,
+                f"Pallet_{pallet:02d} straight reverse to exact wait pose",
+                expected_x=wait_x,
+                expected_yaw=wait_yaw,
+                precise=True,
+            ),
+            self._pose_check(
+                wait_x,
+                wait_y,
+                wait_yaw,
+                f"Pallet_{pallet:02d} stable wait pose check",
+            ),
+        ]
+
+    def _rack_u_turn_geometry(self, pallet: int = 0) -> tuple[float, float, float]:
+        """U턴 종료 X를 선택 팔레트 접근축에 가깝게 맞춘 기하를 계산한다."""
         wait_x = self._wait_pose[0]
-        rack_x = self.RACK_CENTER_X[0]
+        rack_x = self.RACK_CENTER_X[pallet]
         lateral = rack_x - wait_x
         radius = max(abs(lateral) / 2.0, 0.10)
         steer_magnitude = min(
@@ -750,7 +1183,7 @@ class ForkLiftNode(Node):
 
         # 첫 상차 때 사용한 0번 랙 삽입·운반 높이를 그대로 재사용한다.
         rack_place_lift = clamp(
-            self._rack_lift_target(pallet) - 0.06,
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
             0.0,
             2.0,
         )
@@ -787,7 +1220,9 @@ class ForkLiftNode(Node):
                 precise=True,
             ),
             self._wait(0.4, "IW Pallet_00 insertion settle"),
-            self._coupler(True, pallet, "connect IW Pallet_00 to fork carriage"),
+            self._pallet_owner(
+                "fork", pallet, "transfer IW Pallet_00 from deck to fork"
+            ),
             self._wait(0.4, "IW Pallet_00 coupler settle"),
         ] + slow_raise + [
             self._wait(0.8, "IW Pallet_00 lifted hold"),
@@ -819,7 +1254,7 @@ class ForkLiftNode(Node):
         rack_x = self.RACK_CENTER_X[pallet]
         pre_y, insert_y, _ = self._approach_y(self._rack_front_y)
         rack_place_lift = clamp(
-            self._rack_lift_target(pallet) - 0.06,
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
             0.0,
             2.0,
         )
@@ -884,17 +1319,19 @@ class ForkLiftNode(Node):
         rack_x = self.RACK_CENTER_X[pallet]
         pre_y, insert_y, stage_y = self._approach_y(self._rack_front_y)
         rack_lift = clamp(
-            self._rack_lift_target(pallet) - 0.06,
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
             0.0,
             2.0,
         )
-        rack_carry_lift = rack_lift + self._pickup_raise
-        amr_carry_lift = self._amr_lift_target() + self._pickup_raise
+        pickup_raise = self._rack_pickup_raise(pallet)
+        rack_carry_lift = rack_lift + pickup_raise
+        amr_carry_lift = self._amr_place_lift_target() + pickup_raise
 
         slow_raise = [
             self._lift(
-                rack_lift + self._pickup_raise * index / 10.0,
-                f"rack {pallet} pallet slow raise {index * 2}cm",
+                rack_lift + pickup_raise * index / 10.0,
+                f"rack {pallet} pallet slow raise "
+                f"{pickup_raise * index / 10.0 * 100.0:.1f}cm",
             )
             for index in range(1, 11)
         ]
@@ -1008,7 +1445,7 @@ class ForkLiftNode(Node):
         x, center_y, _ = self._amr_hole
         insert_y = self._amr_insert_y(center_y)
         wait_x, wait_y, wait_yaw = self._wait_pose
-        lift = self._amr_lift_target()
+        lift = self._amr_place_lift_target()
         return self._turn_from_rack_to_wait() + [
             self._move(wait_x, wait_y, wait_yaw, "AMR straight approach start loaded"),
             self._lift(lift + self._pickup_raise, "AMR carry height"),
@@ -1044,7 +1481,7 @@ class ForkLiftNode(Node):
         _, center_y, _ = self._amr_hole
         insert_y = self._amr_insert_y(center_y)
         wait_x, wait_y, wait_yaw = self._wait_pose
-        place_lift = self._amr_lift_target()
+        place_lift = self._amr_place_lift_target()
 
         # 랙 운반 높이에서 IW 구멍 중심 높이까지 약 2cm씩 내린다. 현재 기본값은
         # 0.32407m -> 0.24378m라서 정확히 5단계로 천천히 내려간다.
@@ -1072,10 +1509,10 @@ class ForkLiftNode(Node):
             self._wait(0.5, "IW loaded placement settle"),
         ] + slow_lower + [
             self._wait(0.8, f"Pallet_{pallet:02d} supported on IW"),
-            self._coupler(
-                False,
+            self._pallet_owner(
+                "deck",
                 pallet,
-                f"release Pallet_{pallet:02d} on IW",
+                f"transfer Pallet_{pallet:02d} from fork to IW deck",
             ),
             self._wait(
                 0.8,
@@ -1096,6 +1533,13 @@ class ForkLiftNode(Node):
                 wait_y,
                 wait_yaw,
                 "IW wait pose final alignment check",
+                # 직선 인출 뒤 7~8cm 정적 오차는 기본 도착 허용치 안이다.
+                # 3cm로만 검사하면 정상 상차 뒤에도 ERROR로 끝난다.
+                position_tolerance=self._position_tol,
+                yaw_tolerance=math.radians(1.0),
+            ),
+            self._dock_lock(
+                False, "release IW after forklift clears handoff axis"
             ),
         ]
 
@@ -1122,8 +1566,22 @@ class ForkLiftNode(Node):
     def _rack_lift_target(self, pallet: int) -> float:
         return clamp(self.RACK_HOLE_Z[pallet] - self._fork_zero_z, 0.0, 2.0)
 
+    def _rack_pickup_raise(self, pallet: int) -> float:
+        """1층은 20cm, 상부 랙(1·3·5번)은 충돌 방지용 5cm를 반환한다."""
+        if pallet % 2 == 1:
+            return self._upper_rack_pickup_raise
+        return self._pickup_raise
+
     def _amr_lift_target(self) -> float:
         return clamp(self._amr_hole[2] - self._fork_zero_z, 0.0, 2.0)
+
+    def _amr_place_lift_target(self) -> float:
+        """랙에서 6cm 낮게 연결된 팔레트를 IW 데크에 놓는 포크 높이."""
+        return clamp(
+            self._amr_lift_target() - self.RACK_PICKUP_UNDERSHOOT,
+            0.0,
+            2.0,
+        )
 
     # ------------------------------------------------------------------
     # Step 생성 헬퍼
@@ -1164,6 +1622,8 @@ class ForkLiftNode(Node):
         steering: float,
         target_yaw: float,
         label: str,
+        *,
+        rotation: float = math.pi,
     ) -> Step:
         yaw_rate = abs(
             drive
@@ -1171,11 +1631,11 @@ class ForkLiftNode(Node):
             / self._wheelbase
             * math.tan(steering)
         )
-        # 180°에 필요한 이론 시간에 2초 여유를 둔 watchdog이다. 이 시간이
-        # 지났다고 U턴 성공으로 처리하지 않고, 실제 pose가 180°에 도달하지
+        # 요청 회전각에 필요한 이론 시간에 2초 여유를 둔 watchdog이다. 이 시간이
+        # 지났다고 성공으로 처리하지 않고, 실제 pose가 목표에 도달하지
         # 못했으면 안전 실패시킨다.
         hard_stop = (
-            math.pi / yaw_rate + 2.0 if yaw_rate > 1e-6 else 1.0
+            rotation / yaw_rate + 2.0 if yaw_rate > 1e-6 else 1.0
         )
         return Step(
             kind="arc",
@@ -1183,6 +1643,7 @@ class ForkLiftNode(Node):
             yaw=wrap_angle(target_yaw),
             drive=drive,
             steering=steering,
+            max_rotation=rotation,
             duration=min(hard_stop, self._u_turn_timeout),
             yaw_tolerance=math.radians(3.0),
             timeout=self._u_turn_timeout,
@@ -1194,6 +1655,8 @@ class ForkLiftNode(Node):
         y: float,
         yaw: float,
         label: str,
+        *,
+        attempt: int = 0,
     ) -> Step:
         """두 번째 U턴 없이 제한 조향으로 Pallet_00 정면에 접근한다."""
         return Step(
@@ -1204,10 +1667,92 @@ class ForkLiftNode(Node):
             yaw=yaw,
             max_drive=min(1.2, self._max_drive),
             max_steering=self._pallet_approach_max_steer,
-            max_rotation=math.radians(45.0),
+            # 가운데/오른쪽 랙 S자 합류는 중심선 진입과 차체 복원 회전량을
+            # 모두 누적하므로 최대 약 60°가 필요하다. 70°에서 안전 제한한다.
+            max_rotation=math.radians(70.0),
+            # 목표 Y 도달은 기존 삽입 허용오차를 유지하고, 랙 중심 X 오차는
+            # 별도의 더 엄격한 기준으로 판정한다.
             position_tolerance=self._insert_tol,
-            yaw_tolerance=self._yaw_tol,
+            x_tolerance=self._rack_entry_x_tol,
+            yaw_tolerance=self._rack_entry_yaw_tol,
             timeout=min(30.0, self._step_timeout),
+            attempt=attempt,
+        )
+
+    def _alignment_recovery(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        label: str,
+    ) -> Step:
+        """큰 회전 없이 작은 조향만 사용해 후진 정렬하는 복구 단계."""
+        return Step(
+            kind="alignment_recovery",
+            label=label,
+            x=x,
+            y=y,
+            yaw=wrap_angle(yaw),
+            drive=-self._creep_drive,
+            max_steering=self._alignment_recovery_max_steer,
+            position_tolerance=max(self._position_tol, 0.08),
+            yaw_tolerance=math.radians(15.0),
+            timeout=min(30.0, self._step_timeout),
+        )
+
+    def _lane_align(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        drive: float,
+        label: str,
+        *,
+        steering_limit: float | None = None,
+        position_tolerance: float | None = None,
+        yaw_tolerance: float | None = None,
+        validate_alignment: bool = True,
+    ) -> Step:
+        """진행 방향을 고정한 채 작은 S자로 지정 X축에 합류한다."""
+        return Step(
+            kind="lane_align",
+            label=label,
+            x=x,
+            y=y,
+            yaw=wrap_angle(yaw),
+            drive=drive,
+            max_steering=min(
+                math.radians(20.0) if steering_limit is None else steering_limit,
+                self._max_steer,
+            ),
+            position_tolerance=(
+                max(self._position_tol, 0.08)
+                if position_tolerance is None
+                else position_tolerance
+            ),
+            yaw_tolerance=(
+                math.radians(3.0)
+                if yaw_tolerance is None
+                else yaw_tolerance
+            ),
+            timeout=min(30.0, self._step_timeout),
+            validate_alignment=validate_alignment,
+        )
+
+    def _iw_axis_gate(self, pallet: int, *, attempt: int = 0) -> Step:
+        """IW 진입 전에 모든 팔레트에 같은 정밀 축 조건을 적용한다."""
+        wait_x, wait_y, wait_yaw = self._wait_pose
+        return Step(
+            kind="iw_axis_gate",
+            label=f"Pallet_{pallet:02d} common IW axis gate",
+            x=wait_x,
+            y=wait_y,
+            yaw=wait_yaw,
+            position_tolerance=0.02,
+            yaw_tolerance=math.radians(1.0),
+            pallet_id=pallet,
+            attempt=attempt,
+            timeout=5.0,
         )
 
     def _straight_y(
@@ -1235,7 +1780,16 @@ class ForkLiftNode(Node):
             timeout=self._step_timeout,
         )
 
-    def _pose_check(self, x: float, y: float, yaw: float, label: str) -> Step:
+    def _pose_check(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        label: str,
+        *,
+        position_tolerance: float | None = None,
+        yaw_tolerance: float | None = None,
+    ) -> Step:
         """추가 주행 없이 현재 pose가 목표 허용오차 안인지 확인한다."""
         return Step(
             kind="pose_check",
@@ -1243,8 +1797,16 @@ class ForkLiftNode(Node):
             x=x,
             y=y,
             yaw=wrap_angle(yaw),
-            position_tolerance=max(self._position_tol, 0.10),
-            yaw_tolerance=max(self._yaw_tol, math.radians(10.0)),
+            position_tolerance=(
+                max(self._position_tol, 0.10)
+                if position_tolerance is None
+                else position_tolerance
+            ),
+            yaw_tolerance=(
+                max(self._yaw_tol, math.radians(10.0))
+                if yaw_tolerance is None
+                else yaw_tolerance
+            ),
             timeout=2.0,
         )
 
@@ -1256,6 +1818,30 @@ class ForkLiftNode(Node):
             label=label,
             attached=attached,
             pallet_id=pallet,
+            timeout=5.0,
+        )
+
+    @staticmethod
+    def _pallet_owner(owner: str, pallet: int, label: str) -> Step:
+        """Isaac에서 팔레트를 포크 또는 IW 데크로 원자적으로 넘긴다."""
+        if owner not in ("fork", "deck", "none"):
+            raise ValueError(f"지원하지 않는 팔레트 owner: {owner}")
+        return Step(
+            kind="pallet_owner",
+            label=label,
+            attached=owner == "fork",
+            deck_attached=owner == "deck",
+            pallet_id=pallet,
+            timeout=5.0,
+        )
+
+    @staticmethod
+    def _dock_lock(locked: bool, label: str) -> Step:
+        """IW를 canonical dock pose에 고정하거나 이동을 위해 해제한다."""
+        return Step(
+            kind="dock_lock",
+            label=label,
+            attached=locked,
             timeout=5.0,
         )
 
@@ -1275,6 +1861,7 @@ class ForkLiftNode(Node):
         dt = clamp(now - self._last_tick, 0.0, 0.2)
         self._last_tick = now
         self._integrate_dead_reckoning(dt)
+        self._process_console_requests()
 
         if (
             self._auto_start_at is not None
@@ -1289,6 +1876,9 @@ class ForkLiftNode(Node):
             ) or (
                 self._require_pose_feedback
                 and self._pose_feedback_time is None
+            ) or (
+                self._require_iw_deck_geometry
+                and not self._iw_deck_geometry_received
             ):
                 self._publish_command(0.0, 0.0)
                 return
@@ -1297,7 +1887,9 @@ class ForkLiftNode(Node):
             self._handle_amr_docked()
 
         if self._mode != self.MODE_BUSY or not self._steps:
-            self._publish_command(0.0, 0.0)
+            # 별도 회수 노드가 같은 명령 토픽의 제어권을 이어받을 수 있도록
+            # 유휴 상태에서는 반복 발행하지 않는다. 큐 종료·오류 진입 시에는
+            # _finish_queue/_fail이 정지 명령을 한 번 확실히 보낸다.
             return
 
         if self._require_joint_state_feedback and (
@@ -1327,6 +1919,12 @@ class ForkLiftNode(Node):
             done = self._run_straight_y(step, now)
         elif step.kind == "approach":
             done = self._run_pallet_approach(step)
+        elif step.kind == "alignment_recovery":
+            done = self._run_alignment_recovery(step, now)
+        elif step.kind == "lane_align":
+            done = self._run_lane_align(step, now)
+        elif step.kind == "iw_axis_gate":
+            done = self._run_iw_axis_gate(step)
         elif step.kind == "pose_check":
             done = self._run_pose_check(step, now)
         elif step.kind == "lift":
@@ -1334,6 +1932,16 @@ class ForkLiftNode(Node):
         elif step.kind == "coupler":
             self._pallet_target_command = step.pallet_id
             self._pallet_attached_command = step.attached
+            self._publish_command(0.0, 0.0)
+            done = elapsed >= 0.25
+        elif step.kind == "pallet_owner":
+            self._pallet_target_command = step.pallet_id
+            self._pallet_attached_command = step.attached
+            self._pallet_deck_attached_command = step.deck_attached
+            self._publish_command(0.0, 0.0)
+            done = elapsed >= 0.25
+        elif step.kind == "dock_lock":
+            self._iw_dock_locked_command = step.attached
             self._publish_command(0.0, 0.0)
             done = elapsed >= 0.25
         elif step.kind == "wait":
@@ -1411,27 +2019,29 @@ class ForkLiftNode(Node):
         if bucket > self._arc_report_bucket:
             self._arc_report_bucket = bucket
             self.get_logger().info(
-                f"[U-TURN] actual rotation={math.degrees(self._arc_progress):.1f}deg"
+                f"[ARC] actual rotation={math.degrees(self._arc_progress):.1f}deg"
             )
 
         yaw_error = abs(wrap_angle(step.yaw - self._yaw))
-        turned_half_circle = (
-            self._arc_progress >= math.pi - step.yaw_tolerance
-            and yaw_error <= max(step.yaw_tolerance, math.radians(5.0))
+        target_rotation = step.max_rotation if step.max_rotation > 0.0 else math.pi
+        reached_rotation = (
+            self._arc_progress >= target_rotation - step.yaw_tolerance
+            and yaw_error <= step.yaw_tolerance
         )
         elapsed = now - self._step_started
         hard_stop = step.duration > 0.0 and elapsed >= step.duration
-        if turned_half_circle:
+        if reached_rotation:
             self._publish_command(0.0, 0.0)
             self.get_logger().info(
-                f"[U-TURN] complete once at "
+                f"[ARC] target={math.degrees(target_rotation):.0f}deg complete at "
                 f"{math.degrees(self._arc_progress):.1f}deg (actual pose)"
             )
             return True
-        if self._arc_progress > math.pi + math.radians(10.0):
+        if self._arc_progress > target_rotation + math.radians(10.0):
             self._publish_command(0.0, 0.0)
             self._fail(
-                "U턴이 목표 180°를 10° 이상 초과해 안전 정지했습니다: "
+                f"회전이 목표 {math.degrees(target_rotation):.0f}°를 "
+                "10° 이상 초과해 안전 정지했습니다: "
                 f"rotation={math.degrees(self._arc_progress):.1f}deg, "
                 f"yaw_error={math.degrees(yaw_error):.1f}deg"
             )
@@ -1439,7 +2049,8 @@ class ForkLiftNode(Node):
         if hard_stop:
             self._publish_command(0.0, 0.0)
             self._fail(
-                "U턴 watchdog 시간 내 실제 180° pose에 도달하지 못했습니다: "
+                f"회전 watchdog 시간 내 실제 "
+                f"{math.degrees(target_rotation):.0f}° pose에 도달하지 못했습니다: "
                 f"rotation={math.degrees(self._arc_progress):.1f}deg, "
                 f"yaw_error={math.degrees(yaw_error):.1f}deg"
             )
@@ -1448,7 +2059,8 @@ class ForkLiftNode(Node):
         return False
 
     def _run_pallet_approach(self, step: Step) -> bool:
-        """U턴 후 안전 후진점에서 Pallet_00 정면까지만 제한 조향 전진."""
+        """U턴 후 선택 랙 중심선으로 완만한 S자 합류를 수행한다."""
+        max_alignment_retries = self._max_reentry_attempts
         if self._arc_last_yaw is None:
             self._arc_last_yaw = self._yaw
         else:
@@ -1459,39 +2071,283 @@ class ForkLiftNode(Node):
         if self._arc_progress >= step.max_rotation:
             self._publish_command(0.0, 0.0)
             self._fail(
-                "Pallet_00 접근 조향이 45°를 초과해 두 번째 회전을 안전 정지했습니다"
+                "팔레트 접근 누적 조향이 70°를 초과해 안전 정지했습니다"
             )
             return False
 
         dx = step.x - self._x
         dy = step.y - self._y
-        distance = math.hypot(dx, dy)
+        yaw_error = wrap_angle(step.yaw - self._yaw)
 
-        # 목표 Y에 도달하면 횡오차가 조금 남아도 즉시 정지한다. 목표를 지나
-        # 다시 돌아오는 원 궤적이 벽 충돌의 원인이므로 재회전은 금지한다.
-        if self._y >= step.y - step.position_tolerance or distance <= step.position_tolerance:
+        # 랙 앞을 지나친 뒤 재회전하면 충돌할 수 있으므로 목표 Y에서 반드시
+        # 정지한다. 이때 직선 삽입 가능한 횡·각도 오차인지 함께 검증한다.
+        if self._y >= step.y - step.position_tolerance:
             self._publish_command(0.0, 0.0)
-            self.get_logger().info(
-                f"[APPROACH] stop at ({self._x:.3f}, {self._y:.3f}), "
-                f"lateral error={dx:.3f}m"
+            if (
+                abs(dx) <= step.x_tolerance
+                and abs(yaw_error) <= step.yaw_tolerance
+            ):
+                self.get_logger().info(
+                    f"[APPROACH] aligned at ({self._x:.3f}, {self._y:.3f}), "
+                    f"x_error={dx:.3f}m, "
+                    f"yaw_error={math.degrees(yaw_error):.1f}deg"
+                )
+                return True
+            if step.attempt < max_alignment_retries:
+                recovery_y = step.y - self._alignment_recovery_distance
+                recovery = self._alignment_recovery(
+                    step.x,
+                    recovery_y,
+                    step.yaw,
+                    f"alignment retry {step.attempt + 1}/"
+                    f"{max_alignment_retries}: reverse 2.5m with small steering",
+                )
+                retry = self._approach_pallet(
+                    step.x,
+                    step.y,
+                    step.yaw,
+                    f"alignment retry {step.attempt + 1}/"
+                    f"{max_alignment_retries}: re-enter rack centerline",
+                    attempt=step.attempt + 1,
+                )
+                # 현재 단계 뒤에 후진 복구와 재진입을 예약한다. 각 재진입은
+                # 같은 랙 앞 목표를 사용하므로 삽입점 쪽으로 계속 전진하지 않는다.
+                self._steps.insert(1, retry)
+                self._steps.insert(1, recovery)
+                self.get_logger().warning(
+                    f"[ALIGNMENT RETRY {step.attempt + 1}/"
+                    f"{max_alignment_retries}] "
+                    f"x_error={dx:.3f}m, "
+                    f"yaw_error={math.degrees(yaw_error):.1f}deg: "
+                    f"{self._alignment_recovery_distance:.1f}m 후진 후 재진입"
+                )
+                self._publish_status(
+                    f"정렬 재시도 {step.attempt + 1}/"
+                    f"{max_alignment_retries}: 작은 조향으로 2.5m 후진 후 재진입"
+                )
+                return True
+            self._fail(
+                f"랙 중심선 정렬 {max_alignment_retries}회 재시도 실패, "
+                "현재 위치에서 정지: "
+                f"x_error={dx:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg"
             )
-            return True
+            return False
 
-        path_heading = math.atan2(dy, dx)
-        heading_error = wrap_angle(path_heading - self._yaw)
-        # 정상 궤적은 U턴 종료 후 거의 +Y 정렬이므로 작은 S자 보정만 필요하다.
-        # ±35° 제한으로 이 단계가 또 하나의 U턴이 되는 것을 막는다.
+        # 단일 목표점을 계속 바라보면 도착 직전에 조향이 급격히 커진다.
+        # 대신 +Y 랙 축을 기준으로 횡오차에 따른 작은 진입각을 만들고,
+        # 횡오차가 줄수록 목표 각도를 +Y로 되돌려 부드러운 S자를 만든다.
+        if step.attempt == 0:
+            # 최초 접근은 기존의 완만한 S자 궤적을 유지한다.
+            straighten_ratio = clamp((2.5 - dy) / 1.5, 0.0, 1.0)
+            lookahead = 1.5 + 10.5 * straighten_ratio
+        else:
+            # 재진입에서는 마지막 1.0m까지 X 보정을 유지한다.
+            # 이후에도 미리보기를 8m까지만 늘려 조향을 완전히 약화시키지
+            # 않으면서 차체 각도를 3° 안으로 함께 수렴시킨다.
+            straighten_ratio = clamp((1.0 - dy) / 0.7, 0.0, 1.0)
+            lookahead = 0.8 + 7.2 * straighten_ratio
+        desired_heading = wrap_angle(step.yaw - math.atan2(dx, lookahead))
+        heading_error = wrap_angle(desired_heading - self._yaw)
         steering = clamp(
-            1.4 * heading_error,
+            1.25 * heading_error,
             -step.max_steering,
             step.max_steering,
         )
         drive = min(
             step.max_drive,
-            max(self._creep_drive, distance / self._wheel_radius * 0.35),
+            max(self._creep_drive, max(0.0, dy) / self._wheel_radius * 0.25),
         )
         self._publish_command(drive, steering)
         return False
+
+    def _run_alignment_recovery(self, step: Step, now: float) -> bool:
+        """최대 8°의 작은 조향으로만 2.5m 후진해 재진입 공간을 만든다."""
+        del now  # 다른 단계와 같은 호출 형식을 유지한다.
+        dx = step.x - self._x
+        yaw_error = wrap_angle(step.yaw - self._yaw)
+        remaining_y = self._y - step.y
+
+        if abs(dx) > 0.60 or abs(yaw_error) > math.radians(20.0):
+            self._fail(
+                "후진 정렬 중 안전 범위 이탈, 현재 위치에서 정지: "
+                f"x_error={dx:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg"
+            )
+            return False
+
+        if remaining_y <= step.position_tolerance:
+            self._publish_command(0.0, 0.0)
+            self.get_logger().info(
+                f"[ALIGNMENT RECOVERY] reverse complete at "
+                f"({self._x:.3f}, {self._y:.3f}), "
+                f"x_error={dx:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg"
+            )
+            return True
+
+        # 후진 진행방향은 차체 yaw의 반대다. 목표 X 쪽으로 후진하려면
+        # 차체 목표각을 반대 부호로 보정하고, 음수 속도이므로 조향 부호도
+        # 다시 뒤집어야 한다. 조향은 항상 ±8° 이내로 제한한다.
+        # 짧은 1m 미리보기로 X 오차를 조향 한도 안에서 적극 보정한다.
+        # 실제 조향 출력은 아래 clamp 때문에 여전히 ±8°를 넘지 않는다.
+        desired_yaw = wrap_angle(step.yaw + math.atan2(dx, 1.0))
+        heading_error = wrap_angle(desired_yaw - self._yaw)
+        steering = clamp(
+            -1.1 * heading_error,
+            -step.max_steering,
+            step.max_steering,
+        )
+        self._publish_command(step.drive, steering)
+        return False
+
+    def _run_lane_align(self, step: Step, now: float) -> bool:
+        """고정된 전진/후진 방향으로 중앙 X축 정렬 기동을 수행한다."""
+        del now
+        dx = step.x - self._x
+        remaining_y = abs(step.y - self._y)
+        yaw_error = wrap_angle(step.yaw - self._yaw)
+        direction = 1.0 if step.drive >= 0.0 else -1.0
+        y_velocity_sign = math.sin(self._yaw) * step.drive
+
+        if abs(dx) > 1.20 or abs(yaw_error) > math.radians(35.0):
+            self._fail(
+                "U턴 후 중앙축 정렬 안전 범위 이탈: "
+                f"x_error={dx:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg"
+            )
+            return False
+
+        reached = (
+            self._y <= step.y + step.position_tolerance
+            if y_velocity_sign < 0.0
+            else self._y >= step.y - step.position_tolerance
+        )
+        if reached:
+            self._publish_command(0.0, 0.0)
+            if not step.validate_alignment:
+                self.get_logger().info(
+                    f"[IW AXIS MANEUVER] endpoint: x_error={dx:.3f}m, "
+                    f"yaw_error={math.degrees(yaw_error):.1f}deg"
+                )
+                return True
+            aligned = (
+                abs(dx) <= step.position_tolerance
+                and abs(yaw_error) <= step.yaw_tolerance
+            )
+            if aligned:
+                self.get_logger().info(
+                    f"[LANE ALIGN] complete: x_error={dx:.3f}m, "
+                    f"yaw_error={math.degrees(yaw_error):.1f}deg"
+                )
+                return True
+            self._fail(
+                "고정 방향 X축 정렬 실패, 추가 회전 없이 정지: "
+                f"x_error={dx:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg"
+            )
+            return False
+
+        # 진행 방향은 단계 생성 시 고정한다. 후진에서는 목표 차체각과 조향
+        # 부호를 함께 반전해 같은 X 중심선을 향하도록 한다.
+        straighten_ratio = clamp((1.0 - remaining_y) / 0.7, 0.0, 1.0)
+        lookahead = 1.2 + 6.8 * straighten_ratio
+        axis_sign = 1.0 if math.sin(step.yaw) >= 0.0 else -1.0
+        desired_yaw = wrap_angle(
+            step.yaw
+            - direction * axis_sign * math.atan2(dx, lookahead)
+        )
+        heading_error = wrap_angle(desired_yaw - self._yaw)
+        steering = clamp(
+            direction * 1.2 * heading_error,
+            -step.max_steering,
+            step.max_steering,
+        )
+        self._publish_command(step.drive, steering)
+        return False
+
+    def _run_iw_axis_gate(self, step: Step) -> bool:
+        """공통 대기 자세를 검사하고 최대 다섯 번의 3점 보정을 예약한다."""
+        max_attempts = self._max_reentry_attempts
+        dx = step.x - self._x
+        dy = step.y - self._y
+        yaw_error = wrap_angle(step.yaw - self._yaw)
+        self._publish_command(0.0, 0.0)
+
+        if (
+            abs(dx) <= step.position_tolerance
+            and abs(dy) <= 0.03
+            and abs(yaw_error) <= step.yaw_tolerance
+        ):
+            self.get_logger().info(
+                f"[IW AXIS] Pallet_{step.pallet_id:02d} ready: "
+                f"x_error={dx:.3f}m, y_error={dy:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg"
+            )
+            return True
+
+        if abs(dy) > 0.20 or abs(yaw_error) > math.radians(12.0):
+            self._fail(
+                "IW 공통 정렬 시작 자세가 안전 범위를 벗어났습니다: "
+                f"x_error={dx:.3f}m, y_error={dy:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg"
+            )
+            return False
+
+        if step.attempt >= max_attempts:
+            self._fail(
+                f"IW 공통 축 정렬을 {max_attempts}회 보정했지만 허용 "
+                "오차에 들지 못했습니다. 현재 위치에서 정지: "
+                f"x_error={dx:.3f}m, y_error={dy:.3f}m, "
+                f"yaw_error={math.degrees(yaw_error):.1f}deg"
+            )
+            return False
+
+        forward_y = step.y - 1.1
+        reverse_y = step.y + 0.9
+        limit = math.radians(8.0)
+        corrections = [
+            self._lane_align(
+                step.x,
+                forward_y,
+                step.yaw,
+                +self._creep_drive,
+                f"Pallet_{step.pallet_id:02d} IW axis correction forward",
+                steering_limit=limit,
+                validate_alignment=False,
+            ),
+            self._lane_align(
+                step.x,
+                reverse_y,
+                step.yaw,
+                -self._creep_drive,
+                f"Pallet_{step.pallet_id:02d} IW axis correction long reverse",
+                steering_limit=limit,
+                validate_alignment=False,
+            ),
+            self._lane_align(
+                step.x,
+                step.y,
+                step.yaw,
+                +self._creep_drive,
+                f"Pallet_{step.pallet_id:02d} IW axis correction final",
+                steering_limit=limit,
+                position_tolerance=step.position_tolerance,
+                yaw_tolerance=step.yaw_tolerance,
+                # 이 단계의 순간 판정으로 작업을 중단하지 않고, 정지 후
+                # 다음 iw_axis_gate에서 X/Y/yaw를 함께 다시 측정한다.
+                validate_alignment=False,
+            ),
+            self._iw_axis_gate(step.pallet_id, attempt=step.attempt + 1),
+        ]
+        for correction in reversed(corrections):
+            self._steps.insert(1, correction)
+        self.get_logger().warning(
+            f"[IW AXIS] Pallet_{step.pallet_id:02d} 공통 축 보정 "
+            f"{step.attempt + 1}/{max_attempts}: "
+            f"x_error={dx:.3f}m, yaw_error={math.degrees(yaw_error):.1f}deg"
+        )
+        return True
 
     def _run_straight_y(self, step: Step, now: float) -> bool:
         remaining = step.y - self._y
@@ -1577,6 +2433,7 @@ class ForkLiftNode(Node):
                 f"Pallet_{step.pallet_id:02d} 토마토 적재 팔레트 창고 복귀 완료"
             )
         elif step.label == "loaded_on_amr":
+            self._pallet_on_iw_pub.publish(Int32(data=step.pallet_id))
             self._publish_status(
                 f"Pallet_{step.pallet_id:02d} 빈 팔레트 AMR 상차 완료"
             )
@@ -1622,6 +2479,24 @@ class ForkLiftNode(Node):
                     f"[STEP] {step.label} -> "
                     f"target=({step.x:.3f}, {step.y:.3f}), "
                     f"steer_limit={math.degrees(step.max_steering):.1f}deg"
+                )
+            elif step.kind == "alignment_recovery":
+                self.get_logger().info(
+                    f"[STEP] {step.label} -> reverse target="
+                    f"({step.x:.3f}, {step.y:.3f}), "
+                    f"steer_limit={math.degrees(step.max_steering):.1f}deg"
+                )
+            elif step.kind == "lane_align":
+                self.get_logger().info(
+                    f"[STEP] {step.label} -> target="
+                    f"({step.x:.3f}, {step.y:.3f}), "
+                    f"drive={step.drive:.2f}, "
+                    f"steer_limit={math.degrees(step.max_steering):.1f}deg"
+                )
+            elif step.kind == "iw_axis_gate":
+                self.get_logger().info(
+                    f"[STEP] {step.label} -> X={step.x:.3f}, Y={step.y:.3f}, "
+                    f"yaw={math.degrees(step.yaw):.1f}deg"
                 )
             elif step.kind == "straight_y":
                 self.get_logger().info(
@@ -1674,6 +2549,8 @@ class ForkLiftNode(Node):
             "back_wheel_swivel",
             "back_wheel_drive",
             "pallet_attach",
+            "pallet_deck_attach",
+            "iw_dock_lock",
             "pallet_id",
         ]
         msg.position = [
@@ -1681,9 +2558,19 @@ class ForkLiftNode(Node):
             steering,
             math.nan,
             1.0 if self._pallet_attached_command else 0.0,
+            1.0 if self._pallet_deck_attached_command else 0.0,
+            1.0 if self._iw_dock_locked_command else 0.0,
             float(self._pallet_target_command),
         ]
-        msg.velocity = [math.nan, math.nan, drive, math.nan, math.nan]
+        msg.velocity = [
+            math.nan,
+            math.nan,
+            drive,
+            math.nan,
+            math.nan,
+            math.nan,
+            math.nan,
+        ]
         self._command_pub.publish(msg)
 
     def _stop(self) -> None:

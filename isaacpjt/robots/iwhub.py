@@ -14,13 +14,15 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import random
 
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from pjt_config.settings import RobotConfig
-from pjt_utils.xform import set_pose, set_scale, set_translate
+from pjt_utils.deck_geometry import PALLET_SUPPORT_CLEARANCE
+from pjt_utils.xform import set_pose, set_scale
 from robots import assets
 
 
@@ -30,6 +32,26 @@ class IwHub:
     # 실측 DOF 이름 (2026-07-19) — ROS2 JointState 의 name 필드에 이대로 쓴다.
     DRIVE_JOINTS = ("left_wheel_joint", "right_wheel_joint")   # 속도 명령(차동)
     LIFT_JOINT = "lift_joint"                                   # 위치 명령(승강)
+    # 적재 팔레트의 접지 마찰을 이기고 좌우 바퀴를 반대로 돌릴 수 있는 velocity drive.
+    # angular drive의 damping은 속도 오차에 대한 구동 토크 이득, maxForce는 토크 상한이다.
+    # 적재 상태에서 베드/장애물 모서리에 닿아도 전후진·제자리 회전 명령을
+    # 실제 바퀴 속도로 밀어낼 수 있게 기존 대비 2배로 보강한다.
+    DRIVE_DAMPING = 3000.0
+    DRIVE_MAX_FORCE = 5000.0
+    WHEEL_STATIC_FRICTION = 1.2
+    WHEEL_DYNAMIC_FRICTION = 1.0
+    # position[2]는 에셋 루트 높이가 아니라 "주행 바닥 높이"로 취급한다.
+    # iw_hub.usd 원점이 차체 중앙 근처라 루트를 바닥 높이에 그대로 놓으면 하부가
+    # 약 반 높이만큼 바닥에 박힌다. 로컬 bbox 최저점을 바닥보다 5mm 위에 놓고
+    # reset 뒤 중력으로 짧게 정착시켜 초기 관통/반발을 없앤다.
+    GROUND_CLEARANCE = 0.005
+    # 정지 중 접촉 솔버가 만드는 미세 병진·회전을 빨리 안정화한다. 구동 중에는
+    # wheel drive가 아티큘레이션을 깨우므로 주행 응답을 막지 않는다.
+    SLEEP_THRESHOLD = 0.01
+    STABILIZATION_THRESHOLD = 0.002
+    SOLVER_POSITION_ITERATIONS = 16
+    SOLVER_VELOCITY_ITERATIONS = 4
+    MAX_DEPENETRATION_VELOCITY = 0.5
 
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
@@ -42,18 +64,224 @@ class IwHub:
 
     def spawn(self, stage: Usd.Stage, root: str = "/World/IwHub",
               position: tuple[float, float, float] = (0.0, 0.0, 0.0),
-              log=print) -> str:
+              yaw_deg: float = 0.0, log=print) -> str:
         """놓는다. 반환: root 경로."""
         from isaacsim.core.utils.stage import add_reference_to_stage
 
         url = assets.resolve(self._cfg.assets.iwhub, "운반 AMR(iw.hub)")
         log(f"[IwHub] 에셋 {url}")
         add_reference_to_stage(url, root)
-        # 참조 prim 은 자체 xformOp 을 가질 수 있다 → 기존 op 재사용(§8)
-        set_translate(stage.GetPrimAtPath(root), position)
+        grounded_position = self._grounded_position(
+            stage, root, position, log=log
+        )
+        # 참조 prim 은 자체 xformOp 을 가질 수 있다 → 기존 op 재사용(§8).
+        # yaw=180°이면 긴 후방 오버행이 MM 반대쪽을 향해 추종 회전 시 충돌하지 않는다.
+        yaw = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), yaw_deg).GetQuat()
+        set_pose(
+            stage.GetPrimAtPath(root), grounded_position,
+            Gf.Quatd(yaw.GetReal(), yaw.GetImaginary()),
+        )
         self._root = root
-        log(f"[IwHub] 배치 완료: {root} @ {tuple(round(v, 2) for v in position)}")
+        self._configure_drive_torque(stage, log)
+        self._configure_rest_stability(stage, log)
+        log(
+            f"[IwHub] 배치 완료: {root} @ "
+            f"{tuple(round(v, 3) for v in grounded_position)}, "
+            f"yaw={yaw_deg:.1f}°"
+        )
         return root
+
+    def _grounded_position(
+        self,
+        stage: Usd.Stage,
+        root: str,
+        position: tuple[float, float, float],
+        log=print,
+    ) -> tuple[float, float, float]:
+        """에셋 로컬 bbox 최저점을 주행 바닥 바로 위로 맞춘 루트 pose를 반환한다."""
+        prim = stage.GetPrimAtPath(root)
+        try:
+            bbox_cache = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(),
+                [
+                    UsdGeom.Tokens.default_,
+                    UsdGeom.Tokens.render,
+                ],
+            )
+            local_range = (
+                bbox_cache.ComputeLocalBound(prim).ComputeAlignedRange()
+            )
+            local_min_z = float(local_range.GetMin()[2])
+            if not math.isfinite(local_min_z):
+                raise ValueError(f"유효하지 않은 bbox min z: {local_min_z}")
+        except Exception as exc:
+            log(
+                "[IwHub] ⚠ 로컬 bbox 접지 높이 계산 실패 — 요청 높이를 그대로 사용: "
+                f"{exc}"
+            )
+            return tuple(float(v) for v in position)
+
+        floor_z = float(position[2])
+        root_z = floor_z - local_min_z + self.GROUND_CLEARANCE
+        log(
+            "[IwHub] 바닥 관통 방지 자동 보정: "
+            f"floor_z={floor_z:.3f}m, local_min_z={local_min_z:+.3f}m, "
+            f"root_z={root_z:.3f}m, clearance={self.GROUND_CLEARANCE:.3f}m"
+        )
+        return float(position[0]), float(position[1]), root_z
+
+    @staticmethod
+    def _set_physx_attr(api, creator: str, value, log=print) -> bool:
+        """Isaac/PhysX 버전별 선택 속성을 지원되는 경우에만 설정한다."""
+        fn = getattr(api, creator, None)
+        if fn is None:
+            log(f"[IwHub] ⚠ PhysX 속성 API 없음: {creator}")
+            return False
+        fn(value)
+        return True
+
+    def _configure_rest_stability(self, stage: Usd.Stage, log=print) -> None:
+        """IW 아티큘레이션의 초기 관통 반발과 정지 잔진동을 줄인다."""
+        if not self._root:
+            return
+        root_prim = stage.GetPrimAtPath(self._root)
+        articulation_prim = next(
+            (
+                prim
+                for prim in Usd.PrimRange(root_prim)
+                if prim.HasAPI(UsdPhysics.ArticulationRootAPI)
+            ),
+            None,
+        )
+        if articulation_prim is None:
+            log("[IwHub] ⚠ 안정화할 articulation root를 찾지 못했습니다")
+            return
+
+        articulation = PhysxSchema.PhysxArticulationAPI.Apply(
+            articulation_prim
+        )
+        settings = (
+            ("CreateSleepThresholdAttr", self.SLEEP_THRESHOLD),
+            ("CreateStabilizationThresholdAttr", self.STABILIZATION_THRESHOLD),
+            (
+                "CreateSolverPositionIterationCountAttr",
+                self.SOLVER_POSITION_ITERATIONS,
+            ),
+            (
+                "CreateSolverVelocityIterationCountAttr",
+                self.SOLVER_VELOCITY_ITERATIONS,
+            ),
+        )
+        for creator, value in settings:
+            try:
+                self._set_physx_attr(articulation, creator, value, log=log)
+            except Exception as exc:
+                log(f"[IwHub] ⚠ {creator} 설정 실패: {exc}")
+
+        # 초기 bbox 오차가 남더라도 한 프레임에 큰 관통 보정 속도가 생기지 않게
+        # 섀시 강체의 depenetration 속도를 제한한다.
+        chassis = stage.GetPrimAtPath(f"{self._root}/chassis")
+        if (
+            not chassis.IsValid()
+            or not chassis.HasAPI(UsdPhysics.RigidBodyAPI)
+        ):
+            chassis = next(
+                (
+                    prim
+                    for prim in Usd.PrimRange(root_prim)
+                    if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                    and "chassis" in prim.GetName().lower()
+                ),
+                None,
+            )
+        if chassis is not None and chassis.IsValid():
+            rigid = PhysxSchema.PhysxRigidBodyAPI.Apply(chassis)
+            try:
+                self._set_physx_attr(
+                    rigid,
+                    "CreateMaxDepenetrationVelocityAttr",
+                    self.MAX_DEPENETRATION_VELOCITY,
+                    log=log,
+                )
+            except Exception as exc:
+                log(f"[IwHub] ⚠ chassis depenetration 제한 설정 실패: {exc}")
+            chassis_path = str(chassis.GetPath())
+        else:
+            chassis_path = "찾지 못함"
+
+        log(
+            "[IwHub] 정지 안정화: "
+            f"sleep={self.SLEEP_THRESHOLD:.3f}, "
+            f"stabilization={self.STABILIZATION_THRESHOLD:.3f}, "
+            f"solver={self.SOLVER_POSITION_ITERATIONS}/"
+            f"{self.SOLVER_VELOCITY_ITERATIONS}, chassis={chassis_path}"
+        )
+
+    def _configure_drive_torque(self, stage: Usd.Stage, log=print) -> None:
+        """적재 상태에서도 제자리 회전하도록 wheel drive와 접지 마찰을 보강한다."""
+        if not self._root:
+            return
+        material = UsdShade.Material.Define(
+            stage, "/World/PhysicsMaterials/IwHubDriveWheel")
+        material_api = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+        material_api.CreateStaticFrictionAttr(self.WHEEL_STATIC_FRICTION)
+        material_api.CreateDynamicFrictionAttr(self.WHEEL_DYNAMIC_FRICTION)
+        material_api.CreateRestitutionAttr(0.0)
+        try:
+            physx_material = PhysxSchema.PhysxMaterialAPI.Apply(material.GetPrim())
+            physx_material.CreateFrictionCombineModeAttr("max")
+            physx_material.CreateRestitutionCombineModeAttr("min")
+        except Exception as exc:
+            log(f"[IwHub] ⚠ PhysX 마찰 결합 모드 설정 생략: {exc}")
+
+        configured = []
+        wheel_bodies = []
+        root_prim = stage.GetPrimAtPath(self._root)
+        for prim in Usd.PrimRange(root_prim):
+            if prim.GetName() not in self.DRIVE_JOINTS:
+                continue
+            drive = UsdPhysics.DriveAPI.Get(prim, "angular")
+            if not drive:
+                log(f"[IwHub] ⚠ {prim.GetName()} angular drive 없음 — 토크 보강 생략")
+                continue
+            # stiffness=0이면 위치를 붙잡지 않고 ROS velocityCommand만 추종한다.
+            drive.GetStiffnessAttr().Set(0.0)
+            drive.GetDampingAttr().Set(self.DRIVE_DAMPING)
+            drive.GetMaxForceAttr().Set(self.DRIVE_MAX_FORCE)
+            configured.append(prim.GetName())
+
+            # 조인트가 연결한 두 body 중 wheel 쪽에 강한 물리 재질을 상속시킨다.
+            joint = UsdPhysics.Joint(prim)
+            targets = (
+                list(joint.GetBody0Rel().GetTargets())
+                + list(joint.GetBody1Rel().GetTargets())
+            )
+            wheel_targets = [p for p in targets if "wheel" in p.name.lower()]
+            if not wheel_targets and targets:
+                wheel_targets = [targets[-1]]
+            for target in wheel_targets:
+                wheel_prim = stage.GetPrimAtPath(target)
+                if not wheel_prim.IsValid() or str(target) in wheel_bodies:
+                    continue
+                UsdShade.MaterialBindingAPI.Apply(wheel_prim).Bind(
+                    material, UsdShade.Tokens.strongerThanDescendants, "physics")
+                wheel_bodies.append(str(target))
+        if configured:
+            log(
+                "[IwHub] 구동륜 토크 보강: "
+                f"joints={configured}, damping={self.DRIVE_DAMPING:.0f}, "
+                f"maxForce={self.DRIVE_MAX_FORCE:.0f}"
+            )
+            if wheel_bodies:
+                log(
+                    "[IwHub] 구동륜 드리프트 억제: "
+                    f"bodies={wheel_bodies}, μs={self.WHEEL_STATIC_FRICTION:.2f}, "
+                    f"μd={self.WHEEL_DYNAMIC_FRICTION:.2f}, combine=max"
+                )
+            else:
+                log("[IwHub] ⚠ wheel body를 못 찾아 마찰 재질을 적용하지 못함")
+        else:
+            log("[IwHub] ⚠ 좌우 구동 조인트를 못 찾아 토크 보강을 적용하지 못함")
 
     def load_cargo(self, stage: Usd.Stage, tomato_cfg, phys_cfg,
                    deck_z: float = 0.225, log=print) -> int:
@@ -68,8 +296,8 @@ class IwHub:
           · 토마토 = **별도 동적 강체**(Load 아님) → KLT 안에서 흔들리며 접촉으로 실려간다.
           참조 에셋(팔레트·KLT)이 자체 강체를 갖고 오므로 disable_physics 로 벗긴 뒤
           Load 강체의 콜라이더로 붙인다(중첩강체 경고 방지 §8). 꼭지=몸통 자식(장식).
-        deck_z: 데크 높이(root 기준 오프셋). [2] 유도 — bbox 상단은 0.198(measure_deck.py)이나
-                GUI 실측상 0.225 라야 팔레트가 데크에 얹힌다(0.25=52mm 뜸, 0.20=박힘). GUI 확인.
+        deck_z: chassis 형상을 읽지 못했을 때만 쓰는 root 기준 비상 오프셋.
+                정상 경로는 실제 chassis bbox 상면을 매번 측정해 팔레트 하면을 맞춘다.
         반환: 얹은 토마토 수(0이면 에셋 없음).
         """
         from isaacsim.core.utils.stage import add_reference_to_stage
@@ -98,15 +326,52 @@ class IwHub:
                                  calyx if os.path.exists(calyx) else None))
 
         # ── iw.hub 데크 월드 포즈 (적재 세트 원점) ──
-        # iw.hub 에셋엔 base_link 프림이 없어 self._root(컨테이너)로 떨어진다.
+        # 컨테이너 root 원점은 실제 차체 기하 중심과 일치하지 않는다. root 오프셋이나
+        # 부모 변환을 다시 적용하지 않도록 chassis의 월드 bbox 중심/상면을 직접 쓴다.
         src = f"{self._root}/base_link"
         if not stage.GetPrimAtPath(src).IsValid():
             src = self._root
         bp = UsdGeom.Xformable(stage.GetPrimAtPath(src)).ComputeLocalToWorldTransform(
             Usd.TimeCode.Default()).ExtractTranslation()
+        cargo_x, cargo_y = float(bp[0]), float(bp[1])
+        cargo_z = float(bp[2]) + deck_z
+        cargo_quat = Gf.Quatd(1.0)
+        chassis = f"{self._root}/chassis"
+        chassis_prim = stage.GetPrimAtPath(chassis)
+        if chassis_prim.IsValid():
+            try:
+                bbox_cache = UsdGeom.BBoxCache(
+                    Usd.TimeCode.Default(),
+                    [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+                )
+                chassis_range = (
+                    bbox_cache.ComputeWorldBound(
+                        chassis_prim
+                    ).ComputeAlignedRange()
+                )
+                chassis_world = UsdGeom.Xformable(
+                    chassis_prim).ComputeLocalToWorldTransform(
+                        Usd.TimeCode.Default())
+                deck_top_z = float(chassis_range.GetMax()[2])
+                cargo_z = deck_top_z + PALLET_SUPPORT_CLEARANCE
+                cargo_quat = Gf.Quatd(
+                    chassis_world.ExtractRotationQuat().GetNormalized())
+                log(
+                    "[IwHub] 팔레트/IW 실측 데크 정렬: "
+                    f"root 대비 dx={cargo_x - float(bp[0]):+.3f}m, "
+                    f"dy={cargo_y - float(bp[1]):+.3f}m, "
+                    f"deck_top_z={deck_top_z:.5f}m, "
+                    f"pallet_base_z={cargo_z:.5f}m"
+                )
+            except Exception as e:
+                log(f"[IwHub] ⚠ chassis bbox 중심 계산 실패 — root 중심 사용: {e}")
         root = "/World/IwHubCargo"
         UsdGeom.Xform.Define(stage, root)
-        set_translate(stage.GetPrimAtPath(root), (bp[0], bp[1], bp[2] + deck_z))
+        set_pose(
+            stage.GetPrimAtPath(root),
+            (cargo_x, cargo_y, cargo_z),
+            cargo_quat,
+        )
         ident = Gf.Quatd(1.0, 0.0, 0.0, 0.0)
         rng = random.Random(7)
 
@@ -174,14 +439,16 @@ class IwHub:
         load_density = 200.0   # [4] 근거없음 — 팔레트+빈 유효밀도. 결속돼 있어 동특성 영향 작음. GPU 보정.
         physics.add_rigid_body(stage.GetPrimAtPath(load), load_density,
                                kinematic=False)
-        chassis = f"{self._root}/chassis"
         if stage.GetPrimAtPath(chassis).IsValid():
             physics.create_fixed_joint(stage, f"{root}/DeckJoint", chassis, load)
             bound = "chassis 결속(로봇 따라감·창고서 해제→지게차 인수)"
         else:
             bound = "⚠ chassis 링크 없음 → 데크 위 비결속 배치"
-        log(f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 {n_tom}개(동적강체). "
-            f"Load {bound}. deck_z={deck_z} [4] GPU 보정 요")
+        log(
+            f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 "
+            f"{n_tom}개(동적강체). Load {bound}. "
+            f"pallet_base_z={cargo_z:.5f}"
+        )
         return n_tom
 
     # 에셋에 이미 있을 법한 라이다 프림 이름/타입 키워드 (Idealworks iw.hub 는 실물 AMR).
@@ -212,7 +479,7 @@ class IwHub:
         Isaac 5.1 정식 API `isaacsim.sensors.rtx.LidarRtx` — 라이다 생성 + 렌더프로덕트를 같이
         만들어 준다. ROS2RtxLidarHelper 는 lidarPrim 이 아니라 renderProductPath 를 받는다
         (2026-07-20 GPU 실측 — 이전 IsaacSensorCreateRtxLidar 직접 호출 + lidarPrim 은 실패).
-        config = Example_Rotary_2D (2D LaserScan — Nav2 코스트맵용). prim 이름 = mount.frame →
+        config = RPLIDAR_S2E (Nova Carter의 SLAMTEC 2D LaserScan). prim 이름 = mount.frame →
         TF child = LaserScan frame_id 일치. LidarRtx 객체는 self._lidars 에 보관(GC 방지).
         """
         import math
@@ -235,7 +502,7 @@ class IwHub:
                 translation=np.array(mount.offset, dtype=float),
                 orientation=quat,
                 # config 는 파일명 stem 으로 매칭된다(전체경로 X — commands.py 실측 2026-07-20).
-                config_file_name="Example_Rotary_2D")
+                config_file_name="RPLIDAR_S2E")
             self._lidars.append(lidar)               # 참조 유지(GC 되면 렌더프로덕트 파괴)
             rp = lidar.get_render_product_path()
             log(f"[IwHub] RTX 라이다 '{mount.name}': {path} @ {mount.offset} "

@@ -39,23 +39,23 @@ ros2 topic echo /harvester_0/manipulator/mobility_ready
 ```
 
 정상 상태 전이는 `NO_TARGET -> APPROACH -> QUALITY_CHECK -> RIPE_READY ->
-PREGRASP -> GRASP -> GRIPPER_CLOSING -> CUTTING -> RETRACT -> WAIT_BASKET ->
+PREGRASP -> GRASP -> GRIPPER_CLOSING -> GRASP_VERIFY -> VERIFY_RETRACT ->
+GRASP_FOLLOW_CHECK -> RETRACT -> WAIT_BASKET ->
 BASKET_APPROACH -> BASKET_PLACE -> PLACE_RELEASING -> GO_HOME -> HOME_READY`이며, 불량이면
 `SKIP_SPOILED`로 끝난다. 0.5m에서 `QUALITY_CHECK`가 되는 즉시 Isaac에
 `rmp_stop`을 보내고 정지 상태에서 5프레임 품질 투표를 완료한다. 거리 노이즈로
 접근/정지가 반복되지 않도록 0.6m를 넘어야 원거리 접근으로 복귀한다. 실제 파지
 시퀀스는 `RIPE_READY`에서만 시작한다.
 
-`PREGRASP`는 카메라→토마토 광선의 반대 방향으로 tool reach 0.115 m와 여유
+`PREGRASP`는 카메라→토마토 광선의 반대 방향으로 tool reach 0.140 m와 여유
 0.15 m만큼 떨어진 목표이며, 도달 피드백 후 `GRASP` 목표로 전진한다. 각 동작의
 기본 제한 시간은 10초다. 파지 도중 표적이 사라지거나 `spoiled`로 바뀌면 각각
 `ABORT_TARGET_LOST`, `ABORT_SPOILED`로 정지하며 제한 시간을 넘으면
-`ERROR_TIMEOUT`으로 정지한다. 그리퍼가 닫힘 위치에 도달하면 커터 날을 35도로
-닫고 0.6초 뒤 비전 목표에 가장 가까운 ripe 과실의 pedicel `FixedJoint`를
-`jointEnabled=False`로 전환한다. 절단 성공 피드백 후 날을 열고 `PREGRASP`
-위치로 후퇴한다. 목표와 과실 ground truth가 0.10 m보다 멀거나 날이 닫히지 않았으면
-`ERROR_CUT`으로 정지한다. 현재 파지 확인은 접촉 센서가 아니라 그리퍼 관절 위치와
-물리 마찰에 의존한다.
+`ERROR_TIMEOUT`으로 정지한다. RG2를 닫은 뒤 양쪽 손가락이 같은 토마토에 12개 물리
+프레임 연속 접촉하고, 실제 `finger_joint` 닫힘량과 TCP 거리까지 정상일 때만 파지를
+확정한다. 이 확정 뒤 pedicel `FixedJoint`를 `jointEnabled=False`로 전환하고 3 cm
+후퇴한다. 후퇴 전후 토마토-TCP 상대벡터가 유지돼 토마토가 그리퍼와 함께 움직였을
+때만 수확 성공으로 진행한다. 한쪽 접촉, 순간 접촉, 빈 그리퍼는 실패 후 홈 복귀한다.
 
 ## IW 바스켓 연동과 이동 인터록
 
