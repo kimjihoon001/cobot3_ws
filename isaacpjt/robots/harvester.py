@@ -117,6 +117,7 @@ class HarvestMM:
     # +35° 돌리면 CAD 0°(닫힘=노치 전단). 그래서 열림 0° ~ 닫힘 35°(CAD build 스크립트 규약).
     BLADE_OPEN_DEG = 0.0          # 열림 (날이 옆으로 펼쳐짐)
     BLADE_CLOSED_DEG = 35.0       # 닫힘 = 노치로 줄기 전단
+    BLADE_SPEED_DEG_S = 70.0      # 35° 절삭 스윙을 0.5초에 연출
 
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
@@ -130,9 +131,12 @@ class HarvestMM:
         self._blade_shaft_w: Gf.Vec3d | None = None  # 가동날 절단점(서보축) 월드좌표 (줄기 배치용)
         self._blade_path: str | None = None          # 가동날 프림 경로 (grip_base 자식)
         self._blade_L_rest: Gf.Matrix4d | None = None  # 날 rest 로컬(grip_base 기준) — 스윙 기준
+        self._blade_pose_op = None                    # CAD 행렬을 손실 없이 쓰는 transform op
+        self._blade_target_attr = None               # 가동날 드라이브 목표각 attr (§5.6 ROS2 제어점)
         self._shaft_rel: Gf.Vec3d | None = None      # 서보 피벗 ← grip_base 로컬 (스윙 회전 중심)
         self._axis_rel: Gf.Vec3d | None = None       # 서보축 방향 ← grip_base 로컬
         self._blade_deg: float = self.BLADE_OPEN_DEG  # 현재 가동날 각도 [deg] (키네마틱 서보)
+        self._blade_target_deg: float = self.BLADE_OPEN_DEG  # 서보 명령 목표각 [deg]
 
     @property
     def root(self) -> str | None:
@@ -178,6 +182,9 @@ class HarvestMM:
         gripper_url = assets.resolve(a.gripper, "그리퍼(Robotiq)")
         gripper_path = f"{root}/Gripper"
         add_reference_to_stage(gripper_url, gripper_path)
+        # 2F-85 콜라이더가 instanceable 참조 안에 숨어 마찰 바인딩이 0개가 되는 것 방지 —
+        # 서브트리를 non-instanceable 로 펴서 콜라이더 prim 을 저작 가능하게 노출(2026-07-22).
+        self._uninstance(stage, gripper_path)
         grip_base = self._attach_gripper(stage, arm_path, gripper_path, log)
         self._gripper_path = gripper_path
         self._grip_base = grip_base
@@ -193,7 +200,7 @@ class HarvestMM:
 
         # 커터·카메라 = 사용자 CAD 커터 지그(커플러 링 + 서보 가위 + 실물 D455).
         # 프리미티브 커터/카메라(_add_cutter/_add_camera)는 남겨두되 안 쓰고 CAD 로 대체.
-        if grip_base:
+        if grip_base and not os.environ.get("NO_JIG"):     # NO_JIG=1 → 파지 스파이크서 지그 끔
             self._add_cad_jig(stage, log)
         log(f"[Harvester] 조립 완료: {root}")
         return root
@@ -321,6 +328,25 @@ class HarvestMM:
         log(f"[Harvester] 팔 장착: root_joint → {chassis} "
             f"(섀시 좌표 오프셋 {tuple(round(v, 3) for v in pos)})")
 
+    def _uninstance(self, stage: Usd.Stage, root_path: str) -> None:
+        """서브트리의 instanceable 참조를 전부 해제 — 콜라이더/물리 prim 을 저작 가능하게
+        노출한다(2F-85 콜라이더가 인스턴스 안에 숨어 마찰 바인딩 0개가 되던 문제, 2026-07-22).
+        인스턴스를 풀면 자식이 새로 드러나 또 인스턴스일 수 있어 변화가 없을 때까지 반복."""
+        root = stage.GetPrimAtPath(root_path)
+        if not root.IsValid():
+            return
+        n = 0
+        for _ in range(50):                                # 안전 상한
+            found = None
+            for p in Usd.PrimRange(root):
+                if p.IsInstance():
+                    found = p; break
+            if found is None:
+                break
+            found.SetInstanceable(False)
+            n += 1
+        print(f"[Harvester] 그리퍼 인스턴스 해제 {n}개 (콜라이더 노출)", flush=True)
+
     def _bind_gripper_friction(self, stage: Usd.Stage, gripper_path: str, log) -> None:
         """그리퍼 손가락·패드 콜라이더에 마찰 재질을 건다 — §5.1 마찰 파지의 그리퍼 쪽.
 
@@ -334,15 +360,32 @@ class HarvestMM:
         mat = create_physics_material(
             stage, "/World/PhysicsMaterials/gripper_pad",
             ee.pad_static_friction, ee.pad_dynamic_friction)
+        # ★ 2F-85 콜라이더는 PhysxCollisionAPI 로 걸려 있어 UsdPhysics.CollisionAPI 만
+        #   보면 0개가 잡힌다(2026-07-22 실측: "콜라이더 0개" → 과실 미끄러져 낙하).
+        #   스파이크 grasp_force_test(μ0.9 로 과실 유지 검증)와 동일하게 둘 다 본다.
+        #   CadJig/Blade/Cutter/Camera/D455 는 경로로 제외(마찰 불필요 + 블레이드 보호).
         n = 0
+        bound, allcoll = [], []
         for p in Usd.PrimRange(stage.GetPrimAtPath(gripper_path)):
-            if str(p.GetPath()) == self._grip_base:        # 블레이드가 이 자식 → 건너뜀
+            path = str(p.GetPath())
+            is_coll = (p.HasAPI(UsdPhysics.CollisionAPI)
+                       or p.HasAPI(PhysxSchema.PhysxCollisionAPI))
+            if is_coll:
+                allcoll.append(path)
+            if path == self._grip_base:                    # 블레이드가 이 자식 → 건너뜀
                 continue
-            if p.HasAPI(UsdPhysics.CollisionAPI):
+            if any(k in path for k in ("CadJig", "Blade", "blade",
+                                       "Cutter", "Camera", "D455")):
+                continue
+            if is_coll:
                 bind_physics_material(p, mat)
                 n += 1
-        log(f"[Harvester] 그리퍼 콜라이더 {n}개 마찰 바인딩 μs={ee.pad_static_friction} "
-            f"(grip_base 제외 — 블레이드 보호)")
+                bound.append(path.replace(gripper_path, "…"))
+        print(f"[Harvester] 그리퍼 콜라이더 {n}개 마찰 바인딩 μs={ee.pad_static_friction} "
+              f"(전체 콜라이더 {len(allcoll)}개) — {bound}", flush=True)
+        if n == 0:                                         # 진단: 서브트리 콜라이더 실태
+            print(f"[Harvester] ⚠콜라이더 0개! 서브트리 전체 콜라이더={allcoll[:20]}",
+                  flush=True)
 
     def _attach_gripper(self, stage: Usd.Stage, arm_path: str,
                         gripper_path: str, log) -> str | None:
@@ -590,6 +633,8 @@ class HarvestMM:
         UsdGeom.Xformable(stage.GetPrimAtPath(root)).AddScaleOp().Set(
             Gf.Vec3f(_CAD_SCALE, _CAD_SCALE, _CAD_SCALE))
         # camera_dummy 는 D455 위치·시선을 잡는 로케이터로만 참조(뒤에서 숨김).
+        # blade_dummy 는 finalize() 의 attach_blade_hinge() 가 CAD 원본 포즈와
+        # 서보 피벗을 읽는 기준 prim. 가동 사본을 만든 뒤 원본은 비활성화한다.
         for p in ("jig", "blade_dummy", "servo_dummy", "camera_dummy"):
             url = os.path.join(_CAD_JIG_DIR, p + ".usd")
             if os.path.isfile(url):
@@ -890,23 +935,25 @@ class HarvestMM:
     # ===== 서보 힌지 가동날 (CAD 의도: 서보축 revolute) — 조립 + 제어 =====
 
     def attach_blade_hinge(self, stage: Usd.Stage, log=print) -> bool:
-        """CAD 가동날을 서보축 리볼루트 조인트로 붙인다 — 서보 힌지는 고정, 날만 스윙.
+        """CAD ``blade_dummy``를 제자리에서 서보축 중심으로 스윙시킨다.
 
-        ★ spawn() → world.reset() **한 번** 뒤에 호출할 것 (강체·조인트 물리 초기화됨).
-        시각용 blade_dummy(CadJig 자식)는 숨기고, 강체 사본을 grip_base 강체 **밖**(최상위
-        prim {root}_CutterBlade)에 두고 revolute+drive 로 grip_base 에 묶는다(강체 중첩 §8 회피).
-        이후 set_blade_deg(deg) 로 각도 명령 — §5.6: 나중에 ROS2 가 이 메서드를 부른다.
-        축·피벗은 CAD(build_harvest_eef_jig) 값: 축=Y(서보샤프트), 피벗=(0,53,132).
+        ``CadJig`` 아래 원본 prim의 로컬 포즈를 rest로 사용해 지그·서보와
+        날의 CAD 배치를 유지한다. CAD 축=Y(서보샤프트), 피벗=(0,53,132).
         """
-        import omni.kit.app
-        from isaacsim.core.utils.stage import add_reference_to_stage
         if not self._grip_base:
             log("[Harvester] ⚠ grip_base 없음 — 블레이드 힌지 미부착")
             return False
-        blade = next((p for p in Usd.PrimRange(stage.GetPrimAtPath(self._grip_base))
-                      if p.GetName() == "blade_dummy"), None)
-        if blade is None:
-            log("[Harvester] ⚠ blade_dummy 없음 — 블레이드 힌지 미부착")
+        # 이전 조립 방식의 별도 사본이 저장 Stage/핫리로드에 남아 있으면
+        # CAD 원본 날과 동시에 보인다. 제자리 blade_dummy만 사용하도록 제거한다.
+        for legacy_path in (f"{self._grip_base}/CutterBlade",
+                            f"{self._root}_CutterBlade"):
+            if stage.GetPrimAtPath(legacy_path).IsValid():
+                stage.RemovePrim(legacy_path)
+                log(f"[Harvester] 기존 공중 블레이드 제거: {legacy_path}")
+        source_path = f"{self._grip_base}/CadJig/blade_dummy"
+        blade = stage.GetPrimAtPath(source_path)
+        if not blade.IsValid():
+            log(f"[Harvester] ⚠ CAD 기준날 없음: {source_path} — 블레이드 미부착")
             return False
 
         cache = UsdGeom.XformCache()
@@ -914,67 +961,70 @@ class HarvestMM:
         shaft_w = M_orig.Transform(Gf.Vec3d(0, 53, 132))                 # 서보축(SHAFT_Z)
         axis_w = Gf.Vec3d(M_orig.TransformDir(Gf.Vec3d(0, 1, 0))).GetNormalized()
         self._blade_shaft_w = Gf.Vec3d(shaft_w)                          # 절단점 저장(줄기 배치용)
-        blade.SetActive(False)                                           # 시각용 원본 숨김
 
-        # ★ 커터·카메라(CadJig·D455)처럼 grip_base **자식**으로 넣는다 → 씬 그래프가 그리퍼를
-        # 자동 추종(재생 중에도, 물리·sync 불필요). 최상위 강체였던 유일한 이유는 강체 중첩(§8)
-        # 인데, 물리를 뺀 순수 시각 프림이라 그 제약이 사라졌다 (2026-07-22).
-        hinge = f"{self._grip_base}/CutterBlade"
-        UsdGeom.Xform.Define(stage, hinge)
-        add_reference_to_stage(os.path.join(_CAD_JIG_DIR, "blade_dummy.usd"), hinge + "/asset")
-        omni.kit.app.get_app().update()                                 # metricsAssembler 반영
-        asset = stage.GetPrimAtPath(hinge + "/asset")
-        U = UsdGeom.Xformable(asset).GetLocalTransformation()
-        # 자식 로컬 rest: asset_world = U·L_rest·M_gb = M_orig → L_rest = U⁻¹·M_orig·M_gb⁻¹
-        M_gb_inv = cache.GetLocalToWorldTransform(
-            stage.GetPrimAtPath(self._grip_base)).GetInverse()
-        L_rest = U.GetInverse() * M_orig * M_gb_inv
-        _set_full_pose(stage.GetPrimAtPath(hinge), L_rest)             # 사본 월드=원본 월드
-        for p in Usd.PrimRange(asset):                                # 물리 벗김(시각 전용) + 마젠타
-            if p.HasAPI(UsdPhysics.RigidBodyAPI):
-                p.RemoveAPI(UsdPhysics.RigidBodyAPI)
-            if p.HasAPI(PhysxSchema.PhysxRigidBodyAPI):
-                p.RemoveAPI(PhysxSchema.PhysxRigidBodyAPI)
-            if p.HasAPI(UsdPhysics.CollisionAPI):
-                p.RemoveAPI(UsdPhysics.CollisionAPI)
-            if p.IsA(UsdGeom.Mesh):
-                UsdShade.MaterialBindingAPI.Apply(p).UnbindAllBindings()
-                UsdGeom.Gprim(p).CreateDisplayColorAttr([Gf.Vec3f(0.9, 0.1, 0.9)])
-        self._blade_path = hinge
-        self._blade_L_rest = L_rest                                   # rest 로컬(grip_base 기준)
-        self._shaft_rel = M_gb_inv.Transform(Gf.Vec3d(shaft_w))       # 피벗 ← grip_base 로컬
+        # CAD 원본 날을 별도 사본으로 재배치하지 않고 그 자리에서 돌린다.
+        # 그러면 CadJig의 0.1 스케일과 reference 내부 xform이 중복 적용되지 않아
+        # 날이 서보 아래 CAD 위치에 그대로 남는다.
+        parent = blade.GetParent()                                    # .../base_link/CadJig
+        M_parent_inv = cache.GetLocalToWorldTransform(parent).GetInverse()
+        L_rest = UsdGeom.Xformable(blade).GetLocalTransformation()
+        # translate/orient/scale 분해는 변환기가 준 축·스케일 행렬을 손실시켜
+        # 날을 지그 밖으로 밀어냈다. 원래 로컬 행렬을 단일 op로 그대로 저장한다.
+        blade.RemoveProperty("xformOp:transform:bladeServo")
+        blade_xf = UsdGeom.Xformable(blade)
+        blade_xf.ClearXformOpOrder()
+        self._blade_pose_op = blade_xf.AddTransformOp(opSuffix="bladeServo")
+        self._blade_pose_op.Set(L_rest)
+        self._blade_path = source_path
+        self._blade_L_rest = L_rest                                   # rest 로컬(CadJig 기준)
+        self._shaft_rel = M_parent_inv.Transform(Gf.Vec3d(shaft_w))   # 피벗 ← CadJig 로컬
         self._axis_rel = Gf.Vec3d(
-            M_gb_inv.TransformDir(Gf.Vec3d(axis_w))).GetNormalized()  # 축 ← grip_base 로컬
+            M_parent_inv.TransformDir(Gf.Vec3d(axis_w))).GetNormalized()  # 축 ← CadJig 로컬
         self._blade_deg = self.BLADE_OPEN_DEG                         # rest = 열림(export 자세)
-        log(f"[Harvester] 가동날 그리퍼-자식 부착: {hinge} (피벗 (0,53,132), 씬그래프 자동 추종)")
+        self._blade_target_deg = self.BLADE_OPEN_DEG
+        meshes = [p for p in Usd.PrimRange(blade) if p.IsA(UsdGeom.Mesh)]
+        log(f"[Harvester] CAD 가동날 제자리 활성: {source_path} "
+            f"(parent={parent.GetPath()}, mesh={len(meshes)}개, 피벗=(0,53,132))")
         return True
 
-    def sync_blade_pose(self, stage: Usd.Stage) -> None:
-        """가동날(grip_base 자식)의 로컬 포즈를 서보각에 맞춰 갱신한다.
+    def sync_blade_pose(self, stage: Usd.Stage, dt: float = 1.0 / 60.0) -> None:
+        """CadJig 아래 원본 가동날에 서보 각도를 로컬로 반영한다.
 
-        그리퍼 추종은 씬 그래프가 자동으로 한다(커터·카메라와 동일) — 여기선 rest(열림) 로컬에서
-        (현재각-열림각)만큼 피벗축 회전만 얹는다. grip_base **월드 좌표를 안 읽으므로** 재생 중
-        낡은 USD 문제(2026-07-21)가 없다. 실제 절단은 detach_fruit 로 처리한다(§5.3).
-        """
+        자식이라도 물리링크(grip_base) 월드가 USD 로 전파 안 오면 날이 뜬다 → 여기서
+        grip_base 현재 월드를 읽어 **날의 월드포즈를 직접 세팅**한다(로컬 세팅이 아니라).
+        rest(열림) 에서 (현재각-열림각)만큼 피벗축 회전만 얹는다. 절단은 detach_fruit(§5.3)."""
         if self._blade_L_rest is None or not self._blade_path:
             return
         hp = stage.GetPrimAtPath(self._blade_path)
-        if not hp.IsValid():
+        if not hp.IsValid() or self._blade_pose_op is None:
             return
+        # 명령 각으로 순간이동하지 않고 서보 회전 속도로 닫힌다.
+        error = self._blade_target_deg - self._blade_deg
+        max_step = self.BLADE_SPEED_DEG_S * max(0.0, float(dt))
+        if abs(error) <= max_step:
+            self._blade_deg = self._blade_target_deg
+        elif error > 0.0:
+            self._blade_deg += max_step
+        else:
+            self._blade_deg -= max_step
+
         theta = self._blade_deg - self.BLADE_OPEN_DEG        # 열림 기준 서보 변위 [deg]
-        if abs(theta) > 1e-6:                                # 피벗축(grip_base 로컬) 중심 회전
+        if abs(theta) > 1e-6:                                # 피벗축(CadJig 로컬) 중심 회전
             swing = (Gf.Matrix4d().SetTranslate(-self._shaft_rel)
                      * Gf.Matrix4d().SetRotate(Gf.Rotation(self._axis_rel, theta))
                      * Gf.Matrix4d().SetTranslate(self._shaft_rel))
             L = self._blade_L_rest * swing
         else:
             L = self._blade_L_rest
-        _set_full_pose(hp, L)
+        # 행렬 분해 없이 원본 CAD 로컬 행렬+서보 회전을 직접 저작한다.
+        self._blade_pose_op.Set(L)
 
     def set_blade_deg(self, deg: float) -> None:
         """가동날 각도 명령 [deg]. ★§5.6: ROS2 노드가 토픽 받아 이 메서드를 부른다.
         열림 0° ~ 닫힘 35°(=절단). 다음 sync_blade_pose() 가 이 각으로 날을 회전 배치한다."""
-        self._blade_deg = float(deg)
+        self._blade_target_deg = max(
+            self.BLADE_OPEN_DEG,
+            min(self.BLADE_CLOSED_DEG, float(deg)))
 
     def open_blade(self) -> None:
         """가동날 열기 (미부착이면 no-op)."""
@@ -986,11 +1036,10 @@ class HarvestMM:
 
     def move_blade(self, d_deg: float) -> None:
         """가동날 각도 증분 [deg] — 텔레옵/증분 제어용. [열림, 닫힘]로 제한."""
-        self.set_blade_deg(max(self.BLADE_OPEN_DEG,
-                               min(self.BLADE_CLOSED_DEG, self._blade_deg + d_deg)))
+        self.set_blade_deg(self._blade_target_deg + d_deg)
 
     def blade_deg(self) -> float:
-        """현재 가동날 각도 [deg]."""
+        """현재 가동날의 실제 연출 각도 [deg]."""
         return self._blade_deg
 
     @property

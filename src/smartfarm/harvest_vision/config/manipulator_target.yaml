@@ -21,6 +21,7 @@ manipulator_target_node:
     max_jump_m: 0.5
     auto_grasp_enabled: true
     pregrasp_clearance_m: 0.15
+    grasp_z_offset_m: -0.02   # 파지점이 살짝 위로 잡혀서 목표 Z 를 내림(음수=아래, 2026-07-22)
     tool_grasp_reach_m: 0.115
     motion_timeout_sec: 10.0
     blade_close_delay_sec: 0.6

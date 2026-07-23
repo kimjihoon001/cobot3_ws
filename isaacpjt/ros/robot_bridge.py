@@ -100,14 +100,20 @@ def build_clock(graph_path: str = "/World/RosClock",
 
 def build_joint_bridge(stage, graph_path: str, ns: str, art_path: str,
                        domain_id: int = DOMAIN_ID, log=print,
-                       apply_commands: bool = True) -> tuple[str, str]:
+                       apply_commands: bool = True,
+                       states_topic: str = None) -> tuple[str, str]:
     """로봇 1대의 JointState 명령/상태 브리지. 반환: (명령 토픽, 상태 토픽).
 
     art_path: 아티큘레이션 루트 prim 경로. targetPrim 은 relationship 이라
     og 값 세팅이 아니라 USD 로 건다 (2026-07-19 실측).
+    states_topic: Isaac 이 발행할 상태 토픽. None 이면 /{ns}/joint_states.
+      ★MoveIt 격리 시엔 JSB(joint_state_broadcaster)가 네임스페이스 /{ns}/joint_states 로
+      arm 6축만 발행하므로, Isaac 전체관절(dummy_base 포함) 발행과 겹치면 move_group 이
+      "dummy_base_* not found" 에러. 그래서 HW 채널은 /{ns}/hw_joint_states 로 분리한다.
     """
     cmd_topic = f"/{ns}/joint_command"
-    states_topic = f"/{ns}/joint_states"
+    if states_topic is None:
+        states_topic = f"/{ns}/joint_states"
     nodes = [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
              ("SimTime", T["SimTime"]), ("Sub", T["SubJS"]),
              ("Pub", T["PubJS"])]
@@ -194,6 +200,40 @@ def build_string_pub(graph_path: str, topic: str,
            ("Pub.inputs:messageName", "String"),
            ("Pub.inputs:topicName", topic)])
     log(f"[RosBridge] String 발행: {topic} ({graph_path}/Pub)")
+    return f"{graph_path}/Pub"
+
+
+def build_float64_sub(graph_path: str, topic: str,
+                      domain_id: int = DOMAIN_ID, log=print) -> str:
+    """제네릭 ``std_msgs/Float64`` 구독 그래프. 블레이드 목표각 등에 사용한다."""
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("Sub", T["SubStr"])],
+          [("OnTick.outputs:tick", "Sub.inputs:execIn"),
+           ("Ctx.outputs:context", "Sub.inputs:context")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Sub.inputs:messagePackage", "std_msgs"),
+           ("Sub.inputs:messageSubfolder", "msg"),
+           ("Sub.inputs:messageName", "Float64"),
+           ("Sub.inputs:topicName", topic)])
+    log(f"[RosBridge] Float64 구독: {topic} ({graph_path}/Sub)")
+    return f"{graph_path}/Sub"
+
+
+def build_float64_pub(graph_path: str, topic: str,
+                      domain_id: int = DOMAIN_ID, log=print) -> str:
+    """제네릭 ``std_msgs/Float64`` 발행 그래프. 실제 액추에이터 상태용이다."""
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("Pub", T["PubStr"])],
+          [("OnTick.outputs:tick", "Pub.inputs:execIn"),
+           ("Ctx.outputs:context", "Pub.inputs:context")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Pub.inputs:messagePackage", "std_msgs"),
+           ("Pub.inputs:messageSubfolder", "msg"),
+           ("Pub.inputs:messageName", "Float64"),
+           ("Pub.inputs:topicName", topic)])
+    log(f"[RosBridge] Float64 발행: {topic} ({graph_path}/Pub)")
     return f"{graph_path}/Pub"
 
 
@@ -410,7 +450,8 @@ def build_camera(stage, graph_path: str, camera_prim: str, cam,
 
 def build_camera_optical_tf(stage, graph_path: str, base_prim: str,
                             camera_prim: str, frame_id: str,
-                            domain_id: int = DOMAIN_ID, log=print) -> None:
+                            domain_id: int = DOMAIN_ID, log=print,
+                            tf_topic: str = "/tf") -> None:
     """손끝 USD Camera의 ROS optical frame을 네이티브 동적 TF로 발행한다.
 
     USD Camera(+X 오른쪽,+Y 위,-Z 전방) 아래에 X축 180° 회전한 프림을 두면
@@ -432,7 +473,7 @@ def build_camera_optical_tf(stage, graph_path: str, base_prim: str,
            ("SimTime.outputs:simulationTime", "Tf.inputs:timeStamp")],
           [("Ctx.inputs:domain_id", domain_id),
            ("Ctx.inputs:useDomainIDEnvVar", False),
-           ("Tf.inputs:topicName", "/tf"),
+           ("Tf.inputs:topicName", tf_topic),   # 격리 시 /{ns}/tf (기본 전역 /tf)
            ("Tf.inputs:staticPublisher", False)])
     _set_target(stage, f"{graph_path}/Tf", "inputs:parentPrim", base_prim)
     _set_target(stage, f"{graph_path}/Tf", "inputs:targetPrims", optical_path)
@@ -507,6 +548,47 @@ class StringPublisher:
             except Exception:
                 return False
         og.Controller.set(self._attr, value)
+        return True
+
+
+class Float64Poller:
+    """제네릭 Float64 Subscriber의 현재 ``data`` 값을 읽는다."""
+
+    def __init__(self, node_path: str):
+        self._path = node_path
+        self._attr = None
+        self._last = None
+
+    def poll(self) -> float | None:
+        if self._attr is None:
+            try:
+                self._attr = og.Controller.attribute("outputs:data", self._path)
+            except Exception:
+                return None
+        raw = og.Controller.get(self._attr)
+        if raw is None:
+            return None
+        value = float(raw)
+        if self._last is not None and value == self._last:
+            return None
+        self._last = value
+        return value
+
+
+class Float64Publisher:
+    """제네릭 Float64 Publisher의 ``data`` 입력을 Python에서 갱신한다."""
+
+    def __init__(self, node_path: str):
+        self._path = node_path
+        self._attr = None
+
+    def publish(self, value: float) -> bool:
+        if self._attr is None:
+            try:
+                self._attr = og.Controller.attribute("inputs:data", self._path)
+            except Exception:
+                return False
+        og.Controller.set(self._attr, float(value))
         return True
 
 

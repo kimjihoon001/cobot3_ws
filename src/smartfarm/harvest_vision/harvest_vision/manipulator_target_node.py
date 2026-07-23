@@ -11,7 +11,7 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float64, String
 
 # PoseStamped 변환 등록을 위한 side effect import. Buffer.transform API를 사용하면
 # Humble(geometry2 0.25)과 Jazzy(geometry2 0.36)의 helper 함수 차이를 피할 수 있다.
@@ -41,6 +41,7 @@ class ManipulatorTargetNode(Node):
         )
         self.declare_parameter("output_topic", "/harvester_0/manipulator/target_pose")
         self.declare_parameter("isaac_command_topic", "/harvester_0/cmd")
+        self.declare_parameter("blade_command_topic", "/harvester_0/blade_command")
         self.declare_parameter("target_class_topic", "/vision/target_class")
         self.declare_parameter(
             "state_topic", "/harvester_0/manipulator/target_state"
@@ -52,6 +53,9 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("harvest_enable_topic", "/harvest_test/enable")
         self.declare_parameter("external_harvest_gate_enabled", False)
         self.declare_parameter("use_sim_ground_truth", False)
+        # YOLO 없이 맵의 시뮬 좌표로 **젤 가까운 토마토를 바로** 잡는다(검출 불필요, 집기 1순위).
+        # 켜지면 비전(class/pose) 트리거를 무시하고 watchdog 이 직접 시퀀스를 시작한다.
+        self.declare_parameter("direct_sim_grasp", False)
         self.declare_parameter("sim_tomato_topic", "/harvester_0/sim/tomato")
         self.declare_parameter("sim_match_radius_m", 0.35)
         self.declare_parameter(
@@ -64,6 +68,9 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("max_jump_m", 0.15)
         self.declare_parameter("auto_grasp_enabled", True)
         self.declare_parameter("pregrasp_clearance_m", 0.15)
+        # 파지점이 과실보다 살짝 위로 잡혀서("살짝 위를 잡음", 2026-07-22) 목표 Z 를 조금
+        # 내린다(음수=아래). 접근·파지 둘 다 같은 만큼 내려 직선 접근을 유지.
+        self.declare_parameter("grasp_z_offset_m", -0.02)
         self.declare_parameter("tool_grasp_reach_m", 0.115)
         self.declare_parameter("motion_timeout_sec", 10.0)
         self.declare_parameter("blade_close_delay_sec", 0.6)
@@ -101,6 +108,7 @@ class ManipulatorTargetNode(Node):
         validated_topic = str(self.get_parameter("validated_topic").value)
         output_topic = str(self.get_parameter("output_topic").value)
         command_topic = str(self.get_parameter("isaac_command_topic").value)
+        blade_topic = str(self.get_parameter("blade_command_topic").value)
         class_topic = str(self.get_parameter("target_class_topic").value)
         state_topic = str(self.get_parameter("state_topic").value)
         status_topic = str(self.get_parameter("rmp_status_topic").value)
@@ -115,6 +123,7 @@ class ManipulatorTargetNode(Node):
         self._validated_pub = self.create_publisher(PoseStamped, validated_topic, 10)
         self._command_pub = self.create_publisher(PoseStamped, output_topic, 10)
         self._isaac_command_pub = self.create_publisher(String, command_topic, 10)
+        self._blade_command_pub = self.create_publisher(Float64, blade_topic, 10)
         # 상태는 전이할 때만 발행하므로 늦게 붙은 디버거도 마지막 값을 받게 latch한다.
         self._state_pub = self.create_publisher(String, state_topic, latched_qos)
         self._mobility_pub = self.create_publisher(
@@ -142,6 +151,8 @@ class ManipulatorTargetNode(Node):
         )
 
     def _target_callback(self, msg: PoseStamped) -> None:
+        if bool(self.get_parameter("direct_sim_grasp").value):
+            return   # YOLO 무시 — 시뮬 좌표로 직접 파지(watchdog)
         if not msg.header.frame_id:
             self.get_logger().warning("frame_id 없는 비전 목표를 무시합니다")
             return
@@ -232,6 +243,8 @@ class ManipulatorTargetNode(Node):
             self._isaac_command_pub.publish(String(data=json.dumps(command)))
 
     def _class_callback(self, msg: String) -> None:
+        if bool(self.get_parameter("direct_sim_grasp").value):
+            return   # YOLO 무시 — 시뮬 좌표로 직접 파지(watchdog)
         target_class = msg.data.strip().lower()
         self._target_class = target_class
         if (bool(self.get_parameter("external_harvest_gate_enabled").value)
@@ -308,6 +321,36 @@ class ManipulatorTargetNode(Node):
         # 기다리는 동안 게이트 상태와 FSM 상태가 어긋나지 않게 한다.
         self._class_callback(String(data=self._target_class))
 
+    def _nearest_sim_fruit(self) -> "np.ndarray | None":
+        """맵의 시뮬 과실 중 베이스에서 젤 가까운 것(base_frame 좌표)."""
+        now = self.get_clock().now().nanoseconds
+        fresh = [pos for pos, stamp in self._sim_fruits
+                 if now - stamp <= int(30.0e9)]
+        if not fresh:
+            return None
+        return min(fresh, key=lambda p: float(np.linalg.norm(p)))
+
+    def _start_direct_grasp(self, target: np.ndarray) -> None:
+        """YOLO 없이 시뮬 좌표로 바로 파지. 접근 = 베이스에서 과실로 수평(카메라 광선 불필요)."""
+        self._mobility_pub.publish(Bool(data=False))
+        horiz = np.array([target[0], target[1], 0.0])
+        n = float(np.linalg.norm(horiz))
+        approach_dir = horiz / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
+        clearance = float(self.get_parameter("pregrasp_clearance_m").value)
+        z_off = float(self.get_parameter("grasp_z_offset_m").value)
+        pregrasp = target - approach_dir * clearance
+        pregrasp[2] += z_off
+        self._pregrasp_target = pregrasp
+        self._grasp_target = target.copy()
+        self._grasp_target[2] += z_off
+        self._latest_target = tuple(float(v) for v in target)
+        self.get_logger().info(
+            "직접 파지(YOLO 없음) 젤 가까운 토마토 "
+            f"target=({target[0]:.3f}, {target[1]:.3f}, {target[2]:.3f})")
+        self._isaac_command_pub.publish(
+            String(data=json.dumps({"gripper": {"closed": False}})))
+        self._send_rmp_goal(pregrasp, "PREGRASP")
+
     def _start_grasp_sequence(self) -> None:
         if self._latest_target is None or self._latest_camera is None:
             self._transition("ERROR_NO_TARGET", stop=True)
@@ -337,9 +380,12 @@ class ManipulatorTargetNode(Node):
         ray /= length
         clearance = float(self.get_parameter("pregrasp_clearance_m").value)
         # position은 이제 UR 플랜지가 아니라 실제 HarvestTCP 목표다.
+        z_off = float(self.get_parameter("grasp_z_offset_m").value)
         pregrasp = target - ray * clearance
+        pregrasp[2] += z_off
         self._pregrasp_target = pregrasp
-        self._grasp_target = target
+        self._grasp_target = target.copy()
+        self._grasp_target[2] += z_off
         # 파지 전 그리퍼를 연다 — 닫힌 채로 다가가면 손가락이 과실을 못 감싼다("잡는 느낌이
         # 아니다", 2026-07-22). 직전 사이클에서 닫혀 있어도 여기서 확실히 벌린다.
         self._isaac_command_pub.publish(
@@ -451,8 +497,7 @@ class ManipulatorTargetNode(Node):
                 return
             if cut_id != self._cut_id:
                 return
-            self._isaac_command_pub.publish(
-                String(data=json.dumps({"blade": 0.0})))
+            self._blade_command_pub.publish(Float64(data=0.0))
             if bool(status.get("cut_success", False)):
                 self._cut_command_at_ns = 0
                 self._send_rmp_goal(self._pregrasp_target, "RETRACT")
@@ -585,11 +630,20 @@ class ManipulatorTargetNode(Node):
         self._cut_command_at_ns = now + int(delay * 1e9)
         self._deadline_ns = now + int(
             float(self.get_parameter("motion_timeout_sec").value) * 1e9)
-        self._isaac_command_pub.publish(
-            String(data=json.dumps({"blade": 35.0})))
+        self._blade_command_pub.publish(Float64(data=35.0))
 
     def _watchdog(self) -> None:
         now = self.get_clock().now().nanoseconds
+        # YOLO 없이: 수확 켜졌고 시퀀스 안 돌고 있으면 젤 가까운 시뮬 과실을 바로 잡는다.
+        if (bool(self.get_parameter("direct_sim_grasp").value)
+                and self._harvest_enabled
+                and self._state not in ACTIVE_SEQUENCE_STATES
+                and bool(self.get_parameter("command_enabled").value)
+                and bool(self.get_parameter("auto_grasp_enabled").value)):
+            nearest = self._nearest_sim_fruit()
+            if nearest is not None:
+                self._start_direct_grasp(nearest)
+                return
         # 토마토를 정상적으로 물면 손가락은 완전 닫힘(0.8 rad)에 도달하지 않는다.
         # 닫기 목표를 계속 유지한 채 정착 시간이 지나면 파지된 것으로 보고 절단한다.
         if (self._state == "GRIPPER_CLOSING"

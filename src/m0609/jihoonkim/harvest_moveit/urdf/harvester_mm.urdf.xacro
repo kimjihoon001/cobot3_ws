@@ -1,0 +1,307 @@
+<?xml version="1.0"?>
+<!-- 수확 MM 전체 모델 — 섀시(Ridgeback) + UR10e + 그리퍼(2F-85 근사) + HarvestTCP.
+     루트 mm_base = Isaac /World/Harvester/Base/base_link (지면 원점) 프레임과 일치 →
+     mm.py 가 발행하는 과실 좌표(섀시 기준)를 변환 없이 그대로 계획 목표로 쓴다.
+     팔 마운트 (0,0,0.30) = settings arm_mount_z. 관절 이름은 Isaac 과 동일(prefix 없음). -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="harvester_mm">
+
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+
+  <!-- 섀시 — Ridgeback 근사 박스. 치수 [4] 근사(실측 아님): 0.96×0.79×0.30.
+       팔이 데크(상판 z0.30)를 뚫고 계획하지 못하게 하는 충돌체 역할이 본질. -->
+  <link name="mm_base">
+    <visual>
+      <origin xyz="0 0 0.15"/>
+      <geometry><box size="0.96 0.79 0.30"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.15 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.15"/>
+      <geometry><box size="0.96 0.79 0.30"/></geometry>
+    </collision>
+  </link>
+
+  <!-- UR10e — Isaac 조립과 동일하게 섀시 위 0.30m. tf_prefix 없음(관절명 일치 필수) -->
+  <xacro:ur_robot
+      name="ur"
+      tf_prefix=""
+      parent="mm_base"
+      generate_ros2_control_tag="false"
+      joint_limits_parameters_file="$(find ur_description)/config/ur10e/joint_limits.yaml"
+      kinematics_parameters_file="$(find ur_description)/config/ur10e/default_kinematics.yaml"
+      physical_parameters_file="$(find ur_description)/config/ur10e/physical_parameters.yaml"
+      visual_parameters_file="$(find ur_description)/config/ur10e/visual_parameters.yaml">
+    <origin xyz="0 0 0.30" rpy="0 0 0"/>
+  </xacro:ur_robot>
+
+  <!-- ══ 엔드이펙터 — Isaac 조립(harvester.py)과 동일 구성: 커플러 + 2F-85 + CAD 커터지그 + D455.
+       치수 [2] = CAD USD bbox 실측(scratchpad jig_bbox.py). 축 매핑은 실측 TF 로 판정
+       (2026-07-22): 수확자세에서 tool0 +Y=월드 위 = 커터·D455 쪽 → CAD좌표 = tool0 좌표(항등).
+       교차검증: 커플러 동축 ✓ D455 폭 0.124m=실물 ✓ 날 위 +5.7cm≈절단점 실측 5.3cm ✓
+       날 얇은축=위(가위가 꽃자루를 수평으로 벤다) ✓. ══ -->
+
+  <!-- 커플러(플랜지 어댑터) — 두께 0.012 [1] COUPLER_T, Ø50 [4] (_COUPLER_R) -->
+  <link name="coupler_body">
+    <visual>
+      <origin xyz="0 0 0.006"/>
+      <geometry><cylinder radius="0.025" length="0.012"/></geometry>
+      <material name="metal"><color rgba="0.55 0.57 0.60 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.006"/>
+      <geometry><cylinder radius="0.025" length="0.012"/></geometry>
+    </collision>
+  </link>
+  <joint name="tool0_to_coupler" type="fixed">
+    <parent link="tool0"/>
+    <child link="coupler_body"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 그리퍼(2F-85) — 실제 Robotiq base_link 메시(doosan-robot2, meter·Z_UP).
+       메시축 매핑(실측 유도): mesh+X(접근)→tool0+Z, mesh+Z(두께면=지그쪽)→tool0−Y
+       → rpy=(0,−90°,90°). 커플러 두께만큼 +Z 0.012 밀림. -->
+  <!-- ★ Isaac URDF 익스포터로 뽑은 실제 2F-85 (isaacsim.asset.exporter.urdf, 2026-07-22).
+       Isaac 이 렌더하는 그 메시(Defeatured*.obj)·정확한 4절 링키지 그대로. 추측 없음. -->
+  <link name="gripper_body">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5707964 0 1.5707964"/>
+      <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/Defeatured_2F_85_PAD_OPEN_basestep.obj"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.01 0.075"/>
+      <geometry><box size="0.09 0.11 0.15"/></geometry>
+    </collision>
+  </link>
+  <joint name="tool0_to_gripper" type="fixed">
+    <parent link="tool0"/>
+    <child link="gripper_body"/>
+    <!-- Z −90° = 그리퍼 정합(2026-07-22 사용자 "맞다" 확인값으로 원복).
+         그리퍼(base+손가락 전체)가 자식이라 함께 회전. 0.012=커플러 두께. -->
+    <origin xyz="0 0 0.012" rpy="0 0 -1.5707963"/>
+  </joint>
+
+  <!-- 커터지그(서보 가위) + D455 — 전부 tool0(=wrist_3) 프레임 실측 위치 [2]
+       (2026-07-22 헤드리스 덤프 dump_ee.py: HarvestTCP==Isaac 실물 확인).
+       지그·카메라는 tool −Y 쪽(실물과 일치). 파트별 분해(포락은 TCP 통로 막음). -->
+  <link name="jig_body">
+    <!-- 서보 (0,−0.070,+0.122) size(0.041,0.020,0.034) -->
+    <collision>
+      <origin xyz="0 -0.070 0.122"/>
+      <geometry><box size="0.041 0.020 0.034"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 -0.070 0.122"/>
+      <geometry><box size="0.041 0.020 0.034"/></geometry>
+      <material name="dark"/>
+    </visual>
+    <!-- 가위날 (+0.012,−0.057,+0.150) size(0.055,0.042,0.007) -->
+    <collision>
+      <origin xyz="0.012 -0.057 0.150"/>
+      <geometry><box size="0.055 0.042 0.007"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.012 -0.057 0.150"/>
+      <geometry><box size="0.055 0.042 0.007"/></geometry>
+      <material name="metal"><color rgba="0.72 0.76 0.80 1"/></material>
+    </visual>
+    <!-- D455 (+0.012,−0.112,+0.030) size(0.124,0.034,0.032) = 실물 폭 -->
+    <collision>
+      <origin xyz="0.012 -0.112 0.030"/>
+      <geometry><box size="0.124 0.034 0.032"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.012 -0.112 0.030"/>
+      <geometry><box size="0.124 0.034 0.032"/></geometry>
+      <material name="dark"/>
+    </visual>
+    <!-- 지지암(서보~D455 연결, −Y) -->
+    <collision>
+      <origin xyz="0.006 -0.090 0.080"/>
+      <geometry><box size="0.03 0.06 0.10"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.006 -0.090 0.080"/>
+      <geometry><box size="0.03 0.06 0.10"/></geometry>
+      <material name="metal"/>
+    </visual>
+  </link>
+  <joint name="tool0_to_jig" type="fixed">
+    <parent link="tool0"/>
+    <child link="jig_body"/>
+    <!-- Z 0° = 지그 90° 재보정(2026-07-22 사용자: 그리퍼는 맞고 지그만 90° 틀어짐). -->
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 그리퍼 손가락 — finger_joint(Isaac dof 와 동명) 을 ros2_control 로 구동하기 위한
+       실제 관절. 0=열림 ~ 0.8=닫힘(Isaac finger_joint 범위와 일치). 시각은 근사(추후 정밀).
+       ros2_control 이 finger_joint 를 command_interface 로 발행 → topic_based 가 팔+finger 를
+       한 /joint_command 메시지에 실어 Isaac 브리지가 이름으로 적용(경합 없음). -->
+  <!-- ★ Isaac 익스포트 실측 4절 링키지(2026-07-22). 부모 Robotiq_2F_85 → gripper_body.
+       finger_joint = 좌 outer_knuckle(ros2_control 구동). 나머지는 mimic(시각). 충돌 생략(계획보호). -->
+  <link name="left_outer_knuckle"><visual>
+    <origin xyz="-0.0306 -0.05466 0" rpy="-3.1415927 0 3.1415927"/>
+    <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/left_outer_knuckle_visuals_Defeatured_2F_85_PAD_OPEN_Finger1step_01_Defeatured_2F_85_PAD_OPEN_Finger1step.obj"/></geometry>
+  </visual></link>
+  <joint name="finger_joint" type="revolute">
+    <parent link="gripper_body"/><child link="left_outer_knuckle"/>
+    <origin xyz="0 -0.0306 0.05466" rpy="1.5707964 0 -1.5707964"/>
+    <axis xyz="0 0 1"/><limit lower="-0.05" upper="0.82" effort="50" velocity="2.5"/>
+  </joint>
+  <link name="left_outer_finger"><visual>
+    <origin xyz="0 0 0" rpy="1.5707964 0 1.5707963"/>
+    <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/left_outer_finger_visuals_Defeatured_2F_85_PAD_OPEN_finger2step_01_Defeatured_2F_85_PAD_OPEN_finger2step.obj"/></geometry>
+  </visual></link>
+  <joint name="left_outer_finger_joint" type="fixed">
+    <parent link="left_outer_knuckle"/><child link="left_outer_finger"/>
+    <origin xyz="-0.0306 -0.05466 0" rpy="-1.5707965 1.5707963 0"/>
+  </joint>
+  <link name="left_inner_finger">
+    <visual><origin xyz="0.06776 0.09809 0" rpy="-3.1415927 0 0"/>
+      <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/left_inner_finger_visuals_Defeatured_2F_85_PAD_OPEN_finger4step_01_Defeatured_2F_85_PAD_OPEN_finger4step.obj"/></geometry></visual>
+    <visual><origin xyz="0.06776 0.09809 0" rpy="-3.1415927 0 0"/>
+      <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/left_inner_finger_visuals_Defeatured_2F_85_PAD_OPEN_fingertipsstep_01_Defeatured_2F_85_PAD_OPEN_fingertipsstep.obj"/></geometry></visual>
+  </link>
+  <joint name="left_inner_finger_joint" type="revolute">
+    <parent link="left_outer_finger"/><child link="left_inner_finger"/>
+    <origin xyz="0 -0.06776 0.09809" rpy="-1.5707963 0 1.5707963"/>
+    <axis xyz="0 0 1"/><limit lower="-0.8" upper="0.8" effort="0" velocity="2.5"/>
+    <mimic joint="finger_joint" multiplier="-1" offset="0"/>
+  </joint>
+  <link name="left_inner_knuckle"><visual>
+    <origin xyz="0.04986 -0.1046 0" rpy="0 0 0"/>
+    <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/left_inner_knuckle_visuals_Defeatured_2F_85_PAD_OPEN_finger3step_01_Defeatured_2F_85_PAD_OPEN_finger3step.obj"/></geometry>
+  </visual></link>
+  <joint name="left_inner_finger_knuckle_joint" type="revolute">
+    <parent link="left_inner_finger"/><child link="left_inner_knuckle"/>
+    <origin xyz="0.0179 -0.00651 0" rpy="3.1415927 0 0"/>
+    <axis xyz="0 0 1"/><limit lower="-0.8" upper="0.8" effort="0" velocity="2.5"/>
+    <mimic joint="finger_joint" multiplier="-1" offset="0"/>
+  </joint>
+  <link name="right_outer_knuckle"><visual>
+    <origin xyz="0.0306 0.05466 0" rpy="-3.1415927 0 0"/>
+    <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/right_outer_knuckle_visuals_Defeatured_2F_85_PAD_OPEN_Finger1step_01_Defeatured_2F_85_PAD_OPEN_Finger1step.obj"/></geometry>
+  </visual></link>
+  <joint name="right_outer_knuckle_joint" type="revolute">
+    <parent link="gripper_body"/><child link="right_outer_knuckle"/>
+    <origin xyz="0 0.0306 0.05466" rpy="-1.5707964 0 -1.5707964"/>
+    <axis xyz="0 0 1"/><limit lower="-0.05" upper="0.82" effort="0" velocity="2.5"/>
+    <mimic joint="finger_joint" multiplier="1" offset="0"/>
+  </joint>
+  <link name="right_outer_finger"><visual>
+    <origin xyz="0 0 0" rpy="1.5707964 0 -1.5707964"/>
+    <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/right_outer_finger_visuals_Defeatured_2F_85_PAD_OPEN_finger2step_01_Defeatured_2F_85_PAD_OPEN_finger2step.obj"/></geometry>
+  </visual></link>
+  <joint name="right_outer_finger_joint" type="fixed">
+    <parent link="right_outer_knuckle"/><child link="right_outer_finger"/>
+    <origin xyz="0.0306 0.05466 0" rpy="1.5707963 -1.5707963 0"/>
+  </joint>
+  <link name="right_inner_finger">
+    <visual><origin xyz="0.06776 -0.09809 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/right_inner_finger_visuals_Defeatured_2F_85_PAD_OPEN_finger4step_01_Defeatured_2F_85_PAD_OPEN_finger4step.obj"/></geometry></visual>
+    <visual><origin xyz="0.06776 -0.09809 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/right_inner_finger_visuals_Defeatured_2F_85_PAD_OPEN_fingertipsstep_01_Defeatured_2F_85_PAD_OPEN_fingertipsstep.obj"/></geometry></visual>
+  </link>
+  <joint name="right_inner_finger_joint" type="revolute">
+    <parent link="right_outer_finger"/><child link="right_inner_finger"/>
+    <origin xyz="0 0.06776 0.09809" rpy="1.5707964 0 -1.5707964"/>
+    <axis xyz="0 0 1"/><limit lower="-0.8" upper="0.8" effort="0" velocity="2.5"/>
+    <mimic joint="finger_joint" multiplier="-1" offset="0"/>
+  </joint>
+  <link name="right_inner_knuckle"><visual>
+    <origin xyz="0.04986 -0.1046 0" rpy="0 0 0"/>
+    <geometry><mesh filename="package://harvest_moveit/meshes/robotiq_obj/right_inner_knuckle_visuals_Defeatured_2F_85_PAD_OPEN_finger3step_01_Defeatured_2F_85_PAD_OPEN_finger3step.obj"/></geometry>
+  </visual></link>
+  <joint name="right_inner_finger_knuckle_joint" type="revolute">
+    <parent link="right_inner_finger"/><child link="right_inner_knuckle"/>
+    <origin xyz="0.0179 0.00651 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/><limit lower="-0.8" upper="0.8" effort="0" velocity="2.5"/>
+    <mimic joint="finger_joint" multiplier="-1" offset="0"/>
+  </joint>
+
+  <!-- 파지점(TCP) — tool0 +Z 0.127 [2] = COUPLER_T 0.012 + grasp_reach_z 0.115
+       (harvester.py: HarvestTCP 는 커플러만큼 밀린 그리퍼 base_link 의 +Z 0.115 자식.
+        기존 0.115 는 커플러 두께 12mm 누락 — grasp_proto 의 TOOL_LEN 도 동일 이슈). -->
+  <link name="harvest_tcp"/>
+  <joint name="tool0_to_harvest_tcp" type="fixed">
+    <parent link="tool0"/>
+    <child link="harvest_tcp"/>
+    <!-- Z 0.1319 = 0.127 + 4.9mm (2026-07-22 실측: 패드중점이 HarvestTCP 앞 4.9mm).
+         횡방향은 이미 중심(패드 ±59mm 대칭). -->
+    <origin xyz="0 0 0.1319" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Isaac 토픽 하드웨어 (기존과 동일). initial_value=홈 — 기동 창 0-끌림 방지(실측). -->
+  <ros2_control name="IsaacTopicBased" type="system">
+    <hardware>
+      <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
+      <param name="joint_commands_topic">/harvester_moveit/joint_command</param>
+      <param name="joint_states_topic">/harvester_moveit/hw_joint_states</param>
+    </hardware>
+    <joint name="shoulder_pan_joint">
+      <command_interface name="position">
+        <param name="initial_value">0.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="shoulder_lift_joint">
+      <command_interface name="position">
+        <param name="initial_value">3.9269908</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">3.9269908</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="elbow_joint">
+      <command_interface name="position">
+        <param name="initial_value">2.3561945</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">2.3561945</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_1_joint">
+      <command_interface name="position">
+        <param name="initial_value">3.1415927</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">3.1415927</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_2_joint">
+      <command_interface name="position">
+        <param name="initial_value">-1.5707963</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">-1.5707963</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_3_joint">
+      <command_interface name="position">
+        <param name="initial_value">0.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <!-- 그리퍼 — 팔과 같은 topic_based 경로로 구동. 초기값 0.0=열림. -->
+    <joint name="finger_joint">
+      <command_interface name="position">
+        <param name="initial_value">0.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+</robot>

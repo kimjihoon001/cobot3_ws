@@ -52,6 +52,11 @@ from pathlib import Path
 GUI = "--headless" not in sys.argv
 NO_ROS = "--no-ros" in sys.argv
 QUIET = "--quiet" in sys.argv
+# --airfruit: nav 없이 팔 앞 도달권에 과실 하나 띄우고 /sim/tomato 로 발행 → MoveIt 로
+# 바로 잡는 테스트(주행·정렬 생략, 파지/TCP 빠른 반복). 시작 시 손가락 파지중심도 실측 출력.
+AIRFRUIT = "--airfruit" in sys.argv
+GRASP_MEAS_FILE = "/tmp/grasp_center_meas.txt"   # 파지중심 실측 결과(버퍼링 우회, ROS쪽서 읽음)
+GRIPPER_DUMP_FILE = "/tmp/gripper_structure.txt" # Robotiq 서브트리 링크/메시 덤프(RViz 정합용)
 # iw.hub Nav2 브리지 — 하나씩 켜며 GPU 검증(순서 drive→odom→scan). --nav 는 셋 다.
 # ⚠ 노드 타입명 미확정(tools/nav2_node_probe.py 로 먼저 실측). 기본 꺼짐이라 씬엔 영향 없음.
 NAV_DRIVE = "--nav-drive" in sys.argv or "--nav" in sys.argv
@@ -61,6 +66,10 @@ NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
 # ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로(main 이 예외 잡음).
 CAMERA = "--no-camera" not in sys.argv
 RMPFLOW = "--rmpflow" in sys.argv
+# ★제어 모드 분리 (ROS2 겹침 방지, 2026-07-23) — 같은 MM 을 MoveIt 또는 RMPflow 로.
+#   --moveit: 팔 브리지가 /joint_command 를 직접 적용(topic_based_ros2_control=MoveIt).
+#   없으면(기본): 팔 브리지 apply 안 함 → 팀원 RMPflow 가 팔을 구동(둘이 동시에 안 싸움).
+MOVEIT = "--moveit" in sys.argv
 # MM 키보드 텔레옵 (팔·베이스·그리퍼·블레이드 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
 # MM 키보드 입력은 명시적인 전용 플래그만 사용한다. --mm와 --iw를 같이 띄워도
 # 키 입력이 iw.hub에 전달되거나 전역 teleop 상태를 공유하지 않는다.
@@ -236,6 +245,12 @@ def build_drivers(cfg, task=None) -> list:
     if "--fork" in sys.argv:
         from fork import ForkDriver
         drivers.append(ForkDriver(cfg))
+    # ★MoveIt MM(내 것, 2026-07-23) — build_drivers 끝에 추가해 f2(iw) 의 --mm/--iw 변경과
+    #   영역이 안 겹치게 한다(머지 충돌 회피). --moveit → moveit_mm(/World/HarvesterMoveit,
+    #   harvester_moveit). --mm 은 팀원 RMPflow(mm.py) 그대로 → --mm --moveit 동시 스폰 가능.
+    if MOVEIT:
+        from moveit_mm import MMDriver as MoveitMMDriver
+        drivers.append(MoveitMMDriver(cfg, task=task))
     return drivers
 
 
@@ -327,6 +342,11 @@ def run_loaded(path: str) -> None:
         from isaacsim.core.utils.viewports import set_camera_view
         set_camera_view(eye=[10.0, -18.0, 12.0], target=[0.0, 2.0, 0.5])
 
+    if not GUI:
+        # 헤드리스엔 ▶Play 누를 사람이 없다 — 자동 재생. 안 하면 OnPlaybackTick 이
+        # 영원히 안 틱해서 브리지(/clock·joint_states)가 침묵한다(2026-07-22 실측).
+        world.play()
+
     was_playing = False
     while simulation_app.is_running():
         world.step(render=True)
@@ -336,6 +356,175 @@ def run_loaded(path: str) -> None:
         was_playing = is_playing
         if teleop is not None:
             teleop(is_playing)
+
+
+def _measure_grasp_center(stage, mm) -> None:
+    """실제 손가락 패드 중점(=진짜 파지중심)을 HarvestTCP 기준으로 실측 → URDF harvest_tcp 교정.
+    HarvestTCP 프레임은 tool0 방향과 일치(harvester.py 가 rot 없이 정의)하므로, 여기서 나온
+    오프셋을 그대로 URDF harvest_tcp origin(0,0,0.127)에 더하면 파지중심이 맞는다.
+    버퍼링 우회: 파일(GRASP_MEAS_FILE)에 flush 기록. 개별 패드 위치도 남겨 그리퍼 축 확인."""
+    from pxr import Gf, Usd, UsdGeom
+    cache = UsdGeom.XformCache()
+    tcp = None
+    for p in stage.Traverse():
+        if p.GetName() == "HarvestTCP":
+            tcp = p; break
+    if tcp is None:
+        print("[AirFruit] HarvestTCP 못 찾음 — 파지중심 측정 생략", flush=True); return
+    Tinv = cache.GetLocalToWorldTransform(tcp).GetInverse()
+    # ★ 링크 원점(=너클)이 아니라 손가락 PAD 콜라이더 메시의 월드 bbox 중심(실제 접촉면)을
+    #   쓴다 — 접근축(Z) 높이가 여기서 정해진다(2026-07-22, 너클 -0.115 는 접촉면 아님).
+    bbc = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                            [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+    fps = {}
+    for p in stage.Traverse():
+        if p.GetName() in ("left_inner_finger", "right_inner_finger"):
+            r = bbc.ComputeWorldBound(p).ComputeAlignedRange()
+            if r.IsEmpty():
+                continue
+            c = r.GetMidpoint()
+            fps[p.GetName()] = Gf.Vec3d(Tinv.Transform(Gf.Vec3d(c)))
+    li = fps.get("left_inner_finger")
+    ri = fps.get("right_inner_finger")
+    lines = ["# 손가락 패드 위치 (HarvestTCP 로컬프레임, tool0 방향). 단위 m."]
+    for nm, c in fps.items():
+        lines.append(f"{nm:26s} ({c[0]:+.4f}, {c[1]:+.4f}, {c[2]:+.4f})")
+    if li is not None and ri is not None:
+        mid = (li + ri) * 0.5
+        span = (li - ri)                      # 두 패드 사이 벡터 = 그리퍼 닫힘축
+        lines.append("")
+        lines.append(f"GRASP_CENTER_offset  ({mid[0]:+.4f}, {mid[1]:+.4f}, {mid[2]:+.4f})  "
+                     f"# HarvestTCP→실제 파지중심. URDF harvest_tcp 에 이만큼 더할 것")
+        lines.append(f"CLOSE_AXIS_span      ({span[0]:+.4f}, {span[1]:+.4f}, {span[2]:+.4f})  "
+                     f"# 좌-우 패드 벡터 = 그리퍼 닫힘축 방향/거리")
+        lines.append(f"# 새 harvest_tcp origin = (0,0,0.127) + GRASP_CENTER_offset "
+                     f"= ({mid[0]:+.4f}, {mid[1]:+.4f}, {0.127+mid[2]:+.4f})")
+    text = "\n".join(lines) + "\n"
+    try:
+        with open(GRASP_MEAS_FILE, "w") as f:
+            f.write(text)
+    except OSError as exc:
+        print(f"[AirFruit] 측정파일 기록 실패: {exc}", flush=True)
+    print("[AirFruit] ★파지중심 측정 →\n" + text, flush=True)
+    _dump_gripper_structure(stage, tcp)
+
+
+def _dump_gripper_structure(stage, tcp_prim) -> None:
+    """그리퍼(Robotiq 2F-85) 서브트리의 각 링크 로컬변환 + 메시참조를 덤프.
+    HarvestTCP 로컬프레임(=URDF harvest_tcp 방향) 기준 → URDF 손가락 링키지를 실제 배치로
+    재구성해 RViz 를 Isaac 과 일치시키기 위함(사용자 요청 2026-07-22). 버퍼링 우회=파일."""
+    from pxr import Gf, UsdGeom, UsdPhysics
+    cache = UsdGeom.XformCache()
+    Tinv = cache.GetLocalToWorldTransform(tcp_prim).GetInverse()
+    lines = ["# Robotiq 2F-85 링크 구조 (HarvestTCP 로컬프레임, tool0 방향, 단위 m).",
+             "# 열: 프리즘경로 | pos(x,y,z) | 메시에셋(있으면)"]
+    for p in stage.Traverse():
+        path = str(p.GetPath())
+        if "Robotiq" not in path and "Gripper" not in path:
+            continue
+        tp = p.GetTypeName()
+        if tp not in ("Xform", "Mesh"):
+            continue
+        m = cache.GetLocalToWorldTransform(p)
+        pos = Gf.Vec3d(Tinv.Transform(m.ExtractTranslation()))
+        mesh = ""
+        try:                                   # 메시 파일 참조(references 메타데이터)
+            refs = p.GetMetadata("references")
+            if refs and getattr(refs, "prependedItems", None):
+                mesh = ";".join(str(i.assetPath) for i in refs.prependedItems)
+        except Exception:
+            pass
+        # 물리 콜라이더 판별용 — 적용 스키마(Collision/Physx 만 표시)
+        schemas = [s for s in p.GetAppliedSchemas()
+                   if "Colli" in s or "Physx" in s or "RigidBody" in s or "Material" in s]
+        sch = ("[" + ",".join(schemas) + "]") if schemas else ""
+        lines.append(f"{path:70s} ({pos[0]:+.4f},{pos[1]:+.4f},{pos[2]:+.4f}) {sch} {mesh}")
+    # --- 조인트(RevoluteJoint): 손가락 링키지 피벗·축 (URDF 재구성용) ---
+    lines.append("")
+    lines.append("# --- RevoluteJoint (parent->child, axis, localPos0=부모기준피벗, localPos1=자식기준피벗) ---")
+    for p in stage.Traverse():
+        path = str(p.GetPath())
+        if "Robotiq" not in path or not p.IsA(UsdPhysics.RevoluteJoint):
+            continue
+        j = UsdPhysics.RevoluteJoint(p)
+        b0 = j.GetBody0Rel().GetTargets(); b1 = j.GetBody1Rel().GetTargets()
+        b0s = str(b0[0]).split("/")[-1] if b0 else "?"
+        b1s = str(b1[0]).split("/")[-1] if b1 else "?"
+        lp0 = j.GetLocalPos0Attr().Get(); lp1 = j.GetLocalPos1Attr().Get()
+        lr0 = j.GetLocalRot0Attr().Get(); lr1 = j.GetLocalRot1Attr().Get()
+        axis = j.GetAxisAttr().Get()
+        lines.append(f"JOINT {p.GetName():28s} {b0s}->{b1s} axis={axis} "
+                     f"lp0={lp0} lp1={lp1} lr0={lr0} lr1={lr1}")
+    text = "\n".join(lines) + "\n"
+    try:
+        with open(GRIPPER_DUMP_FILE, "w") as f:
+            f.write(text)
+        print(f"[AirFruit] 그리퍼 구조 덤프 → {GRIPPER_DUMP_FILE} ({len(lines)-2} prim)", flush=True)
+    except OSError as exc:
+        print(f"[AirFruit] 그리퍼 덤프 기록 실패: {exc}", flush=True)
+
+
+def _spawn_one_airfruit(stage, world_pos, idx: int) -> str:
+    """공중 과실 1개 스폰(실제 토마토 USD Body + 중심 충돌구 + 그립 줄기 원통). 인덱스별
+    독립 머티리얼(/World/PM/airfruit_i, airstem_i)로 케이스마다 마찰을 따로 스윕. 반환: prim 경로."""
+    from pxr import Gf, Usd, UsdGeom
+    from isaacsim.core.utils.stage import add_reference_to_stage
+    from scene.physics import (add_sphere_collider, add_rigid_body, add_cylinder_collider,
+                               create_physics_material, bind_physics_material)
+    S = 0.001675                                       # 씬 토마토 스케일(settings)
+    body_usd = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "assets", "tomato", "tomato_ripe_03.usd")
+    cache = UsdGeom.XformCache()
+    path = f"/World/AirFruit_{idx}"
+    fruit = UsdGeom.Xform.Define(stage, path)
+    xf = UsdGeom.Xformable(fruit.GetPrim())
+    xf.AddTranslateOp().Set(Gf.Vec3d(world_pos))
+    xf.AddScaleOp().Set(Gf.Vec3f(S, S, S))
+    add_reference_to_stage(body_usd, path + "/Body")
+    body_prim = stage.GetPrimAtPath(path + "/Body")
+    cw = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                          [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
+                          ).ComputeWorldBound(body_prim).ComputeAlignedRange().GetMidpoint()
+    cl = cache.GetLocalToWorldTransform(fruit.GetPrim()).GetInverse().Transform(cw)
+    add_sphere_collider(stage, path + "/Collision", 0.025 / S,
+                        center=(cl[0], cl[1], cl[2]))
+    add_rigid_body(fruit.GetPrim(), 1000.0, kinematic=True)
+    bind_physics_material(fruit.GetPrim(),
+                          create_physics_material(stage, f"/World/PM/airfruit_{idx}", 0.9, 0.7))
+    _up = (0.025 + 0.025) / S                              # 과실 중심 위(로컬)
+    add_cylinder_collider(stage, path + "/GripStem", 0.005 / S, 0.05 / S,
+                          center=(cl[0], cl[1], cl[2] + _up), visible=True)
+    bind_physics_material(stage.GetPrimAtPath(path + "/GripStem"),
+                          create_physics_material(stage, f"/World/PM/airstem_{idx}", 0.9, 0.7))
+    return path
+
+
+def _setup_air_fruit(stage, drivers) -> None:
+    """nav 없이 팔 앞 도달권에 **실제 토마토 USD** 과실을 **여러 개(가로 한 줄)** 띄운다.
+    스윕 스파이크가 케이스마다 fresh 과실을 잡게 해 reset 반복 상태오염을 회피(사용자 지적
+    2026-07-22 "처음빼고 상태이상". "매번 스폰하지말고 한번에 여러개"). 개수·간격은 env."""
+    from pxr import Gf, UsdGeom
+    # ★name 분리 대응(2026-07-23, Codex): moveit_mm 은 name="mm_moveit" 이므로 "mm" 로만
+    #   찾으면 --moveit --airfruit 에서 못 찾는다. name 이 "mm" 로 시작하는 MM 계열을 잡는다.
+    mm = next((d for d in drivers if getattr(d, "name", "").startswith("mm")), None)
+    if mm is None:
+        print("[AirFruit] MM 드라이버 없음 — --mm 또는 --moveit 필요"); return
+    base = stage.GetPrimAtPath(f"{mm.root}/Base/base_link")
+    if not base.IsValid():
+        print("[AirFruit] base_link 못 찾음"); return
+    n = int(os.environ.get("AIRFRUIT_N", "6"))
+    dy = float(os.environ.get("AIRFRUIT_DY", "0.07"))     # 과실 간 가로 간격(섀시 Y, m)
+    cache = UsdGeom.XformCache()
+    b2w = cache.GetLocalToWorldTransform(base)
+    paths = []
+    for i in range(n):
+        y = (i - (n - 1) / 2.0) * dy                       # 중앙 대칭 한 줄
+        world_pos = b2w.Transform(Gf.Vec3d(0.6, y, 1.0))
+        paths.append(_spawn_one_airfruit(stage, world_pos, i))
+    mm.set_air_fruits(paths)
+    print(f"[AirFruit] 실제 토마토 {n}개 스폰 — 섀시 (0.6, ±, 1.0) 가로 한 줄 dy={dy} "
+          f"(각 Body USD + 충돌구 + 그립줄기, 인덱스별 μ 머티리얼)", flush=True)
+    _measure_grasp_center(stage, mm)
 
 
 def main() -> None:
@@ -354,6 +543,8 @@ def main() -> None:
     drivers = build_drivers(cfg, task=task)
     if drivers:
         _assemble_robots(world, stage, drivers)
+        if AIRFRUIT:
+            _setup_air_fruit(stage, drivers)
     else:
         print("[Main] 로봇 플래그 없음 — 환경(씬)만 띄운다. "
               "(--mm / --iw / --fork 로 로봇 선택)")
@@ -383,6 +574,11 @@ def main() -> None:
         print("  ※ 참조형(절대경로) — Isaac GUI 로 열면 같은 씬. Nucleus 접속 필요.")
         if not GUI:
             return                               # 헤드리스면 저장만 하고 종료(아래 close)
+
+    if not GUI:
+        # 헤드리스엔 ▶Play 누를 사람이 없다 — 자동 재생. 안 하면 OnPlaybackTick 이
+        # 안 틱해서 브리지(/clock·joint_states)가 침묵한다(2026-07-22 실측).
+        world.play()
 
     # Play/Stop 반복 시 동일한 초기 상태에서 재시작 (재현성)
     was_playing = False

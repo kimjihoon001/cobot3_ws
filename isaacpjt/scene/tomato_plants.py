@@ -49,6 +49,9 @@ class TomatoPlants:
         self._fruit_count = 0
         self._fruits: list[dict] = []   # 수확 대상 목록 (FSM/Detector 가 사용)
         self._ped_cfg = pedicel.PedicelConfig()   # 꽃자루 치수([W2024])
+        # 그립용 줄기(원통 콜라이더) — 소수 ripe 과실에만(사용자 "몇개만 저걸로"). 절단 후
+        # 과실+줄기 함께 dynamic → 원통 파지로 유지(squeeze-pop 회피). 0=끔.
+        self._grippable_left = 12
 
     @property
     def fruits(self) -> list[dict]:
@@ -202,7 +205,9 @@ class TomatoPlants:
         c = self._cfg
         UsdGeom.Xform.Define(stage, path)
 
-        # 줄기
+        # 줄기 (시각) — 전체 높이. 콜라이더는 안 붙인다. 밑동에만 따로 둔다(아래) →
+        # 과실 구간은 뻥 뚫려 그리퍼가 어느 각도에서든 과실에 접근한다(줄기 뒤 과실도
+        # 파지 가능, 파지 단순화 2026-07-22).
         stem = UsdGeom.Cylinder.Define(stage, path + "/Stem")
         r = c.stem_radius
         stem.CreateRadiusAttr(r)
@@ -213,7 +218,20 @@ class TomatoPlants:
         stem.CreateDisplayColorAttr([STEM_COLOR])
         UsdGeom.Xformable(stem.GetPrim()).AddTranslateOp().Set(
             Gf.Vec3d(x, y, c.stem_height / 2.0))
-        physics.add_shape_collider(stem.GetPrim())
+
+        # 줄기 밑동 콜라이더 — 과실 구간 아래(stem_collider_height)까지만. 로봇 베이스는
+        # 막되 팔의 과실 접근은 안 막는다. 안 보이는 물리 기둥(시각 줄기와 겹침).
+        ch = c.stem_collider_height
+        base = UsdGeom.Cylinder.Define(stage, path + "/StemBase")
+        base.CreateRadiusAttr(r)
+        base.CreateHeightAttr(ch)
+        base.CreateAxisAttr("Z")
+        base.CreateExtentAttr([Gf.Vec3f(-r, -r, -ch / 2.0),
+                               Gf.Vec3f(r, r, ch / 2.0)])
+        UsdGeom.Xformable(base.GetPrim()).AddTranslateOp().Set(
+            Gf.Vec3d(x, y, ch / 2.0))
+        UsdGeom.Imageable(base.GetPrim()).MakeInvisible()   # 콜라이더 전용
+        physics.add_shape_collider(base.GetPrim())
 
         # aoc 배경 식물(잎+가지) — 시각 전용. 원기둥 줄기(콜라이더)는 그대로 두고 위에 얹는다.
         # foliage=False 인 그루는 잎 없이 줄기만(레퍼런스처럼 덜 무성하게).
@@ -267,13 +285,18 @@ class TomatoPlants:
         # 화방: 줄기에서 옆으로 조금(pedicel_h_offset) + 아래로 매단다 (인장).
         # spike 02: 수평 캔틸레버는 굽힘모멘트가 break_torque(0.067N·m)를 넘겨 바로 끊긴다.
         # 같은 그루 과실은 줄기 둘레로 고르게 벌린다(겹침→침투복구 튕김 방지) + 약간 지터.
+        # ㅣㄱ 모양(사용자 요청 2026-07-22): 줄기(ㅣ)에서 수평 가지(H)가 나가고, 그 끝에서
+        # 90° 아래로(V) 과실이 매달린다. 수평 일자로 뻗으면 그리퍼 접근 자세가 나빠 파지가
+        # 안 됐다 — 아래로 매달려야 접근이 일정하고 잡힌다.
         angle = 2.0 * math.pi * fi / nf + rng.uniform(-0.3, 0.3)
-        h = c.pedicel_h_offset
-        drop = math.sqrt(max(c.fruit_offset ** 2 - h ** 2, 1e-6))
-        fz = rng.uniform(*c.fruit_height_range)
-        stem_pt = (stem_x, stem_y, fz + drop)      # 줄기 부착점 (위)
-        pos = Gf.Vec3d(stem_x + h * math.cos(angle),
-                       stem_y + h * math.sin(angle), fz)   # 과실 (아래)
+        H = c.pedicel_h_offset        # 수평 가지 길이
+        V = c.pedicel_v_drop          # 가지 끝에서 과실까지 아래로
+        fz = rng.uniform(*c.fruit_height_range)           # 과실(매달린) 높이
+        pos = Gf.Vec3d(stem_x + H * math.cos(angle),
+                       stem_y + H * math.sin(angle), fz)   # 과실 = 가지 끝 아래
+        branch_top = fz + V
+        stem_attach = (stem_x, stem_y, branch_top)                # 줄기쪽 가지 시작
+        branch_end = (float(pos[0]), float(pos[1]), branch_top)   # 가지 끝(과실 바로 위)
 
         # 회전(요)은 넣지 않는다 — 과실 Xform 에 회전이 걸리면 pedicel.spawn 의 조인트
         # 프레임 계산이 어긋나 "disjointed body transforms" 로 스냅된다(spike 02 는 회전
@@ -298,9 +321,20 @@ class TomatoPlants:
         # 2026-07-22 되돌림). 절단 순간 detach_fruit 가 set_kinematic(False) → dynamic 낙하.
         # 충돌은 시각 몸통(convexHull, 전체크기) 대신 **중심의 작은 구** — 그리퍼 접근 여유
         # 확보(2026-07-22). 반지름은 월드 m 를 과실 스케일로 나눠 로컬 단위로.
+        # 충돌 구 중심 = Body 메시 기하 중심(bbox). 토마토 USD 원점이 미centering 이라
+        # 원점에 두면 파지 목표(mm._publish_sim_tomato 도 bbox 중심)와 어긋나 그리퍼가 헛
+        # 닫힌다("치고 간다" 2026-07-22). 월드 중심 → 과실 로컬(raw 단위)로 변환해 배치.
+        body_prim = stage.GetPrimAtPath(path + "/Body")
+        cw = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(),
+            [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
+        ).ComputeWorldBound(body_prim).ComputeAlignedRange().GetMidpoint()
+        cl = UsdGeom.XformCache().GetLocalToWorldTransform(
+            stage.GetPrimAtPath(path)).GetInverse().Transform(cw)
         physics.add_sphere_collider(
             stage, path + "/Collision",
-            self._phys.fruit_collision_radius_m / self._assets.scale)
+            self._phys.fruit_collision_radius_m / self._assets.scale,
+            center=(cl[0], cl[1], cl[2]))
         prim = stage.GetPrimAtPath(path)
         physics.add_rigid_body(prim, self._phys.fruit_density, kinematic=True)
         # sleep 비활성 — 과실이 매달려 가만히 있으면 PhysX 가 잠재우는데, 잠든 강체는
@@ -308,20 +342,36 @@ class TomatoPlants:
         PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateSleepThresholdAttr(0.0)
         physics.bind_physics_material(prim, self._fruit_material)
 
+        # ★ 그립용 줄기(원통) — 소수 ripe 과실에만(사용자 "몇개만"). 과실 강체의 자식이라
+        #   절단(detach_fruit → dynamic) 시 함께 dynamic → 그리퍼가 원통 옆면을 물어 과실이
+        #   매달림. 강체 구(body)는 평행패드에서 squeeze-pop 으로 튕기지만 원통은 안 튕긴다.
+        #   과실 위(로컬 단위 = 월드/scale)에 수직 5cm 원통, μ0.9(fruit material).
+        if self._grippable_left > 0 and class_name == "ripe":
+            self._grippable_left -= 1
+            _up = (self._phys.fruit_collision_radius_m + 0.025) / s   # 과실 중심 위(로컬)
+            physics.add_cylinder_collider(
+                stage, path + "/GripStem", 0.005 / s, 0.05 / s,
+                center=(cl[0], cl[1], cl[2] + _up), visible=True)
+            physics.bind_physics_material(
+                stage.GetPrimAtPath(path + "/GripStem"), self._fruit_material)
+            print(f"[GripStem] 그립용 줄기 과실 → 월드 "
+                  f"{tuple(round(float(v), 3) for v in pos)}  ({path})", flush=True)
+
         # 꽃자루 + 파단 조인트로 줄기에 매단다. 자를 땐 이 joint 를 pedicel.cut() 한다.
         # 시각 세그먼트는 plant_path(변환 없음) 밑에 둔다 (줄기·과실 변환에 안 딸리게).
         # 꽃자루는 과실 **꼭지(calyx)**에 붙는다 — 과실 중심이 아니라 꼭대기(+Z 반지름만큼).
         # 과실은 꼭지가 위를 향하게 스폰되므로 위로 올린 점이 꼭지 위치. (조인트 물리 앵커는
         # 과실 원점=중심 그대로 두어 안정적, 시각 꽃자루만 꼭지로 — pedicel.spawn 의 fruit_point
         # 은 세그먼트용이라 조인트 프레임엔 영향 없다.)
-        calyx = (pos[0], pos[1], pos[2] + c.fruit_calyx_up)
+        calyx = (float(pos[0]), float(pos[1]), float(pos[2]) + c.fruit_calyx_up)
+        leaf = path.rsplit("/", 1)[-1]
 
-        # 매달림엔 상향된 hold_force/hold_torque 를 쓴다 — 옆매달림 굽힘·스폰 겹침 충돌이
-        # 실제 파단값(40.262N / 0.067N·m)을 넘겨 끊기기 때문(spike 02). settings 주석 참고.
-        # 절단은 jointEnabled=False(pedicel.cut)로 하므로 이 값과 무관.
-        # kinematic 과실이라 조인트는 안 만든다 — 정적끼리라 "joint between static bodies"
-        # 에러가 난다(2026-07-22). 시각 꽃자루만 두고, 절단은 detach_fruit 가 set_kinematic 로.
-        joint = pedicel.spawn(stage, plant_path + "/Stem", path, stem_pt,
+        # ㅣㄱ 시각: ① 줄기→가지 끝 수평 가지(truss), ② 가지 끝→과실 꼭지 수직 꽃자루.
+        # kinematic 과실이라 조인트는 안 만든다(정적끼리 "joint between static bodies" 에러).
+        # 절단은 detach_fruit 가 set_kinematic(False)로 한다.
+        pedicel.branch(stage, f"{plant_path}/Branch_{leaf}",
+                       stem_attach, branch_end, c.pedicel_branch_diameter)
+        joint = pedicel.spawn(stage, plant_path + "/Stem", path, branch_end,
                               calyx, self._ped_cfg,
                               self._phys.pedicel_hold_force,
                               self._phys.pedicel_hold_torque,

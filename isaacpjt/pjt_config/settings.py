@@ -136,25 +136,37 @@ class PlantConfig:
     #   (제8차 한국인 인체치수조사: 평균 신장 남 172.5cm / 여 159.6cm)
     # TODO 사이즈코리아(sizekorea.kr)에서 무릎높이/어깨높이 실측값을 직접 뽑을 것.
     #      지금 값은 신장 비례 추정이라 한 단계 약하다.
-    fruit_height_range: tuple[float, float] = (0.5, 1.4)
+    # 파지 단순화(2026-07-22): 밑동 콜라이더(stem_collider_height) 위 일정 구간으로 좁혀
+    # 팔이 편한 높이에서만 딴다. 원래 (0.5,1.4) 는 인체치수 범위(위 주석) — 데모 후 복원.
+    fruit_height_range: tuple[float, float] = (0.9, 1.2)
 
     # TODO 아래 2개는 아직 근거 없음.
     #   stem_height: 실제 하이와이어는 와이어가 베드 위 2.4m 이상이고 줄기는 그보다
     #     훨씬 길다(낮추기 때문). 1.8m 는 데모용 단순화. 근거 아님.
     stem_height: float = 1.8
-    fruits_per_plant: tuple[int, int] = (2, 4)   # (min, max)
+    fruits_per_plant: tuple[int, int] = (1, 2)   # (min, max) — 파지 단순화(2026-07-22, 원래 2~4)
 
     stem_radius: float = 0.02
+    # 줄기 콜라이더 높이 — 밑동만 막고 과실 구간(fruit_height_range) 위쪽은 콜라이더 없음.
+    # 그리퍼가 어느 각도에서든 과실에 접근하도록(줄기 뒤 과실도 파지 가능). 시각 줄기는 전체
+    # 높이 유지, 로봇 베이스는 밑동 기둥에 여전히 막힌다. (파지 단순화 2026-07-22)
+    stem_collider_height: float = 0.6
     # 꽃자루(pedicel) 전체 길이 = 줄기 부착점 → 과실 중심. [4] 임의.
     # spike 02(2026-07-18): 과실을 수평으로 매달면 굽힘모멘트가 break_torque(0.067N·m)를
     # 넘어 바로 끊긴다 → 아래로 인장 매달아야 실제 파단값으로 버틴다. 그래서 아래 두 값으로
     # "옆으로 조금 + 아래로" 매단다(수직 낙차 = sqrt(fruit_offset^2 - h^2)).
-    fruit_offset: float = 0.11     # m. 꽃자루 길이
+    # 파지 단순화(2026-07-22): 과실을 줄기에서 멀리 뻗어 그리퍼 접근 여유를 크게 준다.
+    # 과실이 kinematic 이라 수평 캔틸레버 굽힘모멘트 걱정 없음(아래 spike 02 주석은 조인트
+    # 매달림 시절 것). 원래 0.11 → 데모 후 복원. "줄기 길게" 사용자 요청.
+    fruit_offset: float = 0.20     # m. 꽃자루 길이
     # 수평 성분(줄기에서 옆으로). 나머지는 수직 낙차 → 인장.
     # [2] 유도(하한): 과실 콜라이더(r≈34mm)+줄기(r=20mm)가 안 겹치려면 > 54mm.
     #     하한 근처(60mm)면 스폰 시 이웃/줄기와 살짝 겹쳐 5%가 침투복구로 튕겨 낙하 →
     #     여유를 줘 90mm(클리어런스 36mm). spike 02: 굽힘은 hold_torque 로 처리하므로 무관.
-    pedicel_h_offset: float = 0.09  # m
+    pedicel_h_offset: float = 0.20  # m — ㅣㄱ 수평 가지 길이(줄기서 옆으로). 원래 0.09.
+    # ㅣㄱ 모양(2026-07-22): 수평 가지 끝에서 과실이 90° 아래로 매달린다(잡기 쉽게).
+    pedicel_v_drop: float = 0.12          # m — 가지 끝→과실 (아래로)
+    pedicel_branch_diameter: float = 0.006  # m — 수평 가지(truss) 두께
 
     # 꽃자루가 붙는 과실 꼭지(calyx) 위치 = 과실 중심에서 위로(+Z) 반지름만큼.
     # 실제 토마토는 꼭지에서 화방으로 이어진다(레퍼런스). [2] 유도 — 과실 반지름 ≈ 34mm.

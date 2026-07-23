@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 수확 MM SRDF — 그룹 tip 을 harvest_tcp 로 둬 "TCP(파지점)를 과실에" 가 직접 목표.
+     disable_collisions: UR 표준 인접쌍(ur_moveit_config srdf 와 동일) + 섀시/그리퍼 추가쌍. -->
+<robot name="harvester_mm">
+
+  <group name="ur_manipulator">
+    <chain base_link="base_link" tip_link="harvest_tcp"/>
+  </group>
+
+  <group_state name="home" group="ur_manipulator">
+    <joint name="shoulder_pan_joint" value="0"/>
+    <joint name="shoulder_lift_joint" value="3.9269908"/>
+    <joint name="elbow_joint" value="2.3561945"/>
+    <joint name="wrist_1_joint" value="3.1415927"/>
+    <joint name="wrist_2_joint" value="-1.5707963"/>
+    <joint name="wrist_3_joint" value="0"/>
+  </group_state>
+
+  <end_effector name="harvest_gripper" parent_link="harvest_tcp" group="ur_manipulator"/>
+
+  <!-- UR 표준 인접/불가쌍 (ur_moveit_config srdf 매크로와 동일) -->
+  <disable_collisions link1="base_link_inertia" link2="shoulder_link" reason="Adjacent"/>
+  <disable_collisions link1="shoulder_link" link2="upper_arm_link" reason="Adjacent"/>
+  <disable_collisions link1="upper_arm_link" link2="forearm_link" reason="Adjacent"/>
+  <disable_collisions link1="forearm_link" link2="wrist_1_link" reason="Adjacent"/>
+  <disable_collisions link1="wrist_1_link" link2="wrist_2_link" reason="Adjacent"/>
+  <disable_collisions link1="wrist_2_link" link2="wrist_3_link" reason="Adjacent"/>
+  <disable_collisions link1="wrist_1_link" link2="wrist_3_link" reason="Never"/>
+
+  <!-- 섀시 — 팔 베이스와 인접, 어깨는 마운트 바로 위라 상시 근접 -->
+  <disable_collisions link1="mm_base" link2="base_link_inertia" reason="Adjacent"/>
+  <disable_collisions link1="mm_base" link2="shoulder_link" reason="Never"/>
+
+  <!-- 그리퍼 박스 — 손목 3축과 상시 근접(부착부) -->
+  <disable_collisions link1="gripper_body" link2="wrist_3_link" reason="Adjacent"/>
+  <disable_collisions link1="gripper_body" link2="wrist_2_link" reason="Never"/>
+  <disable_collisions link1="gripper_body" link2="wrist_1_link" reason="Never"/>
+
+  <!-- EE 내부(커플러·지그) — 전부 tool0 강결합이라 상호 충돌은 무의미(상시 접촉) -->
+  <disable_collisions link1="coupler_body" link2="gripper_body" reason="Adjacent"/>
+  <disable_collisions link1="coupler_body" link2="jig_body" reason="Adjacent"/>
+  <disable_collisions link1="coupler_body" link2="wrist_3_link" reason="Adjacent"/>
+  <disable_collisions link1="coupler_body" link2="wrist_2_link" reason="Never"/>
+  <disable_collisions link1="coupler_body" link2="wrist_1_link" reason="Never"/>
+  <disable_collisions link1="jig_body" link2="gripper_body" reason="Adjacent"/>
+  <disable_collisions link1="jig_body" link2="wrist_3_link" reason="Adjacent"/>
+  <disable_collisions link1="jig_body" link2="wrist_2_link" reason="Never"/>
+  <disable_collisions link1="jig_body" link2="wrist_1_link" reason="Never"/>
+
+  <!-- 수확 홈 자세(wrist_1 180° 접힘)에선 그리퍼·지그가 팔뚝/상완 옆에 온다 — 실물
+       (Isaac)은 안 부딪히나 근사 충돌박스가 살짝 겹친다. 툴은 손목에 강결합이라 이 근접은
+       정상 → 예외 처리(2026-07-22 실측: OMPL 시작상태 무효의 원인). -->
+  <disable_collisions link1="gripper_body" link2="forearm_link" reason="Never"/>
+  <disable_collisions link1="gripper_body" link2="upper_arm_link" reason="Never"/>
+  <disable_collisions link1="jig_body" link2="forearm_link" reason="Never"/>
+  <disable_collisions link1="jig_body" link2="upper_arm_link" reason="Never"/>
+  <disable_collisions link1="coupler_body" link2="forearm_link" reason="Never"/>
+
+</robot>

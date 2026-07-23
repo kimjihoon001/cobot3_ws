@@ -134,6 +134,8 @@ env 없이 띄우면 "ROS2 Bridge startup failed" — 씬은 뜨지만 토픽이
 |---|---|---|---|
 | `/harvester_0/joint_command` | sensor_msgs/JointState | ROS2→Isaac | 수확 MM 팔·그리퍼 명령 |
 | `/harvester_0/joint_states`  | sensor_msgs/JointState | Isaac→ROS2 | 수확 MM 관절 상태 (15 DOF) |
+| `/harvester_0/blade_command` | std_msgs/Float64 | ROS2→Isaac | 커터 서보 목표각(0° 열림, 35° 절삭) |
+| `/harvester_0/blade_state`   | std_msgs/Float64 | Isaac→ROS2 | 커터 서보 실제 연출 각도 |
 | `/harvester_0/cmd`           | std_msgs/String (JSON) | ROS2→Isaac | 가동날·베이스 (아래 설명) |
 | `/forklift_0/joint_command`  | sensor_msgs/JointState | ROS2→Isaac | 지게차 구동·조향·포크 |
 | `/forklift_0/joint_states`   | sensor_msgs/JointState | Isaac→ROS2 | 지게차 관절 상태 |
@@ -156,7 +158,15 @@ velocity 를 채운다 (이름 없는 관절은 건드리지 않음).
 
 스폰 자세 = 수확자세(wrist_1 이 +180° 돌아가 커터가 파지점 위로 온 상태).
 
-**`/harvester_0/cmd` (String, data 에 JSON)** — 아티큘레이션 밖 자유도 2개:
+**블레이드 서보 (`Float64`)** — 전용 ROS 2 제어/피드백:
+
+```bash
+ros2 topic pub -1 /harvester_0/blade_command std_msgs/msg/Float64 '{data: 35.0}'
+ros2 topic pub -1 /harvester_0/blade_command std_msgs/msg/Float64 '{data: 0.0}'
+ros2 topic echo /harvester_0/blade_state
+```
+
+**`/harvester_0/cmd` (String, data 에 JSON)** — 기존 호환 명령:
 
 ```json
 {"blade": 35}              // 가동날 각도[deg]. 0=열림 ~ 35=닫힘(줄기 전단)
@@ -200,8 +210,8 @@ ros2 topic pub -1 /harvester_0/joint_command sensor_msgs/msg/JointState \
   '{name: [wrist_1_joint, finger_joint], position: [2.9, 0.8]}'
 
 # 가동날 닫기(절단 연출) / 열기
-ros2 topic pub -1 /harvester_0/cmd std_msgs/msg/String '{data: "{\"blade\": 35}"}'
-ros2 topic pub -1 /harvester_0/cmd std_msgs/msg/String '{data: "{\"blade\": 0}"}'
+ros2 topic pub -1 /harvester_0/blade_command std_msgs/msg/Float64 '{data: 35.0}'
+ros2 topic pub -1 /harvester_0/blade_command std_msgs/msg/Float64 '{data: 0.0}'
 ```
 
 ---
