@@ -9,8 +9,6 @@ Panels:
     Tree Height: 350
   - Class: rviz_common/Views
     Name: Views
-  - Class: moveit_rviz_plugin/MotionPlanning
-    Name: MotionPlanning
 Visualization Manager:
   Class: ""
   Displays:
@@ -25,13 +23,13 @@ Visualization Manager:
       Enabled: true
       Move Group Namespace: ""
       Robot Description: robot_description
-      Planning Scene Topic: /monitored_planning_scene
+      Planning Scene Topic: monitored_planning_scene
       Planned Path:
         Loop Animation: false
         Show Robot Collision: false
         Show Robot Visual: true
         State Display Time: 0.05 s
-        Trajectory Topic: /display_planned_path
+        Trajectory Topic: display_planned_path
       Planning Metrics:
         Payload: 1
         Show Joint Torques: false

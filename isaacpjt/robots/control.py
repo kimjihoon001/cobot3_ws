@@ -6,7 +6,7 @@ harvester.py / transporter.py 는 **놓기만** 한다(그쪽 docstring 참조).
 여기 분리 — 조립과 제어를 섞지 않는다. 관절 이름은 2026-07-18 실측(probe_dof):
 
   수확 MM (15 DOF): dummy_base_prismatic_x/y + revolute_z (홀로노믹 베이스 3)
-                    + UR10e 6 + Robotiq 2F-85 6 (마스터 finger_joint)
+                    + UR10e 6 + 동축 1/4구 스쿱 3
   지게차 (7 DOF):   lift_joint + back_wheel_swivel(조향) + back_wheel_drive(구동)
                     + 롤러 4
 
@@ -234,18 +234,22 @@ class HarvesterController:
             "dummy_base_revolute_z_joint")
     ARM = ("shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint")
-    GRIPPER_MASTER = "finger_joint"      # 0=열림, ~0.8rad=닫힘 (2F-85 mimic 마스터)
-    GRIPPER_CLOSED = 0.80                # rad
+    GRIPPER = ("scoop_quarter_1_joint",
+               "scoop_quarter_2_joint",
+               "cutter_quarter_3_joint")
+    GRIPPER_OPEN = np.radians((0.0, -90.0, -180.0))
+    GRIPPER_CLOSED = np.radians((0.0, 0.0, 0.0))
 
     def __init__(self, robot):
         self._robot = robot
         self._jm = _JointMap(list(robot.dof_names))
-        self._ctrl = self._jm.idx(*self.BASE, *self.ARM, self.GRIPPER_MASTER)
+        self._ctrl = self._jm.idx(*self.BASE, *self.ARM, *self.GRIPPER)
         # 현재 관절값에서 출발 (튀지 않게)
         q = np.asarray(robot.get_joint_positions(), dtype=float)
         self._t = {i: float(q[i]) for i in self._ctrl}
         self._base_i = self._jm.idx(*self.BASE)
         self._base_last = [self._t[i] for i in self._base_i]
+        self._grip_fraction = 0.0
 
     # ---- 명령 (ROS2 가 부를 지점) ----
     def set_arm(self, q6) -> None:
@@ -275,11 +279,13 @@ class HarvesterController:
     def set_gripper(self, closed_frac: float) -> None:
         """0=완전 열림, 1=완전 닫힘."""
         f = max(0.0, min(1.0, closed_frac))
-        self._t[self._jm.idx(self.GRIPPER_MASTER)[0]] = f * self.GRIPPER_CLOSED
+        self._grip_fraction = f
+        values = self.GRIPPER_OPEN + f * (self.GRIPPER_CLOSED - self.GRIPPER_OPEN)
+        for i, value in zip(self._jm.idx(*self.GRIPPER), values):
+            self._t[i] = float(value)
 
     def move_gripper(self, d: float) -> None:
-        i = self._jm.idx(self.GRIPPER_MASTER)[0]
-        self._t[i] = max(0.0, min(self.GRIPPER_CLOSED, self._t[i] + d))
+        self.set_gripper(self._grip_fraction + float(d))
 
     # ---- 반영 ----
     def apply(self) -> None:
@@ -306,7 +312,9 @@ class HarvesterController:
     def joint_report(self) -> str:
         q = np.asarray(self._robot.get_joint_positions(), dtype=float)
         arm = ", ".join(f"{np.degrees(q[i]):.0f}" for i in self._jm.idx(*self.ARM))
-        return f"arm(deg)=[{arm}]  gripper={q[self._jm.idx(self.GRIPPER_MASTER)[0]]:.2f}"
+        scoop = ", ".join(
+            f"{np.degrees(q[i]):.0f}" for i in self._jm.idx(*self.GRIPPER))
+        return f"arm(deg)=[{arm}]  scoop(deg)=[{scoop}]"
 
 
 class TransporterController:

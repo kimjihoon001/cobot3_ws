@@ -1,6 +1,8 @@
 # ros2_control — Isaac topic_based 하드웨어 위의 컨트롤러들.
 # update_rate 는 Isaac 물리 60fps 와 맞춘다.
-/harvester_moveit/controller_manager:
+# 어느 로봇 namespace로 띄워도 그 namespace의 controller_manager에만 적용된다.
+# 파라미터 파일은 해당 ros2_control_node에만 전달되므로 다른 로봇에는 전파되지 않는다.
+/**/controller_manager:
   ros__parameters:
     update_rate: 60
 
@@ -13,7 +15,7 @@
     gripper_controller:
       type: position_controllers/JointGroupPositionController
 
-/harvester_moveit/arm_controller:
+/**/arm_controller:
   ros__parameters:
     joints:
       - shoulder_pan_joint
@@ -34,9 +36,11 @@
       stopped_velocity_tolerance: 0.2
       goal_time: 0.0
 
-# 그리퍼 — finger_joint 위치를 /gripper_controller/commands (Float64MultiArray) 로 직접 지령.
-# MoveIt 이 관리하지 않는다(moveit_controllers.yaml 에 없음) — grasp 스크립트가 직접 명령.
-/harvester_moveit/gripper_controller:
+# 동축 스쿱 — 세 회전축을 /gripper_controller/commands (Float64MultiArray) 로 직접 지령.
+# 순서: inner receiver, middle receiver, outer cutter.
+/**/gripper_controller:
   ros__parameters:
     joints:
-      - finger_joint
+      - scoop_quarter_1_joint
+      - scoop_quarter_2_joint
+      - cutter_quarter_3_joint

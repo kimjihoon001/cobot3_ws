@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""수확 모바일 매니퓰레이터 — 베이스 + 팔 + 그리퍼 + 커터를 조립해 씬에 놓는다.
+"""수확 모바일 매니퓰레이터 — 베이스 + 팔 + 동축 스쿱을 조립해 씬에 놓는다.
 
 ★ GPU 에서 한 번도 안 돌려봤다. 에셋 경로·조인트 배치 전부 미검증이다. ★
   먼저 `spikes/03_asset_check.py` 로 에셋이 실제로 있는지 확인할 것.
@@ -33,14 +33,14 @@ from robots import assets
 # +180° 라야 절단점이 파지점 위 5.3cm 로 온다(2026-07-19 GPU 실측, CAD 의도 그대로).
 WRIST1_HARVEST_DEG = 180.0
 
-# [4] 시작 자세 — 에셋 기본(0°) 기준 **절대각**[deg]. USD 에 구워 Play/Stop 이 같게 한다.
-# 1번(shoulder_pan) 0 · 2번(shoulder_lift) 270 · 3번(elbow) 90 · 5번(wrist_2) −90
-# = 사용자 지정(2026-07-20).
+# [4] 시작/주행 자세 — 에셋 기본(0°) 기준 **절대각**[deg].
+# shoulder 240° + elbow 135°로 사선 접힘을 만들고 wrist_1 165°로 방향을 보상한다.
+# MoveIt HOME_Q/SRDF home과 반드시 같은 값이어야 시작 직후 점프하지 않는다.
 # 순서는 근위→원위로 둘 것 — 원위 링크를 통째로 돌리므로 순서가 바뀌면 결과가 달라진다.
 HOME_POSE_DEG = (("shoulder_pan_joint", 0.0),
-                 ("shoulder_lift_joint", 225.0),
+                 ("shoulder_lift_joint", 240.0),
                  ("elbow_joint", 135.0),
-                 ("wrist_1_joint", WRIST1_HARVEST_DEG),
+                 ("wrist_1_joint", 165.0),
                  ("wrist_2_joint", -90.0))
 # UR10e 링크 사슬(근위→원위). 조인트를 돌릴 때 그 아래 원위 링크를 전부 같이 돌린다.
 _UR_LINKS = ("shoulder_link", "upper_arm_link", "forearm_link",
@@ -73,6 +73,10 @@ _COUPLER_H = 0.018         # m   커플러 길이
 # [4] 장착 보정 — Robotiq base_link 프레임이 UR 툴 소켓과 접근축(Z) 기준 이만큼 틀어져
 # 손가락이 어긋난다(2026-07-18 사용자 렌더 검토 지적). 90/270 중 렌더로 맞춘다.
 _GRIPPER_ROLL_DEG = 90.0
+# 실제 finger4step 패드 bbox 중점은 gripper base +Z 105.43mm다.
+# grasp_reach_z(115mm)에서 9.57mm 되돌려 끝단 접촉이 아닌 패드 면 중앙을 TCP로 쓴다.
+# tool0 기준으로는 커플러 12mm를 더한 117.43mm이며 MoveIt URDF와 동일하다.
+_GRASP_TCP_PAD_CORRECTION_Z = -0.00957
 # [4] 카메라 이미지 롤 보정 — 측정정렬로 방향은 맞으나 이미지가 90° 굴러 있었다(사용자
 # 지적). 광축(접근축) 중심 롤. 90/270 은 렌더로 맞춘다.
 _CAMERA_ROLL_DEG = 90.0
@@ -103,27 +107,29 @@ def _set_full_pose(prim: Usd.Prim, M: Gf.Matrix4d) -> None:
 
 
 class HarvestMM:
-    """수확 MM. 베이스(Ridgeback) + 팔(UR10e) + 그리퍼(Robotiq) + 커터.
+    """수확 MM. 베이스(Ridgeback) + 팔(UR10e) + 동축 3축 1/4구 스쿱.
 
     구조:
         {root}/Base      <- 이동 베이스
         {root}/Arm       <- 팔. 베이스 위 arm_mount_z 에 고정 조인트로 붙는다
-        {root}/Gripper   <- 그리퍼. 팔 끝(tool0)에 붙는다
-        …/Gripper/…/base_link/Cutter <- 커터. 파지점 위 cutter_offset_z, 계층 자식(조인트 X, §8)
+        {root}/Gripper/Base            <- ISO 9409 어댑터
+        {root}/Gripper/ScoopQuarter*   <- 수용기 두 장 + 외측 커터 한 장
     """
 
     # 가동날 각도 [deg] — 서보 힌지 리볼루트 조인트 드라이브 목표.
     # 조인트 rest(0°) = blade_dummy 익스포트 자세 = CAD OPEN_ANGLE(-35°, 열림). 거기서
     # +35° 돌리면 CAD 0°(닫힘=노치 전단). 그래서 열림 0° ~ 닫힘 35°(CAD build 스크립트 규약).
     BLADE_OPEN_DEG = 0.0          # 열림 (날이 옆으로 펼쳐짐)
-    BLADE_CLOSED_DEG = 35.0       # 닫힘 = 노치로 줄기 전단
-    BLADE_SPEED_DEG_S = 70.0      # 35° 절삭 스윙을 0.5초에 연출
+    # 실물리에서 50° 명령 시 접촉/구동 오차를 포함해 약 41°에 안정된다. CAD의 절단
+    # 슬롯은 40°에서 이미 줄기를 통과하므로 이 각도를 절단 완료 기준으로 사용한다.
+    BLADE_CLOSED_DEG = 40.0
+    BLADE_SPEED_DEG_S = 100.0     # 50° 절삭 스윙을 0.5초에 연출
 
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
         self._root: str | None = None
-        self._grip_base: str | None = None       # 그리퍼 base_link (파지 관절 탐색·커터 고정)
-        self._gripper_path: str | None = None     # 그리퍼 컨테이너 (finger 관절 탐색 루트)
+        self._grip_base: str | None = None       # 스쿱 어댑터 Base
+        self._gripper_path: str | None = None     # 스쿱 컨테이너
         self._hinge_path: str | None = None       # 커터 마운트(=절단점) prim
         self._blade_joint: str | None = None       # 단일 날 RevoluteJoint 경로(= 서보)
         self._tool0_m: Gf.Matrix4d | None = None   # 툴0(플랜지) 월드 포즈 — CAD 지그 부착 기준
@@ -178,30 +184,26 @@ class HarvestMM:
         # 순서가 중요하다 (먼저 팔을 돌려 놓고 → 그 자리에 그리퍼·지그).
         self._preset_pose(stage, arm_path, log)
 
-        # 그리퍼 — 팔 에셋이 제공하는 툴 소켓(ee_joint)에 물린다.
-        gripper_url = assets.resolve(a.gripper, "그리퍼(Robotiq)")
+        # 로컬 동축 스쿱 — 팔 에셋의 툴 소켓(ee_joint)에 직접 물린다.
+        gripper_url = os.path.abspath(a.scoop_gripper_usd)
+        if not os.path.isfile(gripper_url):
+            raise FileNotFoundError(f"동축 스쿱 USD 없음: {gripper_url}")
         gripper_path = f"{root}/Gripper"
         add_reference_to_stage(gripper_url, gripper_path)
-        # 2F-85 콜라이더가 instanceable 참조 안에 숨어 마찰 바인딩이 0개가 되는 것 방지 —
-        # 서브트리를 non-instanceable 로 펴서 콜라이더 prim 을 저작 가능하게 노출(2026-07-22).
         self._uninstance(stage, gripper_path)
         grip_base = self._attach_gripper(stage, arm_path, gripper_path, log)
         self._gripper_path = gripper_path
         self._grip_base = grip_base
         if grip_base:
-            # RMPflow 기본 EE(UR ee_link)와 실제 손가락 파지 중심은 다르다.
-            # 고정 길이를 카메라 광선에서 빼지 않고 이 프레임의 실제 월드 포즈로
-            # EE→TCP 오프셋을 측정한다.
             self._grasp_tcp = f"{grip_base}/HarvestTCP"
-            tcp = UsdGeom.Xform.Define(stage, self._grasp_tcp)
-            tcp.AddTranslateOp().Set(Gf.Vec3d(
-                0.0, 0.0, self._cfg.end_effector.grasp_reach_z))
+            self._hinge_path = f"{grip_base}/CuttingPoint"
             self._bind_gripper_friction(stage, gripper_path, log)
+            # 새 동축 스쿱에도 eye-in-hand D455를 장착한다. Isaac 기본 D455 USD는 내부
+            # articulation 메타데이터가 남아 강체 API를 제거해도 tensor 오류를 내므로,
+            # 순수 시각 바디+UsdGeom.Camera만 만든 센서 전용 모델을 사용한다.
+            self._add_scoop_camera(stage, log)
 
-        # 커터·카메라 = 사용자 CAD 커터 지그(커플러 링 + 서보 가위 + 실물 D455).
-        # 프리미티브 커터/카메라(_add_cutter/_add_camera)는 남겨두되 안 쓰고 CAD 로 대체.
-        if grip_base and not os.environ.get("NO_JIG"):     # NO_JIG=1 → 파지 스파이크서 지그 끔
-            self._add_cad_jig(stage, log)
+        # 구형 Robotiq, 별도 커플러, CAD 가위 지그는 의도적으로 장착하지 않는다.
         log(f"[Harvester] 조립 완료: {root}")
         return root
 
@@ -347,7 +349,7 @@ class HarvestMM:
             n += 1
         print(f"[Harvester] 그리퍼 인스턴스 해제 {n}개 (콜라이더 노출)", flush=True)
 
-    def _bind_gripper_friction(self, stage: Usd.Stage, gripper_path: str, log) -> None:
+    def _bind_gripper_friction(self, stage: Usd.Stage, gripper_path: str, log) -> int:
         """그리퍼 손가락·패드 콜라이더에 마찰 재질을 건다 — §5.1 마찰 파지의 그리퍼 쪽.
 
         ★ grip_base(base_link)나 컨테이너에 weakerThanDescendants 로 걸면 그 자식인 가동날
@@ -374,10 +376,27 @@ class HarvestMM:
                 allcoll.append(path)
             if path == self._grip_base:                    # 블레이드가 이 자식 → 건너뜀
                 continue
-            if any(k in path for k in ("CadJig", "Blade", "blade",
-                                       "Cutter", "Camera", "D455")):
+            # 구형 별도 Cutter/Blade는 제외하지만, 새 CutterQuarter3는 바구니의
+            # 바깥쪽 1/4구이므로 반드시 과실 충돌·마찰이 있어야 한다. 이름에
+            # "Cutter"가 들어간다는 이유로 제외하면 3/4구 한 면이 물리적으로 비어
+            # 절단 순간 과실이 그대로 낙하한다.
+            scoop_outer_shell = "CutterQuarter3" in path
+            if (not scoop_outer_shell
+                    and any(k in path for k in (
+                        "CadJig", "Blade", "blade", "Cutter", "Camera", "D455"))):
                 continue
             if is_coll:
+                # 실제 Robotiq 고무패드의 눌림/감김을 강체 메시가 표현하지 못하므로
+                # 접촉 패드에 얇은 compliant skin을 rest/contact offset으로 근사한다.
+                if "finger4step" in path.lower():
+                    px_coll = PhysxSchema.PhysxCollisionAPI.Apply(p)
+                    # restOffset>0은 두 형상을 떨어뜨려 놓으므로 고무 눌림과 반대다.
+                    # 음수 restOffset으로 1.5mm 침투를 허용하고 contactOffset에서 미리
+                    # 접촉을 생성해 얇은 줄기에도 안정적인 정상력이 생기게 한다.
+                    rest = float(os.environ.get("GRIP_PAD_REST_OFFSET", "-0.0015"))
+                    contact = float(os.environ.get("GRIP_PAD_CONTACT_OFFSET", "0.003"))
+                    px_coll.CreateRestOffsetAttr().Set(rest)
+                    px_coll.CreateContactOffsetAttr().Set(max(contact, rest + 0.001))
                 bind_physics_material(p, mat)
                 n += 1
                 bound.append(path.replace(gripper_path, "…"))
@@ -386,26 +405,26 @@ class HarvestMM:
         if n == 0:                                         # 진단: 서브트리 콜라이더 실태
             print(f"[Harvester] ⚠콜라이더 0개! 서브트리 전체 콜라이더={allcoll[:20]}",
                   flush=True)
+        return n
 
     def _attach_gripper(self, stage: Usd.Stage, arm_path: str,
                         gripper_path: str, log) -> str | None:
-        """그리퍼를 팔의 ee_joint(툴 소켓, b0=wrist_3)에 물린다.
+        """동축 스쿱 Base를 팔의 ee_joint(툴 소켓, b0=wrist_3)에 물린다.
 
-        1) 그리퍼 강체 base_link 를 찾고
+        1) 스쿱 강체 Base를 찾고
         2) ee_joint 의 b0 프레임(툴 플랜지) 월드 포즈를 계산해 그 자리에 놓고
-        3) ee_joint 의 b1 을 그리퍼 base_link 로 채운다 (프레임 identity).
-        그리퍼의 자체 아티큘레이션 루트는 제거 — 전체가 한 아티큘레이션이 된다.
+        3) CAD의 U자 수용부가 아래를 향하도록 tool Z축 둘레로 180° 장착하고
+        4) ee_joint 의 b1 을 Base로 채운다.
         """
         grip_base = None
         for prim in Usd.PrimRange(stage.GetPrimAtPath(gripper_path)):
-            if (prim.GetName() == "base_link"
+            if (prim.GetName() == "Base"
                     and prim.HasAPI(UsdPhysics.RigidBodyAPI)):
                 grip_base = str(prim.GetPath())
                 break
         ee = stage.GetPrimAtPath(f"{arm_path}/joints/ee_joint")
         if grip_base is None or not ee.IsValid():
-            log("[Harvester] ⚠ ee_joint 또는 그리퍼 base_link 를 못 찾음 — "
-                "그리퍼 미장착. 에셋 구조를 탐침으로 확인할 것.")
+            log("[Harvester] ⚠ ee_joint 또는 스쿱 Base를 못 찾음 — 미장착")
             return grip_base
 
         for prim in Usd.PrimRange(stage.GetPrimAtPath(gripper_path)):
@@ -421,35 +440,22 @@ class HarvestMM:
         l0 = Gf.Matrix4d()
         l0.SetTransform(Gf.Rotation(Gf.Quatd(q0)), Gf.Vec3d(p0))
         m_socket = l0 * m_wrist                      # 툴 소켓의 월드 포즈
-        # 장착 롤 보정 — Robotiq base_link 프레임이 UR 툴 소켓과 접근축(Z) 기준
-        # _GRIPPER_ROLL_DEG 만큼 틀어져 손가락이 어긋난다(2026-07-18 사용자 렌더 지적).
-        # 소켓을 그만큼 롤한 자리에 그리퍼를 얹는다.
-        m_socket = Gf.Matrix4d().SetRotate(
-            Gf.Rotation(Gf.Vec3d(0, 0, 1), _GRIPPER_ROLL_DEG)) * m_socket
-
-        # CAD 커플러 지그가 붙는 툴0 프레임(그리퍼 밀기 전)을 저장.
         self._tool0_m = Gf.Matrix4d(m_socket)
-        # 커플러(12mm)가 플랜지↔그리퍼 **사이**에 들어가므로, 그리퍼를 접근축(+Z)으로
-        # _COUPLER_T 만큼 밀어 얹는다 (사용자 지적: 커플러가 사이에 들어감).
-        approach = Gf.Vec3d(m_socket.TransformDir(Gf.Vec3d(0, 0, 1))).GetNormalized()
-        m_socket.SetTranslateOnly(m_socket.ExtractTranslation() + approach * _COUPLER_T)
+        mount_roll = Gf.Matrix4d()
+        mount_roll.SetRotate(Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), 180.0))
+        m_mount = mount_roll * m_socket              # 로컬 tool-Z 180°: U자 바닥을 아래로
 
-        # 그리퍼 컨테이너를 옮겨 base_link 가 (롤 보정 + 커플러 오프셋된) 소켓에 오게 한다.
-        # ★ 로컬 op 에 쓸 값은 부모 프레임으로 변환해야 한다: L' = C·G⁻¹·S·P⁻¹ (row-vector,
-        #   C=컨테이너 l2w, G=base_link l2w, S=목표 소켓 월드, P=부모 l2w). 예전 G⁻¹·S 는
-        #   부모(하베스터 루트)가 원점일 때만 맞아, main.py 가 (0,−12) 스폰하자 그리퍼가
-        #   12m 밖에 붙어 로봇이 분해됐다(§8 2026-07-19).
+        # 컨테이너를 옮겨 CAD 원점(Base)이 회전된 장착 소켓과 정확히 일치하게 한다.
         m_grip = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(grip_base))
         m_cont = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(gripper_path))
         m_parent = cache.GetLocalToWorldTransform(
             stage.GetPrimAtPath(gripper_path).GetParent())
-        m_local = m_cont * m_grip.GetInverse() * m_socket * m_parent.GetInverse()
+        m_local = m_cont * m_grip.GetInverse() * m_mount * m_parent.GetInverse()
         set_pose(stage.GetPrimAtPath(gripper_path),
                  m_local.ExtractTranslation(),
                  m_local.ExtractRotationQuat())
 
-        # 조인트 프레임을 **실제 배치된 상대 포즈**로 다시 쓴다 (§8: 롤 보정 후 프레임을
-        # 안 맞추면 시작 순간 스냅). body0(손목) 로컬로 그리퍼 포즈를 준다.
+        # 조인트 프레임을 실제 배치된 상대 포즈로 다시 쓴다.
         pos, rot = self._rel_pose(stage, wrist, grip_base)
         j.GetBody1Rel().SetTargets([grip_base])
         j.CreateLocalPos0Attr().Set(pos)
@@ -458,7 +464,26 @@ class HarvestMM:
         j.CreateLocalRot1Attr().Set(Gf.Quatf(1.0))
         j.CreateJointEnabledAttr().Set(True)
         j.CreateExcludeFromArticulationAttr().Set(False)
-        log(f"[Harvester] 그리퍼 장착: ee_joint → {grip_base} (롤 보정 {_GRIPPER_ROLL_DEG:.0f}°)")
+
+        # 동축 1/4구 셸은 같은 중심을 공유하고 서로 스치며 회전한다. CAD 공차가 있어도
+        # 삼각 메시의 contactOffset 때문에 내부 접촉이 생성되면, 닫힌 운동사슬처럼 큰
+        # 반발력이 생겨 팔 전체 관절값이 발산한다. 메커니즘 내부 4개 강체끼리만 충돌을
+        # 필터링하고 과실/줄기와의 외부 충돌은 그대로 유지한다.
+        scoop_bodies = [
+            p for p in Usd.PrimRange(stage.GetPrimAtPath(gripper_path))
+            if p.HasAPI(UsdPhysics.RigidBodyAPI)
+        ]
+        filtered = 0
+        for i, body_a in enumerate(scoop_bodies):
+            pairs = UsdPhysics.FilteredPairsAPI.Apply(body_a)
+            rel = pairs.CreateFilteredPairsRel()
+            for body_b in scoop_bodies[i + 1:]:
+                rel.AddTarget(body_b.GetPath())
+                filtered += 1
+        log(f"[Harvester] 동축 스쿱 장착: ee_joint → {grip_base} "
+            f"(tool-Z 180°; U자 수용부 아래)")
+        log(f"[Harvester] 동축 스쿱 내부 충돌 필터: {filtered}쌍 "
+            f"(과실/줄기 외부 충돌은 유지)")
         return grip_base
 
     def _add_cutter(self, stage: Usd.Stage, grip_base: str, log) -> None:
@@ -683,19 +708,170 @@ class HarvestMM:
     def camera_path(self, stage: Usd.Stage) -> str | None:
         """D455 컬러 카메라 prim 경로 (ROS2 렌더프로덕트용). 없으면 None.
 
-        _add_camera_at 이 붙인 {grip_base}/D455/asset 아래 UsdGeom.Camera 중 'Color' 우선.
+        {grip_base}/D455 아래 UsdGeom.Camera 중 'Color'를 우선한다. 구형 CAD 지그의
+        /D455/asset 구조도 하위 탐색으로 그대로 지원한다.
         ROS2 카메라 브리지(ros/robot_bridge.build_camera)가 이 경로로 렌더프로덕트를 만든다.
         """
         if not self._grip_base:
             return None
-        asset = stage.GetPrimAtPath(f"{self._grip_base}/D455/asset")
-        if not asset.IsValid():
+        camera_root = stage.GetPrimAtPath(f"{self._grip_base}/D455")
+        if not camera_root.IsValid():
             return None
-        cams = [p for p in Usd.PrimRange(asset) if p.IsA(UsdGeom.Camera)]
+        cams = [p for p in Usd.PrimRange(camera_root) if p.IsA(UsdGeom.Camera)]
         if not cams:
             return None
         cam = next((p for p in cams if "Color" in p.GetName()), cams[0])
         return str(cam.GetPath())
+
+    def camera_paths(self, stage: Usd.Stage) -> dict[str, str]:
+        """장착된 D455 센서 경로.
+
+        키는 ROS 브리지와 공통으로 ``color/depth/infra1/infra2/imu``를 쓴다.
+        예전 단일 Camera 모델도 color/depth 폴백으로 계속 사용할 수 있다.
+        """
+        if not self._grip_base:
+            return {}
+        root = f"{self._grip_base}/D455"
+        wanted = {
+            "color": f"{root}/Color",
+            "depth": f"{root}/Depth",
+            "infra1": f"{root}/Infra1",
+            "infra2": f"{root}/Infra2",
+            "imu": f"{root}/Imu",
+        }
+        found = {name: path for name, path in wanted.items()
+                 if stage.GetPrimAtPath(path).IsValid()}
+        if "color" not in found:
+            legacy = self.camera_path(stage)
+            if legacy:
+                found["color"] = legacy
+        if "depth" not in found and "color" in found:
+            found["depth"] = found["color"]
+        return found
+
+    def _add_scoop_camera(self, stage: Usd.Stage, log) -> None:
+        """실제 D455 외형과 Color/Depth/IR/IMU만 골라 동축 스쿱에 장착한다.
+
+        ``/Root/RSD455`` 전체를 참조하면 그 루트의 RigidBodyAPI가 로봇 articulation
+        안에 중첩되고 PhysX tensor view가 별도 RSD455 로봇을 만들려 한다. 그래서
+        원본 USD의 Visual과 각 센서 prim만 개별 참조한다. 원본 센서 간 baseline과
+        intrinsics는 유지하면서 강체·조인트·콜라이더는 하나도 들어오지 않는다.
+        """
+        if not self._grip_base:
+            return
+        # 실행 중 Usd.Stage.Open으로 D455를 다시 검증하면 Kit 5.1이 현재 stage와
+        # resolver 작업을 겹쳐 조용히 종료되는 경우가 있다. base/arm resolve에서 이미
+        # 확보한 같은 Assets root에, GPU probe로 확인한 D455 경로를 바로 붙인다.
+        url = assets.assets_root() + self._cfg.assets.camera[0]
+        root = f"{self._grip_base}/D455"
+        root_prim = UsdGeom.Xform.Define(stage, root).GetPrim()
+        print(f"[Harvester] D455 안전 하위 prim 로딩: {url}", flush=True)
+
+        # 원본 D455의 안전한 하위 prim만 가져온다. 이름은 로봇마다 root 아래에 있으므로
+        # 같은 씬에 여러 대를 띄워도 prim 이름이 충돌하지 않는다.
+        refs = {
+            "Visual": "/Root/RSD455/Visual",
+            "Color": "/Root/RSD455/Camera_OmniVision_OV9782_Color",
+            "Depth": "/Root/RSD455/Camera_Pseudo_Depth",
+            "Infra1": "/Root/RSD455/Camera_OmniVision_OV9782_Left",
+            "Infra2": "/Root/RSD455/Camera_OmniVision_OV9782_Right",
+            "Imu": "/Root/RSD455/Imu_Sensor",
+        }
+        for name, source in refs.items():
+            prim = stage.DefinePrim(f"{root}/{name}")
+            prim.GetReferences().AddReference(url, source)
+
+        # Visual 메시에는 의미 없는 MassAPI가 일부 붙어 있다. RigidBody가 없으므로
+        # 물리에 참여하지 않지만 혼동과 향후 스키마 전파를 막기 위해 명시적으로 제거한다.
+        visual_root = stage.GetPrimAtPath(f"{root}/Visual")
+        for prim in Usd.PrimRange(visual_root):
+            if prim.HasAPI(UsdPhysics.MassAPI):
+                prim.RemoveAPI(UsdPhysics.MassAPI)
+            if prim.HasAPI(UsdPhysics.CollisionAPI):
+                prim.RemoveAPI(UsdPhysics.CollisionAPI)
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                prim.RemoveAPI(UsdPhysics.RigidBodyAPI)
+
+        # Visual만 따로 참조하면 원본의 sibling Looks 관계는 참조 경계 밖이 된다.
+        # 실제 D455의 검정 ABS/전면 유리/금속 마운트 인상을 로컬 재질로 복원한다.
+        looks = f"{root}/Looks"
+        def _material(name: str, color: Gf.Vec3f, metallic=0.0, roughness=0.35):
+            mat = UsdShade.Material.Define(stage, f"{looks}/{name}")
+            shader = UsdShade.Shader.Define(stage, f"{looks}/{name}/Shader")
+            shader.CreateIdAttr("UsdPreviewSurface")
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(color)
+            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(float(metallic))
+            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(roughness))
+            mat.CreateSurfaceOutput().ConnectToSource(
+                shader.CreateOutput("surface", Sdf.ValueTypeNames.Token))
+            return mat
+
+        black = _material("BlackABS", Gf.Vec3f(0.025, 0.028, 0.032), 0.0, 0.28)
+        glass = _material("SensorGlass", Gf.Vec3f(0.015, 0.030, 0.045), 0.15, 0.08)
+        metal = _material("MountMetal", Gf.Vec3f(0.30, 0.32, 0.35), 0.85, 0.24)
+        for prim in Usd.PrimRange(visual_root):
+            if not prim.IsA(UsdGeom.Mesh):
+                continue
+            lname = prim.GetName().lower()
+            mat = (glass if ("glass" in lname or "mask" in lname)
+                   else metal if ("mount" in lname or "usb" in lname)
+                   else black)
+            binding = UsdShade.MaterialBindingAPI.Apply(prim)
+            binding.UnbindAllBindings()
+            binding.Bind(mat)
+
+        ee = self._cfg.end_effector
+        eye = Gf.Vec3d(*ee.camera_offset)
+        target = Gf.Vec3d(0.0, 0.0, ee.grasp_reach_z)
+        forward = (target - eye).GetNormalized()
+        up_hint = Gf.Vec3d(0.0, 1.0, 0.0)
+        if abs(Gf.Dot(forward, up_hint)) > 0.95:
+            up_hint = Gf.Vec3d(1.0, 0.0, 0.0)
+        right = Gf.Cross(forward, up_hint).GetNormalized()
+        up = Gf.Cross(right, forward).GetNormalized()
+        # USD Camera는 로컬 -Z가 광축이다.
+        rot = Gf.Matrix3d(
+            right[0], right[1], right[2],
+            up[0], up[1], up[2],
+            -forward[0], -forward[1], -forward[2])
+        q = Gf.Matrix4d(rot, Gf.Vec3d(0.0)).ExtractRotationQuat()
+
+        # 원본 Color 카메라의 RSD455-root 상대 자세로 D455 mount를 역산한다.
+        # 이 값은 Isaac 5.1 rsd455.usd에서 직접 측정한 값(컬러 센서 Y=+11.5mm).
+        # 원격 참조 직후 XformCache로 센서 prim을 읽으면 스키마 비동기 로딩과 경합해
+        # Kit가 종료될 수 있으므로 런타임 재측정은 하지 않는다.
+        set_pose(root_prim, (0.0, 0.0, 0.0), Gf.Quatd(1.0))
+        color_rel = Gf.Matrix4d(
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 0.0115, 0.0, 1.0)
+        desired = Gf.Matrix4d(1.0)
+        desired.SetRotate(q)
+        desired.SetTranslateOnly(eye)
+        root_local = color_rel.GetInverse() * desired
+        _set_full_pose(root_prim, root_local)
+
+        # 센서가 스쿱 위에서 떠 보이지 않도록 얇은 L 브래킷을 추가한다.
+        # 시각 전용이며 MoveIt 쪽에는 같은 크기의 d455_mount 충돌박스를 둔다.
+        bracket_root = f"{self._grip_base}/D455Mount"
+        UsdGeom.Xform.Define(stage, bracket_root)
+        for name, pos, size in (
+            ("Foot", (0.0, 0.030, -0.014), (0.060, 0.008, 0.040)),
+            ("Arm", (0.0, 0.064, -0.029), (0.090, 0.060, 0.006)),
+        ):
+            cube = UsdGeom.Cube.Define(stage, f"{bracket_root}/{name}")
+            cube.CreateSizeAttr(1.0)
+            cube.CreateDisplayColorAttr([Gf.Vec3f(0.18, 0.20, 0.23)])
+            set_pose(cube.GetPrim(), pos, Gf.Quatd(1.0))
+            UsdGeom.Xformable(cube.GetPrim()).AddScaleOp().Set(Gf.Vec3f(*size))
+
+        for name in ("Color", "Depth", "Infra1", "Infra2"):
+            cam = UsdGeom.Camera(stage.GetPrimAtPath(f"{root}/{name}"))
+            if cam:
+                cam.CreateClippingRangeAttr(Gf.Vec2f(0.02, 20.0))
+        log(f"[Harvester] 실제 D455 장착: {root} "
+            "(Color+Depth+좌/우 IR+IMU, 무강체·무콜라이더, 원본 캘리브레이션)")
 
     @property
     def chassis_path(self) -> str | None:
@@ -772,6 +948,58 @@ class HarvestMM:
             return self._grasp_tcp
         return None
 
+    def log_gripper_alignment(self, stage: Usd.Stage, log=print) -> bool:
+        """실제 Isaac 패드 중심·닫힘축과 HarvestTCP를 출력한다.
+
+        URDF의 수치만 믿고 ±90° 롤을 뒤집지 않도록 런타임 에셋에서 직접 잰다.
+        닫힘축은 접근축과 거의 직교해야 하며 TCP는 좌우 패드 중점 근처여야 한다.
+        """
+        if not self._grip_base or not self._grasp_tcp:
+            return False
+        left = right = None
+        root = stage.GetPrimAtPath(self._gripper_path)
+        for prim in Usd.PrimRange(root):
+            if prim.GetName() == "left_inner_finger":
+                left = prim
+            elif prim.GetName() == "right_inner_finger":
+                right = prim
+        if left is None or right is None:
+            log("[Harvester] ⚠ 패드 링크를 못 찾아 그리퍼 축 진단 생략")
+            return False
+        cache = UsdGeom.XformCache()
+        bbox = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(),
+            [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+        # 링크 전체 bbox에는 너클까지 섞인다. 실제 평평 패드(finger4step) 메시를
+        # 우선 사용하고, 에셋 이름이 바뀐 경우에만 링크 bbox로 폴백한다.
+        def _pad_mesh(link):
+            for child in Usd.PrimRange(link):
+                if child.IsA(UsdGeom.Mesh) and "finger4step" in child.GetName().lower():
+                    return child
+            return link
+
+        left = _pad_mesh(left)
+        right = _pad_mesh(right)
+        lc = bbox.ComputeWorldBound(left).ComputeAlignedRange().GetMidpoint()
+        rc = bbox.ComputeWorldBound(right).ComputeAlignedRange().GetMidpoint()
+        midpoint = (Gf.Vec3d(lc) + Gf.Vec3d(rc)) * 0.5
+        close_axis = (Gf.Vec3d(lc) - Gf.Vec3d(rc)).GetNormalized()
+        grip_m = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(self._grip_base))
+        approach_axis = Gf.Vec3d(
+            grip_m.TransformDir(Gf.Vec3d(0, 0, 1))).GetNormalized()
+        tcp = cache.GetLocalToWorldTransform(
+            stage.GetPrimAtPath(self._grasp_tcp)).ExtractTranslation()
+        tcp_error = (Gf.Vec3d(tcp) - midpoint).GetLength()
+        orthogonality = abs(Gf.Dot(close_axis, approach_axis))
+        log("[Harvester] 그리퍼 축 실측: "
+            f"close=({close_axis[0]:+.3f},{close_axis[1]:+.3f},{close_axis[2]:+.3f}) "
+            f"approach=({approach_axis[0]:+.3f},{approach_axis[1]:+.3f},"
+            f"{approach_axis[2]:+.3f}) dot={orthogonality:.3f} "
+            f"TCP↔패드중점={tcp_error*1000:.1f}mm")
+        if orthogonality > 0.15 or tcp_error > 0.015:
+            log("[Harvester] ⚠ MoveIt 파지 전 그리퍼 축/TCP 정합 확인 필요")
+        return True
+
     def _add_camera_at(self, stage: Usd.Stage, cam_pos, euler, log) -> None:
         """RealSense D455 를 그리퍼 base_link 자식으로 붙인다(팔 따라감) + 로컬 rotateXYZ
         op 에 euler 를 리터럴로 박는다 — GUI 트랜스폼 패널이 이 값을 그대로 표시.
@@ -825,10 +1053,19 @@ class HarvestMM:
         add_reference_to_stage(url, path)
         container = stage.GetPrimAtPath(path)
         for prim in Usd.PrimRange(container):
+            if prim.IsA(UsdPhysics.Joint):
+                prim.SetActive(False)
+                continue
             if prim.HasAPI(UsdPhysics.RigidBodyAPI):
                 prim.RemoveAPI(UsdPhysics.RigidBodyAPI)
+            if prim.HasAPI(PhysxSchema.PhysxRigidBodyAPI):
+                prim.RemoveAPI(PhysxSchema.PhysxRigidBodyAPI)
             if prim.HasAPI(UsdPhysics.CollisionAPI):
                 prim.RemoveAPI(UsdPhysics.CollisionAPI)
+            if prim.HasAPI(PhysxSchema.PhysxCollisionAPI):
+                prim.RemoveAPI(PhysxSchema.PhysxCollisionAPI)
+            if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
 
         cams = [p for p in Usd.PrimRange(container) if p.IsA(UsdGeom.Camera)]
         cam = next((p for p in cams if "Color" in p.GetName()),

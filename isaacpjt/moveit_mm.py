@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""수확 MM 드라이버 (--mm) — Ridgeback + UR10e + 2F-85 + 커터지그 + 가동날 + D455.
+"""수확 MM 드라이버 (--mm) — Ridgeback + UR10e + 동축 3축 1/4구 스쿱.
 
 로봇 모델은 robots/harvester.py, ROS 브리지는 ros/robot_bridge.py. 이 파일은 그 둘을
 '배선'하고 텔레옵/JSON 명령을 매 프레임 적용한다(§5.6 실행측). 판단은 ROS2 가 한다.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import zlib
 
 import numpy as np
 from isaacsim.core.utils.types import ArticulationAction
@@ -23,14 +24,19 @@ try:
     from scene.ground import COMMON_FLOOR_Z as _FLOOR_Z
 except Exception:
     _FLOOR_Z = 0.0
-# ★데모 스폰(2026-07-23): −4.35 이랑의 그립 ripe 과실(-4.15, -9.77, 1.1)을 잡게, 그 앞
-#   0.85m 통로에 두고 베이스 yaw 180°(configure)로 −X를 보게 한다. POSE 는 (x,y,z) 이동값
-#   (yaw 없음 — TranslateOp). yaw 는 dummy_base_revolute_z_joint 로 준다.
-POSE = (-3.3, -9.77, _FLOOR_Z)
+# ★데모 스폰(2026-07-23): 맵(farm.pgm, Y≥-1.08) 안의 row2 플랜트(-4.35 이랑, Y≈+6) 마주봄.
+#   Nav2 로컬라이제이션이 되게 맵 범위 안에 둔다. 베이스 yaw 180°(configure)로 −X(과실) 향함.
+#   POSE 는 (x,y,z) 이동값(yaw 없음 — dummy_base_revolute_z_joint 로 준다).
+POSE = (-3.3, -9.77, _FLOOR_Z)  # 수확테스트 위치(그립 과실 Y=-9.8). 생성맵이 이 영역 덮음 → Nav2 가능.
 # 키네마틱 베이스 조인트 (JSON base 명령용 — 텔레포트만 먹는다, 2026-07-18 실측)
 BASE_JOINTS = ("dummy_base_prismatic_x_joint",
                "dummy_base_prismatic_y_joint",
                "dummy_base_revolute_z_joint")
+
+
+def _fruit_id(path: str) -> int:
+    """USD 경로를 ROS JSON에 넣기 좋은 안정적인 32-bit ID로 바꾼다."""
+    return zlib.crc32(path.encode("utf-8")) & 0xffffffff
 
 
 class MMDriver(Driver):
@@ -40,12 +46,13 @@ class MMDriver(Driver):
     ns = "harvester_0"
     root = "/World/HarvesterMoveit"       # ★stage 격리(2026-07-23): 팀원 mm.py=/World/Harvester 와 별개
 
-    # 그리퍼 = 위치제어 + '너비 목표'. finger_joint 0(열림)→0.8(완전닫힘).
-    # 0.8 까지 쫓으면 dynamic 구 과실을 적도 너머로 밀어 튕긴다(squeeze-pop). 접촉폭 W 까지만
-    # 닫고 W+여유 로 유지하면 마찰로 잡힌다(2026-07-22 spike grasp_force_test: 마찰·힘 전
-    # 조합 유지, 낙하 8mm). grasp_proto 가 접촉 후 finger 를 읽어 grip_width 로 유지폭을 준다.
-    GRIP_FULL_CLOSE = 0.80
-    GRIP_OPEN = 0.0
+    SCOOP_JOINTS = ("scoop_quarter_1_joint",
+                    "scoop_quarter_2_joint",
+                    "cutter_quarter_3_joint")
+    # CAD dimensions.json 규약. 열림 → 수용(닫힘) → 외측 날 +50° 절삭.
+    SCOOP_OPEN = np.radians((0.0, -90.0, -180.0))
+    SCOOP_CLOSED = np.radians((0.0, 0.0, 0.0))
+    SCOOP_CUT = np.radians((0.0, 0.0, 50.0))
 
     def __init__(self, cfg, task=None):
         super().__init__()
@@ -57,6 +64,7 @@ class MMDriver(Driver):
         self.ns = "harvester_moveit" if "--moveit" in _sys.argv else "harvester_0"
         self._mm = HarvestMM(cfg.robots)
         self._base_idx = None
+        self._scoop_indices = None
         self._gripper_idx = None
         self._gripper_target = None
         self._air_fruit_prim = None            # --airfruit 모드: 현재 선택된 과실만 발행
@@ -64,6 +72,7 @@ class MMDriver(Driver):
         self._air_fruits = []                  # 여러 과실 경로(스윕이 select_fruit 로 전환)
         self._air_fruit_sel = 0                # 선택 인덱스(set_friction 대상 머티리얼)
         self._grasped_fruit = None             # 부착 파지 중인 과실 prim(씬/airfruit) — detach 대상
+        self._contact_fruit = None             # 순수마찰 접촉계측 대상(절단 뒤 pickable 제외돼도 유지)
         self._grip_direct = False              # 파지 스파이크: Isaac 직접 그리퍼 구동(MoveIt 없이)
         self._grip_force = None                # 힘/토크 제어(위치제어 대신 일정 토크 유지)
         self._pinch_point = None               # 그리퍼 닫았을 때 좌우 패드 첫 접촉점(TCP)
@@ -71,8 +80,11 @@ class MMDriver(Driver):
         self._blade_poller = None
         self._blade_state_pub = None
         self._status_pub = None
+        self._contact_pub = None
         self._fruit_pub = None
         self._fruit_cursor = 0
+        # 절단 후 pickable_fruits()에서 빠진 대상도 운반 검증을 위해 계속 추적한다.
+        self._tracked_harvested_fruit = None
         self._teleop = None
         self._stage = None
         self._twist = None                    # /cmd_vel 폴러 (Nav2 주행)
@@ -80,6 +92,7 @@ class MMDriver(Driver):
         self._rmpflow = None
         self._was_playing = False
         self._cut_status = {}
+        self._friction_retry_limit = 120
 
     def spawn(self, stage):
         self._mm.spawn(stage, self.root, POSE)
@@ -101,17 +114,16 @@ class MMDriver(Driver):
         r.set_joints_default_state(positions=q0)
 
     def finalize(self, world, stage, opts):
-        self._stage = stage                      # update() 의 가동날 재배치용
+        self._stage = stage
         self._dt = world.get_physics_dt()
-        # 가동날(서보 힌지) — main 이 configure 뒤 reset+settle 했으므로 정착된 자세 기준.
-        # 힌지 강체·조인트는 이 뒤 main 의 reset 에서 물리 뷰에 올라가 미리 정착한다(§8).
-        if not os.environ.get("NO_JIG"):                 # NO_JIG=1 → 파지 스파이크서 가동날 끔
-            self._mm.attach_blade_hinge(stage)
         # 키네마틱 베이스 인덱스 (JSON base 명령용)
         r = self.robot
         self._base_idx = np.array(
             [list(r.dof_names).index(n) for n in BASE_JOINTS])
-        self._gripper_idx = list(r.dof_names).index("finger_joint")
+        self._scoop_indices = np.array(
+            [list(r.dof_names).index(n) for n in self.SCOOP_JOINTS])
+        # 구형 상태 JSON과 일부 진단 코드는 scalar를 기대하므로 외측 커터축을 대표값으로 둔다.
+        self._gripper_idx = int(self._scoop_indices[2])
         # RMPflow 목표를 따라갈 때 링크가 처져 보이지 않도록 UR10e 6축의
         # articulation position drive 게인만 강화한다. 베이스/그리퍼는 건드리지 않는다.
         arm_indices = np.array([
@@ -132,15 +144,12 @@ class MMDriver(Driver):
         kds = np.asarray(kds, dtype=float).copy()
         kps[arm_indices] = np.maximum(kps[arm_indices] * 2.0, 10000.0)
         kds[arm_indices] = np.maximum(kds[arm_indices] * 2.0, 1000.0)
-        # 그리퍼(finger_joint) 게인 — 에셋 기본값이 너무 약해 열림/닫힘이 안 먹는다.
-        # 올려서 확실히 여닫는다. 튕김 걱정 없음: 과실이 파지 중 kinematic(고정)이라
-        # 세게 닫아도 안 밀리고, 절단 순간 dynamic 될 땐 마찰(μ0.9)이 붙잡는다(2026-07-22).
-        gi = self._gripper_idx
-        # 그리퍼 = 위치제어. 접촉폭까지 닫고 grip_width 로 그 폭 유지(0.8 까지 안 쫓음).
-        # ★kp 낮춤(2026-07-23): 5e4 는 강체접촉서 버즈/폭발("그리퍼 깨짐") — 세션 실측 800/50 이
-        #   안정 정착. 부착 데모는 그리퍼가 세게 물 필요 없어 낮게 유지(개폐만 확실히).
-        kps[gi] = float(os.environ.get("GRIP_KP", "800"))
-        kds[gi] = float(os.environ.get("GRIP_KD", "50"))
+        # 세 동축 회전축은 같은 낮은 position gain으로 구동해 중첩 셸의 접촉 폭발을 막는다.
+        gi = self._scoop_indices
+        kps[gi] = float(os.environ.get("SCOOP_KP", "1200"))
+        kds[gi] = float(os.environ.get("SCOOP_KD", "80"))
+        self._grip_position_kp = float(kps[gi[2]])
+        self._grip_position_kd = float(kds[gi[2]])
         controller.set_gains(kps=kps, kds=kds)
         try:
             efforts = controller.get_max_efforts()
@@ -149,13 +158,15 @@ class MMDriver(Driver):
             efforts = np.asarray(efforts, dtype=float).copy()
             # ★파지력 상한 — 강체 과조임 반발력으로 튕기는 것 방지. 논문: F≥mg/(2μ)≈0.65N.
             # 5.0 N·m→패드 ~85N(과함). env 로 낮춰 antipodal 마찰 파지(안전배수 몇 N)만 걸리게.
-            efforts[gi] = float(os.environ.get("GRIP_EFFORT", "5.0"))
+            grip_effort = float(os.environ.get("SCOOP_EFFORT", "40.0"))
+            efforts[gi] = grip_effort
             controller.set_max_efforts(values=efforts)
         except Exception as exc:
             print(f"[MM] ⚠ 그리퍼 effort 상한 실패(계속 진행): {exc}")
-        print(f"[MM] 그리퍼 위치제어(너비목표): kp={kps[gi]:.0f} maxEffort=5.0 "
-              f"(접촉폭 유지 → squeeze-pop 회피)")
-        self._gripper_target = self.GRIP_OPEN
+        print(f"[MM] 동축 스쿱 3축 위치제어: kp={kps[gi].tolist()} "
+              f"maxEffort={grip_effort:.1f} "
+              f"joints={list(self.SCOOP_JOINTS)}")
+        self._gripper_target = self.SCOOP_OPEN.copy()
         # 그리퍼 마찰 재바인딩 one-shot — 조립시점엔 PhysX 콜라이더가 없어(play 전) 0개가
         # 걸렸다(2026-07-22 실측 "콜라이더 0개" → 과실 미끄러짐). play+step 후 콜라이더가
         # 생기면 그때 스파이크와 동일하게 바인딩한다. 아래 update() 에서 실행.
@@ -192,6 +203,10 @@ class MMDriver(Driver):
                     f"/World/RosRmpStatus_{self.ns}",
                     f"/{self.ns}/rmpflow/status")
                 self._status_pub = RB.StringPublisher(pub)
+                contact_pub = RB.build_string_pub(
+                    f"/World/RosGripContact_{self.ns}",
+                    f"/{self.ns}/grasp_contact")
+                self._contact_pub = RB.StringPublisher(contact_pub)
                 fruit_pub = RB.build_string_pub(
                     f"/World/RosSimTomato_{self.ns}",
                     f"/{self.ns}/sim/tomato")
@@ -213,7 +228,9 @@ class MMDriver(Driver):
                 nav = _dc.replace(
                     self._cfg.robots.harvester_nav,
                     tf_namespace=self.ns,
-                    cmd_vel_topic=f"/{self.ns}/cmd_vel",
+                    # Nav2 원출력 대신 0.35초 watchdog 중계 토픽을 받는다. OmniGraph
+                    # SubscribeTwist가 마지막 비영(非零) 값을 영구 유지하는 runaway 방지.
+                    cmd_vel_topic=f"/{self.ns}/cmd_vel_safe",
                     odom_topic=f"/{self.ns}/odom",
                     scan_topic=f"/{self.ns}/scan",
                     base_frame="mm_base")
@@ -237,47 +254,82 @@ class MMDriver(Driver):
         if opts.mm_teleop and opts.rmpflow:
             print("[MM] --rmpflow와 --mm-teleop 동시 제어는 충돌하므로 텔레옵 비활성")
         elif opts.mm_teleop:
-            self._teleop = build_teleop(r, self._mm.set_blade_deg, opts.gui)
+            self._teleop = build_teleop(r, self._set_scoop_cutter_deg, opts.gui)
+
+    def _set_scoop_cutter_deg(self, deg: float) -> None:
+        """텔레옵/레거시 blade 명령을 외측 1/4구 관절로 변환한다."""
+        if self._scoop_indices is None:
+            return
+        target = self.SCOOP_CLOSED.copy()
+        target[2] = math.radians(max(0.0, min(50.0, float(deg))))
+        self.robot.apply_action(ArticulationAction(
+            joint_positions=target, joint_indices=self._scoop_indices))
 
     def _build_camera(self, stage):
-        cam_prim = self._mm.camera_path(stage)
-        if not cam_prim:
-            print("[Camera] D455 카메라 prim 못 찾음 — rgb/depth 발행 스킵")
+        sensor_paths = self._mm.camera_paths(stage)
+        if not sensor_paths.get("color"):
+            print("[Camera] D455 센서 prim 못 찾음 — 전체 스트림 발행 스킵")
             return
         try:
             from ros import robot_bridge as RB
             import dataclasses as _dc
-            # ★카메라 토픽 격리(2026-07-23): 기본 /harvester/{rgb,depth,camera_info} 는 전역이라
-            #   팀원 YOLO 와 겹친다. moveit_mm 에서만 /harvester_moveit/* 로 오버라이드(config 불변).
+            # MoveIt 카메라는 Isaac ROS 노드 네임스페이스·상대 토픽·frame_id까지 모두
+            # harvester_moveit 식별자를 사용한다. RMP MM(/harvester_0 또는 /harvester/*),
+            # 같은 프로세스의 두 번째 D455 그래프와 이름이 겹칠 여지를 없앤다.
             cam = _dc.replace(
                 self._cfg.robots.camera,
-                rgb_topic=f"/{self.ns}/rgb",
-                depth_topic=f"/{self.ns}/depth",
-                info_topic=f"/{self.ns}/camera_info")
-            RB.build_camera(stage, f"/World/RosCamera_{self.ns}", cam_prim, cam)
-            # ★카메라 TF parent 를 Arm/base_link 로(2026-07-23): 발행 프레임명 "base_link" 는
-            #   URDF 에서 팔마운트(mm_base+0.3z)다. 섀시 Base/base_link 를 기준으로 쓰면 카메라가
-            #   계획상 0.3m 높게 잡힌다(Codex). Arm/base_link 가 URDF base_link 와 의미 일치.
-            RB.build_camera_optical_tf(
-                stage, f"/World/RosCameraTf_{self.ns}",
-                f"{self.root}/Arm/base_link", cam_prim,
-                cam.frame_id, tf_topic=f"/{self.ns}/tf")
+                node_namespace=self.ns,
+                rgb_topic="rgb",
+                depth_topic="depth",
+                info_topic="camera_info",
+                depth_info_topic="depth/camera_info",
+                pointcloud_topic="depth/points",
+                infra1_topic="infra1/image_raw",
+                infra2_topic="infra2/image_raw",
+                infra1_info_topic="infra1/camera_info",
+                infra2_info_topic="infra2/camera_info",
+                imu_topic="imu",
+                frame_id=f"{self.ns}_d455_color_optical_frame",
+                depth_frame_id=f"{self.ns}_d455_depth_optical_frame",
+                infra1_frame_id=f"{self.ns}_d455_infra1_optical_frame",
+                infra2_frame_id=f"{self.ns}_d455_infra2_optical_frame",
+                imu_frame_id=f"{self.ns}_d455_imu_frame")
+            graph_base = f"/World/RosD455_{self.ns}"
+            RB.build_d455(stage, graph_base, sensor_paths, cam)
+            # TF parent는 URDF의 base_link와 같은 Arm/base_link. 센서마다 원본 D455
+            # extrinsic이 다르므로 optical frame도 각각의 실제 prim 아래에 만든다.
+            base_prim = f"{self.root}/Arm/base_link"
+            tf_topic = f"/{self.ns}/tf"
+            for key, frame in (
+                ("color", cam.frame_id),
+                ("depth", cam.depth_frame_id),
+                ("infra1", cam.infra1_frame_id),
+                ("infra2", cam.infra2_frame_id),
+            ):
+                if key in sensor_paths:
+                    RB.build_camera_optical_tf(
+                        stage, f"/World/RosD455Tf_{self.ns}_{key}",
+                        base_prim, sensor_paths[key], frame, tf_topic=tf_topic)
+            if "imu" in sensor_paths:
+                RB.build_sensor_tf(
+                    stage, f"/World/RosD455Tf_{self.ns}_imu",
+                    base_prim, sensor_paths["imu"], cam.imu_frame_id,
+                    tf_topic=tf_topic)
         except Exception:
             import traceback
             print("\n[Camera] 그래프 생성 실패 — 씬 유지. probe 로 노드명 확인.")
             traceback.print_exc()
 
     def update(self, is_playing):
-        if is_playing and not self._was_playing and self._rmpflow is not None:
-            self._rmpflow.reset()
+        if is_playing and not self._was_playing:
+            self._tracked_harvested_fruit = None
             self._cut_status = {}
+            if self._rmpflow is not None:
+                self._rmpflow.reset()
         self._was_playing = is_playing
-        if self._stage is not None:
-            # 가동날(키네마틱)을 매 프레임 그리퍼 포즈+서보각으로 배치 (재생·정지 무관).
-            self._mm.sync_blade_pose(
-                self._stage, self._dt if is_playing else 0.0)
-            if self._blade_state_pub is not None:
-                self._blade_state_pub.publish(self._mm.blade_deg())
+        if self._blade_state_pub is not None and self._scoop_indices is not None:
+            q = np.asarray(self.robot.get_joint_positions(), dtype=float)
+            self._blade_state_pub.publish(float(np.degrees(q[self._scoop_indices[2]])))
         if self._teleop is not None:                 # 키보드 텔레옵 (재생 중에만 적용)
             self._teleop(is_playing)
         if is_playing and not self._friction_bound:
@@ -285,17 +337,26 @@ class MMDriver(Driver):
             self._play_steps += 1
             if self._play_steps >= 10 and self._stage is not None:
                 try:
-                    self._mm._bind_gripper_friction(
+                    bound = self._mm._bind_gripper_friction(
                         self._stage, self._mm._gripper_path, print)
                 except Exception as exc:
                     print(f"[MM] ⚠ 그리퍼 마찰 재바인딩 실패: {exc}")
-                self._friction_bound = True
+                    bound = 0
+                self._friction_bound = bound > 0
+                if not self._friction_bound and self._play_steps >= self._friction_retry_limit:
+                    print("[MM] ⚠ 그리퍼 콜라이더 마찰 바인딩을 120프레임 동안 못 함 — "
+                          "파지 명령을 보내기 전에 에셋 콜라이더를 확인하세요.", flush=True)
+                    # 계속 재시도하되 경고는 한 번만 낸다.
+                    self._friction_retry_limit = 10**9
         if is_playing and self._twist is not None:   # Nav2 /cmd_vel → 홀로노믹 베이스
             self._drive_base()
         if is_playing and self._blade_poller is not None:
             blade_target = self._blade_poller.poll()
             if blade_target is not None:
-                self._mm.set_blade_deg(blade_target)
+                target = self.SCOOP_CLOSED.copy()
+                target[2] = math.radians(float(blade_target))
+                self.robot.apply_action(ArticulationAction(
+                    joint_positions=target, joint_indices=self._scoop_indices))
         # MM JSON 명령 (블레이드·베이스) — 재생 중에만 적용
         if is_playing and self._poller is not None:
             raw = self._poller.poll()
@@ -306,7 +367,10 @@ class MMDriver(Driver):
                     cmd = None
                 if isinstance(cmd, dict):
                     if "blade" in cmd:
-                        self._mm.set_blade_deg(float(cmd["blade"]))
+                        target = self.SCOOP_CLOSED.copy()
+                        target[2] = math.radians(float(cmd["blade"]))
+                        self.robot.apply_action(ArticulationAction(
+                            joint_positions=target, joint_indices=self._scoop_indices))
                     if "base" in cmd:
                         b = [float(v) for v in cmd["base"]]
                         home_ready = (self._rmpflow is None
@@ -336,12 +400,11 @@ class MMDriver(Driver):
                             self._homing = True   # 관절 직접 구동 — rmpflow 없어도 g 홈 동작
                     if "gripper" in cmd and isinstance(cmd["gripper"], dict):
                         closed = bool(cmd["gripper"].get("closed", False))
-                        self._gripper_target = (self.GRIP_FULL_CLOSE if closed
-                                                else self.GRIP_OPEN)
+                        self._gripper_target = (
+                            self.SCOOP_CLOSED.copy() if closed else self.SCOOP_OPEN.copy())
                     if "grip_width" in cmd:
-                        # 접촉폭까지 닫은 뒤 그 폭(finger 위치)으로 유지 — 0.8 까지 안 쫓아
-                        # dynamic 구 과실을 적도 너머로 안 밀어 squeeze-pop 회피(spike 검증).
-                        self._gripper_target = float(cmd["grip_width"])
+                        print("[MM] grip_width는 2F-85 전용이라 무시합니다. "
+                              "새 스쿱에는 gripper.closed 또는 3축 controller 명령을 쓰세요.")
                     if "cut_fruit" in cmd:
                         self._handle_cut(cmd["cut_fruit"])
                     if cmd.get("drop_air") and self._air_fruit_prim is not None:
@@ -376,7 +439,12 @@ class MMDriver(Driver):
                         #   True 면 airfruit(레거시). 진짜 마찰은 지그 고친 뒤 복원.
                         _req = cmd["attach_fruit"]
                         if isinstance(_req, dict) and "position" in _req:
-                            self._attach_scene_fruit(_req["position"])
+                            _ok = self._attach_scene_fruit(_req)
+                            if self._status_pub is not None and "attach_id" in _req:
+                                self._status_pub.publish(json.dumps({
+                                    "attach_id": int(_req["attach_id"]),
+                                    "attach_success": bool(_ok),
+                                }, separators=(",", ":")))
                         elif self._air_fruit_prim is not None:
                             if self._attach_prim_to_gripper(self._air_fruit_prim):
                                 print("[Grasp] attach_fruit(airfruit)", flush=True)
@@ -391,9 +459,43 @@ class MMDriver(Driver):
                                 print("[Grasp] detach_grasp — 부착 해제(과실 낙하/적재)", flush=True)
                     if "grip_force" in cmd:
                         # ★힘/토크 제어 — 위치제어(진동·침투) 대신 일정 닫힘토크 유지(사용자 #4).
-                        # GRIP_KP=0 로 스폰해야 순수 힘제어(위치드라이브 간섭 없음). +값=닫힘.
+                        # 런타임에 finger 위치 drive만 0으로 내려 직접 effort와의 간섭을 없앤다.
                         self._grip_direct = True
                         self._grip_force = float(cmd["grip_force"])
+                        if self._gripper_idx is not None:
+                            ctrl = self.robot.get_articulation_controller()
+                            kps, kds = ctrl.get_gains()
+                            if hasattr(kps, "cpu"):
+                                kps = kps.cpu().numpy()
+                            if hasattr(kds, "cpu"):
+                                kds = kds.cpu().numpy()
+                            kps = np.asarray(kps, dtype=float).copy()
+                            kds = np.asarray(kds, dtype=float).copy()
+                            kps[self._gripper_idx] = 0.0
+                            # 직접 토크만 걸고 kd까지 0으로 만들면 강체 줄기에서 finger 속도가
+                            # ±2.5rad/s로 계속 튄다. 작은 속도감쇠는 유지하되 위치 스프링만
+                            # 제거해 일정 정상력(force closure)과 정착을 동시에 얻는다.
+                            kds[self._gripper_idx] = float(
+                                os.environ.get("GRIP_FORCE_KD", "10.0"))
+                            ctrl.set_gains(kps=kps, kds=kds)
+                        print(f"[Grip] 일정 닫힘토크 {self._grip_force:.2f} N·m", flush=True)
+                    if cmd.get("grip_position_mode") and self._gripper_idx is not None:
+                        # 해제/다음 사이클: 저장해 둔 위치 drive 게인을 복원하고 ROS2 position
+                        # controller가 다시 finger_joint를 열고 닫게 한다.
+                        ctrl = self.robot.get_articulation_controller()
+                        kps, kds = ctrl.get_gains()
+                        if hasattr(kps, "cpu"):
+                            kps = kps.cpu().numpy()
+                        if hasattr(kds, "cpu"):
+                            kds = kds.cpu().numpy()
+                        kps = np.asarray(kps, dtype=float).copy()
+                        kds = np.asarray(kds, dtype=float).copy()
+                        kps[self._gripper_idx] = self._grip_position_kp
+                        kds[self._gripper_idx] = self._grip_position_kd
+                        ctrl.set_gains(kps=kps, kds=kds)
+                        self._grip_force = None
+                        self._grip_direct = False
+                        print("[Grip] 위치제어 복원", flush=True)
                     if "grip_effort" in cmd and self._gripper_idx is not None:
                         # 파지력 상한 실시간 변경 — 재시작 없이 힘 스윕(강체 튕김 vs 미끄럼 창 찾기).
                         ctrl = self.robot.get_articulation_controller()
@@ -506,6 +608,8 @@ class MMDriver(Driver):
                                   f"측정effort={rep['eff']:.4f} vel={rep['vel']:.4f}", flush=True)
                         except Exception as _e:
                             print(f"[Spike] report_grip 실패: {_e}", flush=True)
+                    if cmd.get("report_grasp_contact"):
+                        self._report_grasp_contact(cmd["report_grasp_contact"])
                     if cmd.get("fruit_to_grip") and self._air_fruit_prim is not None:
                         # ★그립줄기를 '손끝 패드 실제 위치'에 결정론적으로 배치(추측·튜닝 X).
                         # 좌우 fingertip 패드 메시의 월드 bbox 중점 = 손끝 파지점.
@@ -613,7 +717,7 @@ class MMDriver(Driver):
                 status = self._rmpflow.status()
                 status["gripper"] = float(
                     self.robot.get_joint_positions()[self._gripper_idx])
-                status["blade"] = self._mm.blade_deg()
+                status["blade"] = math.degrees(status["gripper"])
                 status.update(self._cut_status)
                 # Isaac 5.1 generic ROS2Publisher의 std_msgs/String data는 긴
                 # 문자열을 약 128 byte에서 "..."로 잘라 버린다. 잘린 JSON은
@@ -646,27 +750,19 @@ class MMDriver(Driver):
                     print(f"[RMPflow] 상태 payload 초과({len(payload)}): {payload}")
                 else:
                     self._status_pub.publish(payload)
-        # 그리퍼 — ros2_control 전환(2026-07-22): finger_joint 은 이제 topic_based 가
-        # /joint_command 에 실어 보내고 OmniGraph 조인트 브리지(팔과 동일 경로)가 이름으로
-        # 적용한다. Python 직접적용(_gripper_target)은 그 브리지와 싸우므로 비활성.
-        # 파지 스파이크: "grip"(위치) / "grip_force"(토크) 로 Isaac 직접 finger 구동.
-        # _grip_direct 게이팅 — 이 명령 없으면 MoveIt 경로 영향 없음(기본 비활성).
+        # 기본 경로는 ros2_control의 3축 명령이다. JSON 직접 모드는 독립 시험용이다.
         if is_playing and self._grip_direct:
-            gi = np.array([self._gripper_idx])
-            if self._grip_force is not None:               # 힘/토크 제어(일정 토크 유지)
+            gi = self._scoop_indices
+            if self._gripper_target is not None:
                 self.robot.apply_action(ArticulationAction(
-                    joint_efforts=np.array([self._grip_force]), joint_indices=gi))
-            elif self._gripper_target is not None:         # 위치 제어
-                self.robot.apply_action(ArticulationAction(
-                    joint_positions=np.array([self._gripper_target]), joint_indices=gi))
-            # 매 프레임 Isaac 실측(finger·vel·eff) 발행 — 정착판정용(ROS topic vel 은 쓰레기).
+                    joint_positions=np.asarray(self._gripper_target), joint_indices=gi))
             if self._status_pub is not None:
                 try:
                     _p = np.asarray(self.robot.get_joint_positions()).flatten()
                     _v = np.asarray(self.robot.get_joint_velocities()).flatten()
                     self._status_pub.publish(json.dumps(
-                        {"finger": float(_p[self._gripper_idx]),
-                         "vel": float(_v[self._gripper_idx])}))
+                        {"scoop": [float(_p[i]) for i in gi],
+                         "vel": [float(_v[i]) for i in gi]}))
                 except Exception:
                     pass
         if is_playing:
@@ -736,33 +832,172 @@ class MMDriver(Driver):
         self._grasped_fruit = fruit_path
         return True
 
-    def _attach_scene_fruit(self, base_position) -> None:
-        """수확 위치(base frame) 최근접 ripe **씬 과실**을 그리퍼에 부착(_handle_cut 과 동일 탐색).
-        절단 전에 부착해야 pedicel 해제 순간 과실이 그리퍼에 매달린 채 유지된다."""
+    def _attach_scene_fruit(self, request) -> bool:
+        """ROS가 선택한 정확한 ripe 과실만 그리퍼에 부착한다.
+
+        fruit_id가 있으면 거리 기반 대체 선택을 절대 하지 않는다. 좌표만 보내는 구형
+        클라이언트는 5 cm 안의 과실만 허용해 이웃 식물을 잘못 붙이지 못하게 한다.
+        """
         import numpy as np
-        from pxr import Gf, UsdGeom
+        from pxr import Gf, Usd, UsdGeom
         if self._task is None or self._stage is None:
-            return
+            return False
+        base_position = request["position"]
+        expected_id = request.get("fruit_id")
+        if expected_id is not None:
+            expected_id = int(expected_id)
         ref = self._stage.GetPrimAtPath(f"{self.root}/Base/base_link")
         matrix = UsdGeom.XformCache().GetLocalToWorldTransform(ref)
         target = np.asarray(matrix.Transform(Gf.Vec3d(*base_position)), dtype=float)
         cache = UsdGeom.XformCache()
+        bbox = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
         best, best_d = None, float("inf")
-        for fruit in self._task.pickable_fruits():
+        candidates = list(self._task.pickable_fruits())
+        # GreenhouseTask.detach_fruit()는 정상적으로 수확한 과실을 pickable 목록에서
+        # 제거한다. 예전에는 이때 /sim/tomato도 끊겨, 실제로 스쿱 안에 있어도 ROS가
+        # 위치 소실(inf)로 오판했다. 마지막 절단 대상은 동적 강체 상태 그대로 계속 발행한다.
+        tracked = self._tracked_harvested_fruit
+        if tracked and not any(f.get("path") == tracked for f in candidates):
+            candidates.append({
+                "path": tracked, "class_name": "ripe", "harvested": True})
+        for fruit in candidates:
             if fruit.get("class_name") != "ripe":
+                continue
+            if expected_id is not None and _fruit_id(fruit["path"]) != expected_id:
                 continue
             prim = self._stage.GetPrimAtPath(fruit["path"])
             if not prim.IsValid():
                 continue
+            body = self._stage.GetPrimAtPath(fruit["path"] + "/Body")
+            geom = body if body.IsValid() else prim
             pos = np.asarray(
-                cache.GetLocalToWorldTransform(prim).ExtractTranslation(), dtype=float)
+                bbox.ComputeWorldBound(geom).ComputeAlignedRange().GetMidpoint(),
+                dtype=float)
             d = float(np.linalg.norm(pos - target))
-            if d < best_d:
+            if expected_id is not None or d < best_d:
                 best, best_d = fruit, d
-        if best is None or best_d > 0.25:
-            print(f"[Grasp] 씬 과실 못 찾음(최근접 {best_d:.2f}m > 0.25m)"); return
+                if expected_id is not None:
+                    break
+        attach_tolerance = float(os.environ.get("SCENE_FRUIT_ATTACH_TOLERANCE_M", "0.05"))
+        if best is None:
+            print(f"[Grasp] 씬 과실 ID 불일치 — id={expected_id}", flush=True)
+            return False
+        # ID는 대상을 특정할 뿐, 멀리 날아간 과실을 순간이동시켜 붙이라는 뜻이 아니다.
+        # 스쿱 중심 8 cm 밖이면 수용 실패로 판정하고 pedicel 절단도 진행하지 않는다.
+        id_attach_tolerance = float(os.environ.get(
+            "SCENE_FRUIT_ID_ATTACH_TOLERANCE_M", "0.08"))
+        allowed = id_attach_tolerance if expected_id is not None else attach_tolerance
+        if best_d > allowed:
+            print(f"[Grasp] 씬 과실 못 찾음(최근접 {best_d:.2f}m > "
+                  f"{allowed:.2f}m, id={expected_id})", flush=True)
+            return False
         if self._attach_prim_to_gripper(best["path"]):
-            print(f"[Grasp] attach_fruit(씬) — {best['path']} 부착(거리 {best_d:.3f}m)", flush=True)
+            print(f"[Grasp] attach_fruit(씬) — id={_fruit_id(best['path'])} "
+                  f"path={best['path']} 거리={best_d:.3f}m", flush=True)
+            return True
+        return False
+
+    def _report_grasp_contact(self, request) -> None:
+        """좌·우 실제 패드 콜라이더와 GripStem의 기하 간격을 ROS 상태로 보낸다.
+
+        finger_joint 하나만 보면 한쪽 패드/지그에 걸린 것도 파지로 오판한다. 여기서는
+        실제 충돌 메시 AABB 사이의 최소 간격을 좌우 각각 계산하고, 패드 중점 대비 줄기의
+        상대 위치도 함께 보내 절단 전 양면 접촉과 절단 후 미끄러짐을 검증한다.
+        """
+        if self._stage is None or self._contact_pub is None:
+            return
+        try:
+            from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
+
+            target = None
+            if isinstance(request, dict) and "position" in request and self._task is not None:
+                base = self._stage.GetPrimAtPath(f"{self.root}/Base/base_link")
+                b2w = UsdGeom.XformCache().GetLocalToWorldTransform(base)
+                wanted = np.asarray(
+                    b2w.Transform(Gf.Vec3d(*request["position"])), dtype=float)
+                best_d = float("inf")
+                for fruit in self._task.pickable_fruits():
+                    prim = self._stage.GetPrimAtPath(fruit["path"])
+                    if not prim.IsValid():
+                        continue
+                    p = np.asarray(
+                        UsdGeom.XformCache().GetLocalToWorldTransform(
+                            prim).ExtractTranslation(), dtype=float)
+                    d = float(np.linalg.norm(p - wanted))
+                    if d < best_d:
+                        target, best_d = fruit["path"], d
+                if target is not None and best_d <= 0.25:
+                    self._contact_fruit = target
+                else:
+                    # 절단 후 원래 과실은 pickable 목록에서 빠진다. 이때 31cm 옆의 다음
+                    # 과실(best)을 그대로 쓰면 "314mm 미끄러짐"으로 오판하므로 버리고,
+                    # 절단 전에 저장한 _contact_fruit를 계속 추적한다.
+                    target = None
+            target = target or self._contact_fruit or self._air_fruit_prim
+            stem = self._stage.GetPrimAtPath((target or "") + "/GripStem")
+            tcp = self._mm.grasp_tcp_path(self._stage)
+            robot = tcp.rsplit("/base_link/", 1)[0] if tcp else None
+            if not target or not stem.IsValid() or not robot:
+                self._contact_pub.publish(json.dumps({
+                    "grasp_contact": False, "contact_reason": "target_or_stem_missing"}))
+                return
+
+            def pad(side):
+                root = self._stage.GetPrimAtPath(f"{robot}/{side}_inner_finger")
+                candidates = [
+                    p for p in Usd.PrimRange(root)
+                    if "finger4step" in str(p.GetPath()).lower()
+                    and (p.HasAPI(UsdPhysics.CollisionAPI)
+                         or p.HasAPI(PhysxSchema.PhysxCollisionAPI))]
+                return candidates[-1] if candidates else None
+
+            left, right = pad("left"), pad("right")
+            if left is None or right is None:
+                self._contact_pub.publish(json.dumps({
+                    "grasp_contact": False, "contact_reason": "pad_collider_missing"}))
+                return
+
+            bb = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            sr = bb.ComputeWorldBound(stem).ComputeAlignedRange()
+
+            def range_data(prim):
+                r = bb.ComputeWorldBound(prim).ComputeAlignedRange()
+                lo = np.asarray(r.GetMin(), dtype=float)
+                hi = np.asarray(r.GetMax(), dtype=float)
+                return lo, hi, (lo + hi) * 0.5
+
+            slo, shi = np.asarray(sr.GetMin(), dtype=float), np.asarray(sr.GetMax(), dtype=float)
+            sc = (slo + shi) * 0.5
+
+            def gap(prim):
+                lo, hi, center = range_data(prim)
+                axis_gap = np.maximum(np.maximum(lo - shi, slo - hi), 0.0)
+                return float(np.linalg.norm(axis_gap)), center
+
+            lg, lc = gap(left)
+            rg, rc = gap(right)
+            pc = (lc + rc) * 0.5
+            # 패드 contactOffset(3mm) + 상대 콜라이더 contact envelope를 포함한다.
+            # 실측 양면 접촉 시 AABB 표면 간격이 5.8~6.1mm이므로 7mm를 사용한다.
+            tol = float(os.environ.get("GRIP_CONTACT_GAP_M", "0.007"))
+            rel = sc - pc
+            payload = {
+                "grasp_contact": bool(lg <= tol and rg <= tol),
+                "left_gap": round(lg, 5), "right_gap": round(rg, 5),
+                "stem_rel": [round(float(v), 5) for v in rel],
+            }
+            # ROS StringPublisher 브리지 버퍼가 120 byte라 target path 등을 넣으면 JSON이
+            # 잘려 수신측 json.loads가 실패한다. 계측 필수값만 보내 120 byte 아래 유지.
+            self._contact_pub.publish(json.dumps(payload))
+            print(f"[GripContact] L={lg*1000:.1f}mm R={rg*1000:.1f}mm "
+                  f"양면={payload['grasp_contact']} rel="
+                  f"{tuple(round(float(v)*1000, 1) for v in rel)}mm", flush=True)
+        except Exception as exc:
+            self._contact_pub.publish(json.dumps({
+                "grasp_contact": False, "contact_reason": str(exc)}))
+            print(f"[GripContact] 계측 실패: {exc}", flush=True)
 
     def _publish_sim_tomato(self) -> None:
         """로봇 주변 ripe 과실의 실제 base-frame 좌표를 한 개씩 발행한다."""
@@ -780,7 +1015,8 @@ class MMDriver(Driver):
                 w2b = cache.GetLocalToWorldTransform(base).GetInverse()
                 p = w2b.Transform(Gf.Vec3d(w))
                 self._fruit_pub.publish(json.dumps(
-                    {"class": "ripe", "position": [round(float(v), 4) for v in p]},
+                    {"class": "ripe", "fruit_id": _fruit_id(self._air_fruit_prim),
+                     "position": [round(float(v), 4) for v in p]},
                     separators=(",", ":")))
             return
         if self._task is None:
@@ -792,7 +1028,16 @@ class MMDriver(Driver):
             return
         world_to_base = cache.GetLocalToWorldTransform(base).GetInverse()
         nearby = []
-        for fruit in self._task.pickable_fruits():
+        candidates = list(self._task.pickable_fruits())
+        # detach_fruit() 뒤에는 정상 수확한 과실이 pickable 목록에서 빠진다. 절단한
+        # 대상은 물리 강체로 계속 존재하므로 마지막 대상 경로를 다시 넣어 실제 운반
+        # 위치를 발행한다. 이 항목에는 작업영역 필터를 적용하지 않아, 떨어졌을 때도
+        # `inf`가 아니라 실제 낙하 좌표/오차로 실패 원인을 확인할 수 있게 한다.
+        tracked = self._tracked_harvested_fruit
+        if tracked and not any(f.get("path") == tracked for f in candidates):
+            candidates.append({
+                "path": tracked, "class_name": "ripe", "harvested": True})
+        for fruit in candidates:
             if fruit.get("class_name") != "ripe":
                 continue
             prim = self._stage.GetPrimAtPath(fruit["path"])
@@ -806,15 +1051,19 @@ class MMDriver(Driver):
             world = bbox_cache.ComputeWorldBound(geom).ComputeAlignedRange().GetMidpoint()
             p = world_to_base.Transform(Gf.Vec3d(world))
             # 매 프레임 수백 개를 순회 발행하지 않고 현재 팔 작업영역만 보낸다.
-            if 0.0 <= p[0] <= 1.5 and abs(p[1]) <= 0.9 and 0.1 <= p[2] <= 1.9:
+            is_tracked = fruit["path"] == tracked
+            if is_tracked or (
+                    0.0 <= p[0] <= 1.5 and abs(p[1]) <= 0.9
+                    and 0.1 <= p[2] <= 1.9):
                 nearby.append((fruit["path"], [float(v) for v in p]))
         if not nearby:
             return
         nearby.sort(key=lambda item: item[0])
-        _, position = nearby[self._fruit_cursor % len(nearby)]
+        path, position = nearby[self._fruit_cursor % len(nearby)]
         self._fruit_cursor += 1
         payload = json.dumps({
             "class": "ripe",
+            "fruit_id": _fruit_id(path),
             "position": [round(v, 4) for v in position],
         }, separators=(",", ":"))
         self._fruit_pub.publish(payload)
@@ -840,13 +1089,16 @@ class MMDriver(Driver):
             cut_id = int(request["id"])
             base_position = np.asarray(request["position"], dtype=float)
             tolerance = float(request.get("max_distance", 0.10))
+            expected_id = request.get("fruit_id")
+            if expected_id is not None:
+                expected_id = int(expected_id)
             if base_position.shape != (3,) or not np.all(np.isfinite(base_position)):
                 raise ValueError("position은 유한한 xyz여야 함")
         except (KeyError, TypeError, ValueError) as exc:
             print(f"[Cutter] 잘못된 절단 요청 무시: {exc}")
             return
 
-        from pxr import Gf, UsdGeom
+        from pxr import Gf, Usd, UsdGeom
         reference = self._stage.GetPrimAtPath(f"{self.root}/Base/base_link")
         matrix = UsdGeom.XformCache().GetLocalToWorldTransform(reference)
         target_world = np.asarray(
@@ -854,26 +1106,47 @@ class MMDriver(Driver):
         nearest = None
         nearest_distance = float("inf")
         cache = UsdGeom.XformCache()
+        bbox = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
         for fruit in self._task.pickable_fruits():
             if fruit.get("class_name") != "ripe":
+                continue
+            if expected_id is not None and _fruit_id(fruit["path"]) != expected_id:
                 continue
             prim = self._stage.GetPrimAtPath(fruit["path"])
             if not prim.IsValid():
                 continue
+            body = self._stage.GetPrimAtPath(fruit["path"] + "/Body")
+            geom = body if body.IsValid() else prim
             position = np.asarray(
-                cache.GetLocalToWorldTransform(prim).ExtractTranslation(), dtype=float)
+                bbox.ComputeWorldBound(geom).ComputeAlignedRange().GetMidpoint(),
+                dtype=float)
             distance = float(np.linalg.norm(position - target_world))
-            if distance < nearest_distance:
+            if expected_id is not None or distance < nearest_distance:
                 nearest, nearest_distance = fruit, distance
-        blade_closed = self._mm.blade_deg() >= self._mm.BLADE_CLOSED_DEG - 1.0
-        success = bool(nearest is not None and nearest_distance <= tolerance
+                if expected_id is not None:
+                    break
+        q = np.asarray(self.robot.get_joint_positions(), dtype=float)
+        blade_deg = float(np.degrees(q[self._scoop_indices[2]]))
+        blade_closed = blade_deg >= self._mm.BLADE_CLOSED_DEG - 1.0
+        # ID는 대상 식별용일 뿐 수용 성공의 증거가 아니다. 예전 0.45m 허용 때문에
+        # 이미 스쿱 밖으로 밀려난 같은 ID 과실도 절단 성공으로 처리됐다. 요청 좌표
+        # 주변의 실제 수용 범위 안에 있을 때만 pedicel을 해제한다.
+        id_cut_tolerance = float(os.environ.get(
+            "SCENE_FRUIT_ID_CUT_TOLERANCE_M", "0.07"))
+        allowed_distance = id_cut_tolerance if expected_id is not None else tolerance
+        success = bool(nearest is not None and nearest_distance <= allowed_distance
                        and blade_closed and self._task.detach_fruit(nearest["path"]))
+        if success:
+            self._tracked_harvested_fruit = nearest["path"]
         self._cut_status = {
             "cut_id": cut_id, "cut_success": success,
             "cut_distance": None if nearest is None else nearest_distance,
             "fruit_path": "" if nearest is None else nearest["path"]}
         print(f"[Cutter] pedicel joint {'해제' if success else '실패'}: "
-              f"id={cut_id}, distance={nearest_distance:.3f}m, "
+              f"cut_id={cut_id}, fruit_id={expected_id}, "
+              f"path={'' if nearest is None else nearest['path']}, "
+              f"distance={nearest_distance:.3f}m, "
               f"blade_closed={blade_closed}")
 
     def _drive_base(self) -> None:
@@ -943,7 +1216,7 @@ def build_nav(stage, mm, nav, opts):
 
 
 def build_teleop(mm_robot, set_blade, gui: bool):
-    """MM 키보드 텔레옵 — 팔6·베이스·그리퍼·블레이드. 반환: step(is_playing) 콜백(실패 시 None).
+    """MM 키보드 텔레옵 — 팔6·베이스·동축 스쿱. 반환: step(is_playing) 콜백.
 
     글자키만 쓴다(방향키는 뷰포트가 가로챔 — spike05 실측). GUI 전용. mm_robot 이 물리
     초기화(world.reset)된 뒤 호출할 것 — HarvesterController 가 현재 관절값에서 출발한다.
@@ -970,13 +1243,13 @@ def build_teleop(mm_robot, set_blade, gui: bool):
                 active["joint"] = ARM_SEL.index(e.input)
                 print(f"[Teleop] 활성 관절 = {active['joint'] + 1}번")
             elif e.input == K.N:                    # 한 번 누르면 절삭 스윙
-                st["blade"] = 35.0
+                st["blade"] = 50.0
                 set_blade(st["blade"])
-                print("[Cutter] 서보 절삭 스윙: 0° → 35° (0.5s)")
+                print("[Cutter] 외측 1/4구 절삭: 0° → 50°")
             elif e.input == K.B:                    # 한 번 누르면 재개방
                 st["blade"] = 0.0
                 set_blade(st["blade"])
-                print("[Cutter] 서보 재개방: 35° → 0° (0.5s)")
+                print("[Cutter] 외측 1/4구 수용 위치: 50° → 0°")
             else:
                 pressed.add(e.input)
         elif e.type == carb.input.KeyboardEventType.KEY_RELEASE:
@@ -992,7 +1265,7 @@ def build_teleop(mm_robot, set_blade, gui: bool):
 [MM 텔레옵] 플레이 상태에서 (방향키는 뷰포트가 가로챔 — 숫자/글자키만)
   팔    숫자 1~6 으로 관절 선택 → , 반시계 / . 시계 로 그 관절 회전
   베이스 I/K 전후 · J/L 제자리 회전 (옆 이동 없음: 회전 후 전진)
-  그리퍼 Z 열기 / X 닫기      블레이드 B 열기(0°) / N 닫기(절단)
+  스쿱   Z 열기 / X 수용닫기   커터 B 수용(0°) / N 절단(+50°)
 """)
 
     def step(is_playing):

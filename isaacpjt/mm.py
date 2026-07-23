@@ -141,18 +141,30 @@ class MMDriver(Driver):
             self._teleop = build_teleop(r, self._mm.set_blade_deg, opts.gui)
 
     def _build_camera(self, stage):
-        cam_prim = self._mm.camera_path(stage)
-        if not cam_prim:
-            print("[Camera] D455 카메라 prim 못 찾음 — rgb/depth 발행 스킵")
+        sensor_paths = self._mm.camera_paths(stage)
+        if not sensor_paths.get("color"):
+            print("[Camera] D455 센서 prim 못 찾음 — 전체 스트림 발행 스킵")
             return
         try:
             from ros import robot_bridge as RB
-            RB.build_camera(stage, "/World/RosCamera", cam_prim,
-                            self._cfg.robots.camera)
-            RB.build_camera_optical_tf(
-                stage, "/World/RosCameraTf",
-                f"{self.root}/Base/base_link", cam_prim,
-                self._cfg.robots.camera.frame_id)
+            cam = self._cfg.robots.camera
+            RB.build_d455(stage, f"/World/RosD455_{self.ns}",
+                          sensor_paths, cam)
+            base_prim = f"{self.root}/Arm/base_link"
+            for key, frame in (
+                ("color", cam.frame_id),
+                ("depth", cam.depth_frame_id),
+                ("infra1", cam.infra1_frame_id),
+                ("infra2", cam.infra2_frame_id),
+            ):
+                if key in sensor_paths:
+                    RB.build_camera_optical_tf(
+                        stage, f"/World/RosD455Tf_{self.ns}_{key}",
+                        base_prim, sensor_paths[key], frame)
+            if "imu" in sensor_paths:
+                RB.build_sensor_tf(
+                    stage, f"/World/RosD455Tf_{self.ns}_imu",
+                    base_prim, sensor_paths["imu"], cam.imu_frame_id)
         except Exception:
             import traceback
             print("\n[Camera] 그래프 생성 실패 — 씬 유지. probe 로 노드명 확인.")

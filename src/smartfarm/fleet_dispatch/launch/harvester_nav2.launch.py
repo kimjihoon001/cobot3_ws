@@ -130,6 +130,20 @@ def _bringup(context, *_args, **_kwargs):
             "bringup_launch.py")),
         launch_arguments=args.items())]
 
+    # Isaac MoveIt MM의 ROS2SubscribeTwist는 마지막 값을 영구 유지한다. Nav2 목표 종료나
+    # 프로세스 이상 시 계속 흘러가지 않도록 같은 namespace에서 안전 토픽을 항상 만든다.
+    actions.append(Node(
+        package="fleet_dispatch", executable="cmd_vel_watchdog",
+        name="cmd_vel_watchdog", namespace=args["namespace"],
+        parameters=[{
+            "use_sim_time": args["use_sim_time"] == "True",
+            "input_topic": "cmd_vel",
+            "output_topic": "cmd_vel_safe",
+            "timeout_sec": 0.35,
+            "publish_rate_hz": 20.0,
+        }],
+        output="screen"))
+
     # RViz 는 기본으로 같이 띄운다(rviz:=false 로 끌 수 있음).
     # ★ use_sim_time 을 반드시 넘겨야 한다 — Isaac 은 타임스탬프를 시뮬 시간(수백 초)으로
     #   찍는데 RViz 가 벽시계(17억 초)로 보면 모든 메시지를 '너무 오래됨' 으로 버려서
@@ -138,8 +152,10 @@ def _bringup(context, *_args, **_kwargs):
     if _pybool(context, "rviz") == "True":
         actions.append(Node(
             package="rviz2", executable="rviz2", name="rviz2",
+            namespace=args["namespace"],
             arguments=["-d", LaunchConfiguration("rviz_config").perform(context)],
             parameters=[{"use_sim_time": args["use_sim_time"] == "True"}],
+            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
             output="screen"))
     return actions
 
@@ -161,20 +177,24 @@ def generate_launch_description():
     default_params = os.path.join(
         get_package_share_directory("fleet_dispatch"), "config",
         "harvester_nav2.yaml")
+    default_map = os.path.join(
+        get_package_share_directory("fleet_dispatch"), "maps",
+        "farm_gen.yaml")
     return LaunchDescription([
         # 현재 MM은 전역 /tf, /scan, /odom, /cmd_vel을 쓰므로 namespace 기본값은 비운다.
         DeclareLaunchArgument("namespace", default_value=""),
         DeclareLaunchArgument("slam", default_value="false"),
         DeclareLaunchArgument("explore", default_value="false"),
-        DeclareLaunchArgument("map", default_value=""),
+        DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("use_sim_time", default_value="true"),  # Isaac /clock
         DeclareLaunchArgument("params_file", default_value=default_params),
         DeclareLaunchArgument("autostart", default_value="true"),
-        # 저장 맵은 MM HOME spawn 위치를 (0, 0, 0)으로 저장했다. 필요하면 실행 시 덮어쓴다.
+        # map=Isaac 월드 프레임. 새 Isaac 실행의 MM 스폰과 같은 베이스 자세.
+        # 주행 후 Nav2만 재시작할 때는 현재 위치를 launch 인자로 덮어쓴다.
         DeclareLaunchArgument("set_initial_pose", default_value="true"),
-        DeclareLaunchArgument("initial_pose_x", default_value="0.0"),
-        DeclareLaunchArgument("initial_pose_y", default_value="0.0"),
-        DeclareLaunchArgument("initial_pose_yaw", default_value="0.0"),
+        DeclareLaunchArgument("initial_pose_x", default_value="-3.3"),
+        DeclareLaunchArgument("initial_pose_y", default_value="-9.77"),
+        DeclareLaunchArgument("initial_pose_yaw", default_value="3.141592653589793"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=os.path.join(
             get_package_share_directory("fleet_dispatch"), "rviz",

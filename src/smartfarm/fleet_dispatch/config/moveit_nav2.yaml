@@ -1,0 +1,313 @@
+# 수확 MM(Ridgeback + UR10e) Nav2 파라미터 — Carter/Nova Carter 설정 이식본.
+#
+# 출처/이식 방침
+#   [1] 골격은 nav2_bringup 의 nav2_params.yaml == carter_navigation 의
+#       carter_navigation_params.yaml 구조 그대로. Carter 도 이 파일을 로봇값만 바꿔 쓴다.
+#   [2] Ridgeback 으로 바뀌는 부분은 아래 4곳뿐 — 나머지는 재사용:
+#         (a) 프레임/토픽 이름  → 상대 cmd_vel, odom, scan
+#             (launch namespace 아래에서만 해석되어 다른 로봇과 충돌하지 않음)
+#         (b) 주행 방식         → 횡이동 없는 전후+회전(DifferentialMotionModel)
+#         (c) 풋프린트          → Ridgeback 0.96 × 0.793 m
+#         (d) 인플레이션 반경   → 온실 통로 1.5m 에 맞춰 축소
+#   [4] 나머지 수치(critic 가중치, AMCL alpha, BT 타임아웃)는 nav2 기본값 그대로 —
+#       근거 없이 만진 값 없음. 튜닝은 실주행 후.
+#
+# ⚠ 이 워크스페이스에는 nav2 가 설치돼 있지 않다(2026-07-20 확인). 런타임 검증 전이다.
+#     sudo apt install ros-$ROS_DISTRO-navigation2 ros-$ROS_DISTRO-nav2-bringup
+#
+# Humble/Jazzy 양립:
+#   - 여기 플러그인 이름은 **Humble 표기**(`nav2_behaviors/Spin`). Jazzy 이상은 `::` 표기라
+#     launch/harvester_nav2.launch.py 가 실행 시점에 자동 변환한다. 이 파일을 직접
+#     `ros2 launch nav2_bringup` 에 넘길 땐 distro 표기를 직접 맞출 것.
+#   - progress checker 는 Humble(`progress_checker_plugin`)과 Jazzy(`progress_checker_plugins`)
+#     키 이름이 다르다. **둘 다 적어둔다** — ROS2 는 선언되지 않은 파라미터 오버라이드를
+#     조용히 무시하므로, 각 distro 가 자기 키만 집어간다.
+#   - 토픽은 전부 상대 이름이다. MoveIt MM은 반드시 harvester_moveit namespace로 실행한다.
+
+amcl:
+  ros__parameters:
+    use_sim_time: true
+    # Isaac이 odom의 직접 자식으로 발행하는 이동 베이스 프레임.
+    # base_link는 그 위의 팔 장착 프레임이므로 Nav2 기준으로 쓰지 않는다.
+    base_frame_id: "mm_base"
+    odom_frame_id: "odom"
+    global_frame_id: "map"
+    scan_topic: scan
+    # MM은 게걸음을 금지하고 전후+회전만 사용하므로 AMCL도 차동 운동 모델을 쓴다.
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    max_particles: 2000
+    min_particles: 500
+    laser_model_type: "likelihood_field"
+    laser_max_range: 25.0
+    laser_min_range: -1.0
+    max_beams: 60
+    sigma_hit: 0.2
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+    update_min_a: 0.2
+    update_min_d: 0.25
+    resample_interval: 1
+    transform_tolerance: 1.0
+    tf_broadcast: true
+    set_initial_pose: false
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: map
+    robot_base_frame: mm_base
+    odom_topic: odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    # plugin_lib_names 는 일부러 비운다 — Humble 과 Jazzy 의 기본 목록이 달라서
+    # (제거된 BT 노드가 섞이면 로드 자체가 실패) 각 distro 기본값에 맡긴다.
+
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5        # 횡속도는 노이즈로 취급해 0으로 만든다
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    odom_topic: odom
+    progress_checker_plugin: "progress_checker"      # Humble 키
+    progress_checker_plugins: ["progress_checker"]   # Jazzy 키 (위 주석 참고)
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      # 최종 yaw 정렬도 정상 진행으로 인정한다. SimpleProgressChecker는 위치 변화만
+      # 검사해 제자리 회전 중 10초가 지나면 "Failed to make progress"로 오판했다.
+      plugin: "nav2_controller::PoseProgressChecker"
+      required_movement_radius: 0.05
+      required_movement_angle: 0.05
+      movement_time_allowance: 10.0
+    general_goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      stateful: true
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.10
+
+    # ★ 방향전환은 제자리 회전으로 한다(사용자 지정 2026-07-20) — Carter 설정의
+    #   RotationShimController 를 그대로 유지한다. 차체 정면(라이다·팔)이 진행방향을
+    #   보도록 먼저 회전하고 전진한다.
+    #   Shim 은 경로 시작 방향과 현재 헤딩이 angular_dist_threshold 이상 벌어지면
+    #   **먼저 제자리에서 돌고**, 정렬되면 primary_controller(DWB)에 넘긴다.
+    #   min/max_vel_y=0이라 DWB의 모든 y 샘플은 0이다. vy_samples는 DWB가 요구하는
+    #   양수로 두되 횡이동 후보는 생성되지 않는다.
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.4
+      lookahead_dist: 0.6
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.9
+      lookahead_time: 1.5
+      rotate_to_heading_angular_vel: 1.3
+      transform_tolerance: 0.2
+      use_velocity_scaled_lookahead_dist: false
+      min_approach_linear_velocity: 0.05
+      approach_velocity_scaling_dist: 0.6
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.25
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.785
+      max_angular_accel: 2.5
+      max_robot_pose_search_dist: 10.0
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: mm_base
+      rolling_window: true
+      width: 4
+      height: 4
+      resolution: 0.05
+      # ★ 이식 (c) — Ridgeback 0.96 × 0.793 m [1] Clearpath 공식. 중심 기준 반폭/반길이.
+      #   원형(robot_radius)으로 근사하면 R=0.62 라 1.5m 통로에서 양옆 0.26m 밖에 안 남아
+      #   플래너가 통로를 통째로 포기한다. 직사각형 풋프린트를 써야 한다.
+      footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 25.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 15.0
+          obstacle_min_range: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # ★ 이식 (d) — [2] 유도. 값이 만족해야 하는 부등식은 두 개다:
+        #     하한: inflation_radius >= 내접반경 0.41m (= 풋프린트 최소 반폭).
+        #           작으면 로봇 몸통 안쪽 장애물이 치명영역으로 안 잡혀 충돌한다.
+        #           (2026-07-20 실측: 0.30 으로 뒀더니 nav2 가 정확히 이 에러를 냈다)
+        #     상한: inflation_radius <  통로 반폭 0.75m (= 1.5m / 2).
+        #           넘으면 통로 중앙까지 비용이 깔려 중앙 주행선이 사라진다.
+        #   0.41 <= r < 0.75 → 0.45 채택(하한에 여유 0.04). Carter 기본 0.55 도 이 범위
+        #   안이라 사실 그대로 써도 됐다 — 통로가 좁아 못 쓴다던 최초 판단은 틀렸다.
+        #   ※ 인플레이션은 '비용'이지 '차단'이 아니다. 차단하는 건 내접반경 안쪽뿐.
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.45
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: mm_base
+      resolution: 0.05
+      track_unknown_space: true
+      footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 25.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 15.0
+          obstacle_min_range: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.45      # local_costmap 과 동일 근거(내접 0.41 <= r < 통로반폭 0.75)
+      always_send_full_costmap: true
+
+map_server:
+  ros__parameters:
+    use_sim_time: true
+    yaml_filename: ""      # 런치의 map 인자가 덮어쓴다
+
+map_saver:
+  ros__parameters:
+    use_sim_time: true
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: true
+
+# slam:=true (정적맵 1회 생성) 용. 이 블록이 **없으면** nav2_bringup 의 slam_launch.py 가
+# params_file 을 slam_toolbox 에 안 넘기고 기본값으로 띄운다 — 기본 프레임이
+# base_footprint/odom 이라 우리 harvester_0/* 프레임과 안 맞아 맵이 안 만들어진다.
+# (Humble 1.1.20 slam_launch.py L107-116 실측: HasNodeParams 로 이 블록 존재를 검사한다.)
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: true
+    map_frame: map
+    odom_frame: odom
+    base_frame: mm_base
+    scan_topic: scan
+    mode: mapping
+    resolution: 0.05
+    max_laser_range: 25.0
+    minimum_travel_distance: 0.3
+    minimum_travel_heading: 0.3
+    transform_publish_period: 0.02
+    map_update_interval: 2.0
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+planner_server:
+  ros__parameters:
+    use_sim_time: true
+    expected_planner_frequency: 20.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      # NavFn 은 격자 탐색이라 홀로노믹/차동 구분이 없다 — Carter 설정 그대로 재사용.
+      # (Smac Hybrid-A* 는 차량형 곡률 제약용이라 여기선 오히려 손해)
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: true
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: odom
+    robot_base_frame: mm_base
+    transform_tolerance: 0.1
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 2.0
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: true
+    loop_rate: 20
+    stop_on_failure: false
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: true
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    # ★ 홀로노믹 이식 (b) — 배열 순서는 [x, y, theta]. Carter(차동)는 y 자리를 0.0 으로 둔다.
+    # ⚠ 2026-07-21 사용자 요청으로 옆걸음 제거 — y 를 Carter 와 같이 0.0 으로.
+    #   controller_server 가 이미 vy=0 만 내보내지만, 다른 소스(teleop 등)가 y 를
+    #   보내도 여기서 한 번 더 막는다.
+    max_velocity: [0.5, 0.0, 1.3]
+    min_velocity: [-0.5, 0.0, -1.3]
+    max_accel: [1.0, 1.0, 2.5]
+    max_decel: [-1.0, -1.0, -2.5]
+    odom_topic: "odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0

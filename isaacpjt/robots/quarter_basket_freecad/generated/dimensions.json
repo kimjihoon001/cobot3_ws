@@ -1,0 +1,34 @@
+{
+  "units": "mm",
+  "axis_convention": "Isaac/UR tool: +Z=approach=rotation axis(J6), +Y=up(stem/slit), +X=lateral",
+  "mechanism": "3 coaxial 1/4-sphere gores, in-place rotation about +Z (ice-cream scoop)",
+  "fruit_diameter": 80.0,
+  "fruit_center_z": 120.0,
+  "scoop_inner_radii": {
+    "inner": 44.0,
+    "middle": 49.0,
+    "outer": 54.0
+  },
+  "wall": 3.0,
+  "gap": 2.0,
+  "az_span_deg": 90.0,
+  "fruit_to_shaft_clearance": 2.0,
+  "closed_azimuth_deg": {
+    "inner": 135.0,
+    "middle": 225.0,
+    "outer": 315.0
+  },
+  "open_delta_deg": {
+    "inner": 0.0,
+    "middle": -90.0,
+    "outer": -180.0
+  },
+  "cut_delta_deg": 50.0,
+  "cutting_edge": "outer quarter leading meridian; no separate blade",
+  "open_top_slit_deg": [
+    45.0,
+    135.0
+  ],
+  "all_joint_axes": "+Z (tool0/J6, coaxial in-place rotation)",
+  "robot_interface": "EN ISO 9409-1-50-4-M6"
+}

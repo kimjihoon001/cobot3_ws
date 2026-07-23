@@ -26,7 +26,7 @@
   isaac_python main.py --load --mm --mm-teleop --no-ros (기존 USD에서 MM만 텔레옵)
 
 로봇 3대 (물류 루프: MM 수확 → iw.hub 팔레트+KLT 운반 → 지게차 랙 적재):
-  /World/Harvester   수확 MM (Ridgeback+UR10e+2F-85+커터지그+가동날+D455)   --mm
+  /World/Harvester   수확 MM (Ridgeback+UR10e+동축 3축 1/4구 스쿱)          --mm
   /World/Forklift    지게차 B (포크 승강)                                    --fork
   /World/IwHub       운반 AMR (iw.hub, 차동+승강)                            --iw
 
@@ -50,6 +50,7 @@ import sys
 from pathlib import Path
 
 GUI = "--headless" not in sys.argv
+AUTOPLAY = "--autoplay" in sys.argv
 NO_ROS = "--no-ros" in sys.argv
 QUIET = "--quiet" in sys.argv
 # --airfruit: nav 없이 팔 앞 도달권에 과실 하나 띄우고 /sim/tomato 로 발행 → MoveIt 로
@@ -200,7 +201,8 @@ if not NO_ROS:
     # sensors.rtx + replicator: iw.hub RTX 라이다(LidarRtx)·렌더프로덕트 생성용(--nav-scan).
     for _ext in ("isaacsim.core.nodes", "isaacsim.ros2.bridge",
                  "omni.graph.bundle.action", "omni.graph.window.action",
-                 "isaacsim.sensors.rtx", "omni.replicator.core"):
+                 "isaacsim.sensors.rtx", "isaacsim.sensors.physics",
+                 "omni.replicator.core"):
         enable_extension(_ext)
     for _ in range(20):
         simulation_app.update()
@@ -342,10 +344,12 @@ def run_loaded(path: str) -> None:
         from isaacsim.core.utils.viewports import set_camera_view
         set_camera_view(eye=[10.0, -18.0, 12.0], target=[0.0, 2.0, 0.5])
 
-    if not GUI:
+    if not GUI or AUTOPLAY:
         # 헤드리스엔 ▶Play 누를 사람이 없다 — 자동 재생. 안 하면 OnPlaybackTick 이
         # 영원히 안 틱해서 브리지(/clock·joint_states)가 침묵한다(2026-07-22 실측).
         world.play()
+        if GUI:
+            print("[Load] --autoplay: GUI 물리 재생 자동 시작", flush=True)
 
     was_playing = False
     while simulation_app.is_running():
@@ -500,9 +504,11 @@ def _spawn_one_airfruit(stage, world_pos, idx: int) -> str:
 
 
 def _setup_air_fruit(stage, drivers) -> None:
-    """nav 없이 팔 앞 도달권에 **실제 토마토 USD** 과실을 **여러 개(가로 한 줄)** 띄운다.
-    스윕 스파이크가 케이스마다 fresh 과실을 잡게 해 reset 반복 상태오염을 회피(사용자 지적
-    2026-07-22 "처음빼고 상태이상". "매번 스폰하지말고 한번에 여러개"). 개수·간격은 env."""
+    """nav 없이 팔 앞 도달권에 **실제 토마토 USD** 테스트 과실을 띄운다.
+
+    기본 데모는 화면 앞을 가리던 과실 배열 대신 한 개만 만든다. 마찰 스윕처럼 여러
+    샘플이 필요한 경우에만 ``AIRFRUIT_N``을 명시적으로 늘린다.
+    """
     from pxr import Gf, UsdGeom
     # ★name 분리 대응(2026-07-23, Codex): moveit_mm 은 name="mm_moveit" 이므로 "mm" 로만
     #   찾으면 --moveit --airfruit 에서 못 찾는다. name 이 "mm" 로 시작하는 MM 계열을 잡는다.
@@ -512,7 +518,7 @@ def _setup_air_fruit(stage, drivers) -> None:
     base = stage.GetPrimAtPath(f"{mm.root}/Base/base_link")
     if not base.IsValid():
         print("[AirFruit] base_link 못 찾음"); return
-    n = int(os.environ.get("AIRFRUIT_N", "6"))
+    n = int(os.environ.get("AIRFRUIT_N", "1"))
     dy = float(os.environ.get("AIRFRUIT_DY", "0.07"))     # 과실 간 가로 간격(섀시 Y, m)
     cache = UsdGeom.XformCache()
     b2w = cache.GetLocalToWorldTransform(base)
@@ -522,8 +528,8 @@ def _setup_air_fruit(stage, drivers) -> None:
         world_pos = b2w.Transform(Gf.Vec3d(0.6, y, 1.0))
         paths.append(_spawn_one_airfruit(stage, world_pos, i))
     mm.set_air_fruits(paths)
-    print(f"[AirFruit] 실제 토마토 {n}개 스폰 — 섀시 (0.6, ±, 1.0) 가로 한 줄 dy={dy} "
-          f"(각 Body USD + 충돌구 + 그립줄기, 인덱스별 μ 머티리얼)", flush=True)
+    print(f"[AirFruit] 테스트 토마토 {n}개 스폰 — 섀시 (0.6, ±, 1.0) "
+          f"(Body USD + 충돌구 + 절단표시 줄기)", flush=True)
     _measure_grasp_center(stage, mm)
 
 
@@ -575,10 +581,12 @@ def main() -> None:
         if not GUI:
             return                               # 헤드리스면 저장만 하고 종료(아래 close)
 
-    if not GUI:
+    if not GUI or AUTOPLAY:
         # 헤드리스엔 ▶Play 누를 사람이 없다 — 자동 재생. 안 하면 OnPlaybackTick 이
         # 안 틱해서 브리지(/clock·joint_states)가 침묵한다(2026-07-22 실측).
         world.play()
+        if GUI:
+            print("[Main] --autoplay: GUI 물리 재생 자동 시작", flush=True)
 
     # Play/Stop 반복 시 동일한 초기 상태에서 재시작 (재현성)
     was_playing = False

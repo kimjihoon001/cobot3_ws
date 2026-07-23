@@ -336,7 +336,13 @@ class TomatoPlants:
             self._phys.fruit_collision_radius_m / self._assets.scale,
             center=(cl[0], cl[1], cl[2]))
         prim = stage.GetPrimAtPath(path)
-        physics.add_rigid_body(prim, self._phys.fruit_density, kinematic=True)
+        # GripStem은 구형 2F-85 마찰 파지 실험 전용이다. 동축 스쿱 모드에서는 과실을
+        # 절단 전까지 kinematic으로 고정해야 진입 중 접촉 임펄스로 꽃자루가 뜯기지 않는다.
+        # 필요할 때만 STEM_GRIP=1로 명시적으로 되살린다.
+        grippable = (os.environ.get("STEM_GRIP", "0") == "1"
+                     and self._grippable_left > 0 and class_name == "ripe")
+        physics.add_rigid_body(
+            prim, self._phys.fruit_density, kinematic=not grippable)
         # sleep 비활성 — 과실이 매달려 가만히 있으면 PhysX 가 잠재우는데, 잠든 강체는
         # 조인트를 끊어도(pedicel.cut) 안 깨어나 안 떨어진다. 절단=낙하가 보장돼야 한다.
         PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateSleepThresholdAttr(0.0)
@@ -346,11 +352,16 @@ class TomatoPlants:
         #   절단(detach_fruit → dynamic) 시 함께 dynamic → 그리퍼가 원통 옆면을 물어 과실이
         #   매달림. 강체 구(body)는 평행패드에서 squeeze-pop 으로 튕기지만 원통은 안 튕긴다.
         #   과실 위(로컬 단위 = 월드/scale)에 수직 5cm 원통, μ0.9(fruit material).
-        if self._grippable_left > 0 and class_name == "ripe":
+        if grippable:
             self._grippable_left -= 1
             _up = (self._phys.fruit_collision_radius_m + 0.025) / s   # 과실 중심 위(로컬)
+            # 실제 줄기는 r≈5mm지만 2F-85 고무패드의 감김/홈을 강체 메시가 표현하지
+            # 못한다. 충돌 반경 8mm를 compliant grip sleeve로 사용해 full-close(0.8rad)
+            # 전에 양쪽 정상력이 생기게 한다. 환경변수로 실제 패드 모델에 맞춰 조정 가능.
+            _grip_r = float(os.environ.get(
+                "GRIP_STEM_COLLISION_RADIUS_M", "0.008"))
             physics.add_cylinder_collider(
-                stage, path + "/GripStem", 0.005 / s, 0.05 / s,
+                stage, path + "/GripStem", _grip_r / s, 0.05 / s,
                 center=(cl[0], cl[1], cl[2] + _up), visible=True)
             physics.bind_physics_material(
                 stage.GetPrimAtPath(path + "/GripStem"), self._fruit_material)
@@ -367,15 +378,15 @@ class TomatoPlants:
         leaf = path.rsplit("/", 1)[-1]
 
         # ㅣㄱ 시각: ① 줄기→가지 끝 수평 가지(truss), ② 가지 끝→과실 꼭지 수직 꽃자루.
-        # kinematic 과실이라 조인트는 안 만든다(정적끼리 "joint between static bodies" 에러).
-        # 절단은 detach_fruit 가 set_kinematic(False)로 한다.
+        # 일반 과실은 kinematic이라 조인트 없이 유지한다. GripStem 과실은 dynamic이므로
+        # 실제 FixedJoint로 줄기에 매달고 절단 시 그 조인트만 해제한다.
         pedicel.branch(stage, f"{plant_path}/Branch_{leaf}",
                        stem_attach, branch_end, c.pedicel_branch_diameter)
         joint = pedicel.spawn(stage, plant_path + "/Stem", path, branch_end,
                               calyx, self._ped_cfg,
                               self._phys.pedicel_hold_force,
                               self._phys.pedicel_hold_torque,
-                              viz_root=plant_path, make_joint=False)
+                              viz_root=plant_path, make_joint=grippable)
 
         self._fruits.append({
             "path": path,

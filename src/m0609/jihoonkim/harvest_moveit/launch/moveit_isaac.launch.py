@@ -4,9 +4,10 @@
        → /harvester_moveit/joint_command → Isaac ArticulationController → 팔
 
 전제:
-  - Isaac: isaac_python main.py --mm ... 실행 + ▶Play (Play 안 하면 /clock 정지 → 전부 멈춤)
-  - mm.py 가 rmpflow 주석 상태(joint_command 상시 적용) — 2026-07-22 전환 완료
-  - 그리퍼/베이스는 MoveIt 밖: 그리퍼 = /harvester_moveit/cmd JSON, 베이스 = 텔레옵/Nav2
+  - Isaac: isaac_python main.py --moveit ... 실행 + ▶Play
+    (Play 안 하면 /clock 정지 → 전부 멈춤)
+  - moveit_mm.py 가 /harvester_moveit 토픽으로 joint_command를 적용
+  - 스쿱/베이스는 MoveIt 밖: 스쿱 = gripper_controller/commands 3축, 베이스 = 텔레옵/Nav2
 
 사용:
   ros2 launch harvest_moveit moveit_isaac.launch.py            # RViz 포함
@@ -53,7 +54,7 @@ def generate_launch_description():
     use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
     sim = {"use_sim_time": use_sim_time}
 
-    # ── URDF/SRDF = 수확 MM 전체 모델(섀시+UR10e+커플러+그리퍼+커터지그+D455+TCP).
+    # ── URDF/SRDF = 수확 MM 전체 모델(섀시+UR10e+동축 3축 1/4구 스쿱+TCP).
     #    팔 단독(harvester_ur10e + ur 표준 srdf)이던 것을 실물 구성으로 교체(2026-07-22).
     #    계획 프레임이 mm_base(=Isaac 섀시 base_link, 지면 원점)가 된다 —
     #    섀시 프레임 과실좌표를 변환 없이 그대로 목표로 쓸 것(팔베이스 -0.30 보정 금지). ──
@@ -85,6 +86,10 @@ def generate_launch_description():
     pilz = {
         "planning_plugin": "pilz_industrial_motion_planner/CommandPlanner",
         "request_adapters": "",
+        # Humble PlanningPipeline은 CIRC 보조점(path_constraints.name=interim)을
+        # 일반 경로제약으로 다시 검사해, 생성된 원호의 거의 모든 점을 invalid로 만든다.
+        # Pilz 생성기 자체의 관절한계/IK 검사는 유지하고 이 중복 사후검사만 끈다.
+        "check_solution_paths": False,
         "default_planner_config": "PTP",
         "capabilities": " ".join([
             "pilz_industrial_motion_planner/MoveGroupSequenceAction",
@@ -133,26 +138,20 @@ def generate_launch_description():
                     sim],
         output="screen",
     )
-    # ★스포너에 명시적 namespace(2026-07-23): 이들은 TimerAction 안이라 GroupAction 의
-    #   PushRosNamespace 가 전파 안 된다(전역 spawner 가 돼 /controller_manager 를 못 찾음).
-    #   namespace=ns 를 직접 줘야 "controller_manager"(상대)가 /{ns}/controller_manager 로 붙는다.
+    # 스포너는 하나만 사용한다. Isaac/MoveIt 동시 기동 때 plugin load가 서비스의 기본
+    # 대기시간보다 늦어 각 스포너가 "already loaded → configure failed"로 끝나던 레이스를
+    # 막기 위해 세 컨트롤러를 한 요청 흐름으로 처리하고 대기시간을 넉넉히 준다.
     _ns = LaunchConfiguration("ns")
-    spawner_jsb = Node(
+    spawner_controllers = Node(
         package="controller_manager", executable="spawner", namespace=_ns,
-        arguments=["joint_state_broadcaster",
-                   "--controller-manager", "controller_manager"],
-        output="screen",
-    )
-    spawner_arm = Node(
-        package="controller_manager", executable="spawner", namespace=_ns,
-        arguments=["arm_controller",
-                   "--controller-manager", "controller_manager"],
-        output="screen",
-    )
-    spawner_gripper = Node(
-        package="controller_manager", executable="spawner", namespace=_ns,
-        arguments=["gripper_controller",
-                   "--controller-manager", "controller_manager"],
+        arguments=[
+            "joint_state_broadcaster", "arm_controller", "gripper_controller",
+            "--controller-manager", "controller_manager",
+            "--controller-manager-timeout", "60",
+            "--service-call-timeout", "60",
+            "--switch-timeout", "60",
+            "--activate-as-group",
+        ],
         output="screen",
     )
     rsp = Node(
@@ -187,11 +186,8 @@ def generate_launch_description():
     isolated = GroupAction([
         PushRosNamespace(LaunchConfiguration("ns")),
         control_node, rsp, move_group, rviz,
-        # 스포너는 지연 기동 — Isaac+RViz 동시 기동 CPU 폭주로 서비스 응답이 10초를
-        # 넘으면 스포너가 재시도하다 "already loaded"로 죽는 레이스(GPU 실측 2026-07-22).
-        TimerAction(period=4.0, actions=[spawner_jsb]),
-        TimerAction(period=8.0, actions=[spawner_arm]),
-        TimerAction(period=10.0, actions=[spawner_gripper]),
+        # 서비스가 뜬 뒤 한 번에 로드·설정·활성화한다.
+        TimerAction(period=4.0, actions=[spawner_controllers]),
     ])
 
     return LaunchDescription([

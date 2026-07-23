@@ -47,19 +47,19 @@
     </joint>
     <joint name="shoulder_lift_joint">
       <command_interface name="position">
-        <param name="initial_value">3.9269908</param>
+        <param name="initial_value">4.7123890</param>
       </command_interface>
       <state_interface name="position">
-        <param name="initial_value">3.9269908</param>
+        <param name="initial_value">4.7123890</param>
       </state_interface>
       <state_interface name="velocity"/>
     </joint>
     <joint name="elbow_joint">
       <command_interface name="position">
-        <param name="initial_value">2.3561945</param>
+        <param name="initial_value">1.5707963</param>
       </command_interface>
       <state_interface name="position">
-        <param name="initial_value">2.3561945</param>
+        <param name="initial_value">1.5707963</param>
       </state_interface>
       <state_interface name="velocity"/>
     </joint>

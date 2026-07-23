@@ -239,8 +239,10 @@ class PhysicsConfig:
     #      실측 경계가 산술 2μF ≥ mg 와 일치 (0.12 kg: 1.2 N vs 1.18 N) —
     #      솔버 페널티 없음. 파지력 창: 2 N ≤ F ≤ 18 N (패드 2 cm², 90 kPa 상한).
     #      → 그리퍼 요구사항: 2 N 이상 + 패드 0.2 cm² 이상이면 어떤 그리퍼든 된다.
-    fruit_static_friction: float = 0.9
-    fruit_dynamic_friction: float = 0.7
+    # 실리콘/고무 패드가 젖은 줄기를 무는 접촉 근사. 강체 메시에는 실제 패드 변형이
+    # 없으므로 1보다 큰 유효 마찰로 미세 맞물림까지 포함한다.
+    fruit_static_friction: float = 1.5
+    fruit_dynamic_friction: float = 1.2
 
     # 파지력 상한 — 이 압력을 넘기면 과실이 손상된다.
     #
@@ -417,7 +419,7 @@ class WarehouseConfig:
 
 @dataclass
 class EndEffectorConfig:
-    """수확 MM 엔드이펙터 — 2-finger 그리퍼 + 커터 일체형.
+    """수확 MM 엔드이펙터 — 동축 3축 1/4구 수용기 + 외측 회전 커터.
 
     커터를 다는 근거 [W2024]:
       인장(당기기) 수확은 손상 확률 최대. 전단 성공률 100% vs 굽힘 42.83%.
@@ -449,14 +451,11 @@ class EndEffectorConfig:
     # 그리퍼 패드 마찰 — §5.1 마찰 파지의 그리퍼 쪽. 마찰은 두 접촉면 조합이라 과실만 0.9면
     # 안 되고 패드도 걸어야 절단 순간 과실이 안 미끄러진다. [2] 유도 — spike01(2026-07-19)
     # μ≥0.5 에서 2N 유지 실측, 과실 μ=0.9/0.7 과 짝을 맞춘다.
-    pad_static_friction: float = 0.9
-    pad_dynamic_friction: float = 0.7
+    pad_static_friction: float = 1.5
+    pad_dynamic_friction: float = 1.2
 
-    # [2] 유도 — 파지점(과실 중심)까지 접근축(+Z) 거리. 그리퍼 손끝 bbox Z=148mm
-    #     (2026-07-18 실측)에서 과실 반지름 34.4mm 안쪽 = 148-34 ≈ 114mm.
-    #     커터/카메라를 파지점 기준으로 놓는 데 쓴다. 실제 파지 자세가 확정되면
-    #     (팀 미정 — CLAUDE.md §7) 재검토. 지금은 손끝 형상에서 유도한 값.
-    grasp_reach_z: float = 0.115       # m
+    # FreeCAD dimensions.json의 과실/세 1/4구 공통 중심.
+    grasp_reach_z: float = 0.120       # m
 
     # [4] 임의 -> [3] 으로 옮길 값. 절단 성공 판정 반경 — 커터가 이 안에 들어오면
     #     자른 것으로 본다.
@@ -473,10 +472,10 @@ class EndEffectorConfig:
 
     # [4] 임의 — 손끝 카메라(eye-in-hand) 장착 위치. 그리퍼 base_link 로컬(m).
     #     +Z=손가락/접근, +Y=몸통 위쪽 (2026-07-18 축 탐침).
-    #     그리퍼 몸통 바로 위(5.5cm)에 얹고 파지점을 내려다보게 각을 준다
-    #     (_add_camera 가 grasp_reach_z 를 향해 look-at). 12cm 로 띄우면 허공에
-    #     뜬 것처럼 보였다(사용자 지적) → 낮추고 시선 각으로 손가락 가림을 푼다.
-    camera_offset: tuple[float, float, float] = (0.0, 0.055, -0.02)
+    #     실물 D455를 그리퍼 위 9.5cm에 L 브래킷으로 얹고 파지점을 내려다보게 한다.
+    #     5.5cm에서는 스쿱이 RGB 영상 하단 절반을 가린 것을 실제 프레임으로 확인했다.
+    #     12cm는 허공에 뜬 인상이므로 중간값 9.5cm + 뒤쪽 3.5cm로 배치한다.
+    camera_offset: tuple[float, float, float] = (0.0, 0.095, -0.035)
 
 
 @dataclass
@@ -500,13 +499,10 @@ class RobotAssetConfig:
         "/Isaac/Robots/UR10e/ur10e.usd",
         "/Isaac/Robots/UniversalRobots/ur10/ur10.usd",
     )
-    gripper: tuple[str, ...] = (
-        # 실측 (2026-07-18 GPU 탐침, omni.client.list): 이 파일명이 실제로 존재한다.
-        # 이전 후보 2개는 파일명이 틀려 spike 03 이 "없음" 으로 봤었다.
-        "/Isaac/Robots/Robotiq/2F-85/Robotiq_2F_85_edit.usd",
-        "/Isaac/Robots/Robotiq/2F-85/Robotiq_2F_85.usd",
-        "/Isaac/Robots/Robotiq/2F-85/2f85.usd",
-    )
+    # FreeCAD STL에서 생성한 로컬 articulated USD. Nucleus의 2F-85는 사용하지 않는다.
+    scoop_gripper_usd: str = os.path.join(
+        ISAAC_DIR, "robots", "quarter_basket_freecad", "generated",
+        "coaxial_quarter_scoop_gripper.usd")
     # 손끝 카메라. 실측 (2026-07-18 GPU 탐침, omni.client.list): 존재 확인.
     # RealSense D455 실물 센서 에셋이라 화각·해상도가 실제 스펙과 같다 = 출처가 된다.
     camera: tuple[str, ...] = (
@@ -662,7 +658,21 @@ class CameraBridgeConfig:
     rgb_topic: str = "/harvester/rgb"
     depth_topic: str = "/harvester/depth"
     info_topic: str = "/harvester/camera_info"
+    depth_info_topic: str = "/harvester/depth/camera_info"
+    pointcloud_topic: str = "/harvester/depth/points"
+    infra1_topic: str = "/harvester/infra1/image_raw"
+    infra2_topic: str = "/harvester/infra2/image_raw"
+    infra1_info_topic: str = "/harvester/infra1/camera_info"
+    infra2_info_topic: str = "/harvester/infra2/camera_info"
+    imu_topic: str = "/harvester/imu"
     frame_id: str = "d455_color"
+    depth_frame_id: str = "d455_depth_optical_frame"
+    infra1_frame_id: str = "d455_infra1_optical_frame"
+    infra2_frame_id: str = "d455_infra2_optical_frame"
+    imu_frame_id: str = "d455_imu_frame"
+    # 비어 있으면 위 절대 토픽을 그대로 사용한다. MoveIt 카메라는 런타임에
+    # node_namespace="harvester_moveit" + 상대 토픽으로 복제해 RMP MM과 완전히 격리한다.
+    node_namespace: str = ""
 
 
 @dataclass

@@ -32,8 +32,8 @@ from std_msgs.msg import Float64MultiArray, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 FRAME = "mm_base"
-HOME_Q = {"shoulder_pan_joint": 0.0, "shoulder_lift_joint": 3.9269908,
-          "elbow_joint": 2.3561945, "wrist_1_joint": 3.1415927,
+HOME_Q = {"shoulder_pan_joint": 0.0, "shoulder_lift_joint": 4.7123890,
+          "elbow_joint": 1.5707963, "wrist_1_joint": 3.1415927,
           "wrist_2_joint": -1.5707963, "wrist_3_joint": 0.0}
 JOINTS = list(HOME_Q)
 
