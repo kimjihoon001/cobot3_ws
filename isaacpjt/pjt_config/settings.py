@@ -119,6 +119,9 @@ class PlantConfig:
     sector_rows: int = 3           # 섹터 행 (Y 구획) → cols*rows = 6섹터
     rows_per_col: int = 2          # 각 섹터의 식물행(이랑) 수
     plants_per_seg: int = 15       # 각 섹터의 그루 수 (Y 방향)
+    # 베드 길이와 섹터 좌표는 유지하고, 각 베드의 15개 식재 위치 중 60%인 9개만
+    # 균등하게 골라 스폰한다(2026-07-23 사용자 요청).
+    plant_spawn_fraction: float = 0.60
     # aisle_x = 2열 섹터 사이 중앙 주통로(블록 사이). 팀 피드백①(2026-07-20):
     #   MM 2.5대 지나갈 폭(≈2.5m 클리어) → 베드(0.42m) 감안 중심간격 2.9m.
     #   iw.hub(1.43m)·1.5×(2.15m) 하한도 만족(클리어 2.48m). 값 = 클리어 + 베드폭.
@@ -136,37 +139,27 @@ class PlantConfig:
     #   (제8차 한국인 인체치수조사: 평균 신장 남 172.5cm / 여 159.6cm)
     # TODO 사이즈코리아(sizekorea.kr)에서 무릎높이/어깨높이 실측값을 직접 뽑을 것.
     #      지금 값은 신장 비례 추정이라 한 단계 약하다.
-    # 파지 단순화(2026-07-22): 밑동 콜라이더(stem_collider_height) 위 일정 구간으로 좁혀
-    # 팔이 편한 높이에서만 딴다. 원래 (0.5,1.4) 는 인체치수 범위(위 주석) — 데모 후 복원.
-    fruit_height_range: tuple[float, float] = (0.9, 1.2)
+    fruit_height_range: tuple[float, float] = (0.5, 1.4)
 
     # TODO 아래 2개는 아직 근거 없음.
     #   stem_height: 실제 하이와이어는 와이어가 베드 위 2.4m 이상이고 줄기는 그보다
     #     훨씬 길다(낮추기 때문). 1.8m 는 데모용 단순화. 근거 아님.
     stem_height: float = 1.8
-    fruits_per_plant: tuple[int, int] = (1, 2)   # (min, max) — 파지 단순화(2026-07-22, 원래 2~4)
+    # 식물은 베드당 15→9그루(60%)로 줄였지만 토마토 총량은 종전 수준을 유지한다.
+    # 9그루×5개×12베드=540개로, 복제 전 547개에 가장 가까운 베드 동일 배치다.
+    fruits_per_plant: tuple[int, int] = (5, 5)   # (min, max)
 
     stem_radius: float = 0.02
-    # 줄기 콜라이더 높이 — 밑동만 막고 과실 구간(fruit_height_range) 위쪽은 콜라이더 없음.
-    # 그리퍼가 어느 각도에서든 과실에 접근하도록(줄기 뒤 과실도 파지 가능). 시각 줄기는 전체
-    # 높이 유지, 로봇 베이스는 밑동 기둥에 여전히 막힌다. (파지 단순화 2026-07-22)
-    stem_collider_height: float = 0.6
     # 꽃자루(pedicel) 전체 길이 = 줄기 부착점 → 과실 중심. [4] 임의.
     # spike 02(2026-07-18): 과실을 수평으로 매달면 굽힘모멘트가 break_torque(0.067N·m)를
     # 넘어 바로 끊긴다 → 아래로 인장 매달아야 실제 파단값으로 버틴다. 그래서 아래 두 값으로
     # "옆으로 조금 + 아래로" 매단다(수직 낙차 = sqrt(fruit_offset^2 - h^2)).
-    # 파지 단순화(2026-07-22): 과실을 줄기에서 멀리 뻗어 그리퍼 접근 여유를 크게 준다.
-    # 과실이 kinematic 이라 수평 캔틸레버 굽힘모멘트 걱정 없음(아래 spike 02 주석은 조인트
-    # 매달림 시절 것). 원래 0.11 → 데모 후 복원. "줄기 길게" 사용자 요청.
-    fruit_offset: float = 0.20     # m. 꽃자루 길이
+    fruit_offset: float = 0.11     # m. 꽃자루 길이
     # 수평 성분(줄기에서 옆으로). 나머지는 수직 낙차 → 인장.
     # [2] 유도(하한): 과실 콜라이더(r≈34mm)+줄기(r=20mm)가 안 겹치려면 > 54mm.
     #     하한 근처(60mm)면 스폰 시 이웃/줄기와 살짝 겹쳐 5%가 침투복구로 튕겨 낙하 →
     #     여유를 줘 90mm(클리어런스 36mm). spike 02: 굽힘은 hold_torque 로 처리하므로 무관.
-    pedicel_h_offset: float = 0.20  # m — ㅣㄱ 수평 가지 길이(줄기서 옆으로). 원래 0.09.
-    # ㅣㄱ 모양(2026-07-22): 수평 가지 끝에서 과실이 90° 아래로 매달린다(잡기 쉽게).
-    pedicel_v_drop: float = 0.12          # m — 가지 끝→과실 (아래로)
-    pedicel_branch_diameter: float = 0.006  # m — 수평 가지(truss) 두께
+    pedicel_h_offset: float = 0.09  # m
 
     # 꽃자루가 붙는 과실 꼭지(calyx) 위치 = 과실 중심에서 위로(+Z) 반지름만큼.
     # 실제 토마토는 꼭지에서 화방으로 이어진다(레퍼런스). [2] 유도 — 과실 반지름 ≈ 34mm.
@@ -196,7 +189,7 @@ class PlantConfig:
 
 @dataclass
 class PhysicsConfig:
-    """물리 속성. 온실/줄기는 static, 과실은 kinematic RigidBody.
+    """물리 속성. 온실/줄기는 static, 과실은 dynamic + 꽃자루 FixedJoint.
 
     출처 [W2024]: Weng et al., "Tomato Pedicel Physical Characterization for
       Fruit-Pedicel Separation Tomato Harvesting Robot", Agronomy 2024, 14(10):2274.
@@ -215,10 +208,10 @@ class PhysicsConfig:
     # [4] 임의 — 물의 밀도. 토마토는 대략 이 근처(익을수록 낮아짐)지만 출처 없음.
     fruit_density: float = 1000.0      # kg/m^3
     fruit_approximation: str = "convexHull"   # 트라이앵글 메시 충돌 금지
-    # 파지용 충돌 반지름(월드 m). 시각 몸통(반지름 34mm)보다 작게 둬 그리퍼(개폐 85mm)가
-    # 조금 어긋나도 손가락이 과실을 안 때리고 감싸게 한다(2026-07-22). convexHull(전체크기)
-    # 대신 중심의 작은 구를 콜라이더로 쓴다. [4] 임의 — 파지 여유용, 시각/질량과 무관.
-    fruit_collision_radius_m: float = 0.025   # 50mm 지름 (여유 양쪽 8→17.5mm)
+    # 파지용 충돌 반지름(월드 m). 화면의 완숙 과실 지름 68.7mm에 맞춘 구형 콜라이더다.
+    # 시각 표면보다 작은 25mm 반지름을 쓰면 손가락이 표면을 약 9mm 관통해야 접촉하여
+    # 화면상 토마토를 물어도 양손 contact가 잡히지 않았다(2026-07-23 실측).
+    fruit_collision_radius_m: float = 0.034   # 68mm 지름, 시각 몸통과 거의 일치
 
     # [3] 민감도. 임계 경로다 — 이 값이 수확 성공/실패를 실제로 가른다
     #     (고정 조인트를 안 쓰므로 절단 순간 과실을 붙잡는 건 마찰뿐이다).
@@ -239,10 +232,8 @@ class PhysicsConfig:
     #      실측 경계가 산술 2μF ≥ mg 와 일치 (0.12 kg: 1.2 N vs 1.18 N) —
     #      솔버 페널티 없음. 파지력 창: 2 N ≤ F ≤ 18 N (패드 2 cm², 90 kPa 상한).
     #      → 그리퍼 요구사항: 2 N 이상 + 패드 0.2 cm² 이상이면 어떤 그리퍼든 된다.
-    # 실리콘/고무 패드가 젖은 줄기를 무는 접촉 근사. 강체 메시에는 실제 패드 변형이
-    # 없으므로 1보다 큰 유효 마찰로 미세 맞물림까지 포함한다.
-    fruit_static_friction: float = 1.5
-    fruit_dynamic_friction: float = 1.2
+    fruit_static_friction: float = 1.2   # 파지 미끄럼 방지 상향(2026-07-22 사용자)
+    fruit_dynamic_friction: float = 1.0
 
     # 파지력 상한 — 이 압력을 넘기면 과실이 손상된다.
     #
@@ -269,8 +260,8 @@ class PhysicsConfig:
     #      (로봇 플랫폼 확정 아님 — CLAUDE.md)
     gripper_pad_area: float | None = None      # m^2
 
-    # 수확 실패 모드용. 정상 수확은 코드로 kinematic 을 꺼서 처리한다
-    # (물리로 끊으면 비결정적이라 Play/Stop 재현성이 깨짐).
+    # 수확 실패 모드용. 정상 수확은 jointEnabled=False로 결정적으로 절단한다
+    # (breakForce로 자연 파단시키면 Play/Stop 재현성이 깨짐).
     #
     # 두 값 모두 이탈층(abscission zone) 지름 5~6mm 그룹 기준으로 통일.
     # 5~8mm 분포 중 가장 약한 구간이라 실패가 가장 먼저 나타난다 = 보수적.
@@ -419,7 +410,7 @@ class WarehouseConfig:
 
 @dataclass
 class EndEffectorConfig:
-    """수확 MM 엔드이펙터 — 동축 3축 1/4구 수용기 + 외측 회전 커터.
+    """수확 MM 엔드이펙터 — 2-finger 그리퍼 + 커터 일체형.
 
     커터를 다는 근거 [W2024]:
       인장(당기기) 수확은 손상 확률 최대. 전단 성공률 100% vs 굽힘 42.83%.
@@ -451,11 +442,39 @@ class EndEffectorConfig:
     # 그리퍼 패드 마찰 — §5.1 마찰 파지의 그리퍼 쪽. 마찰은 두 접촉면 조합이라 과실만 0.9면
     # 안 되고 패드도 걸어야 절단 순간 과실이 안 미끄러진다. [2] 유도 — spike01(2026-07-19)
     # μ≥0.5 에서 2N 유지 실측, 과실 μ=0.9/0.7 과 짝을 맞춘다.
-    pad_static_friction: float = 1.5
-    pad_dynamic_friction: float = 1.2
+    pad_static_friction: float = 1.2   # 과실 μ 와 짝 맞춰 상향(2026-07-22 사용자)
+    pad_dynamic_friction: float = 1.0
 
-    # FreeCAD dimensions.json의 과실/세 1/4구 공통 중심.
-    grasp_reach_z: float = 0.120       # m
+    # RG2 파지 예압. 기존 0.5rad 위치 목표는 68mm 토마토를 문 상태에서 실제 관절값이
+    # 0.497rad까지 도달해 위치 오차(=누르는 힘)가 거의 사라졌다. 토마토가 막는 위치보다
+    # 더 깊은 목표를 주되 angular drive의 maxForce를 낮게 제한하면, 접촉 후에도 각 축이
+    # 제한 토크로 계속 누르는 임피던스/준-force 제어가 된다. 순수 effort 제어처럼 접촉을
+    # 놓쳤을 때 손가락이 가속하지 않고, 위치 drive라 열기 동작도 그대로 사용할 수 있다.
+    # 0.5rad에서는 실제 관절이 0.499rad까지 도달해 양쪽 접촉 뒤에도 위치 오차와
+    # 파지력이 사라졌고, FixedJoint 해제 후 3cm 후퇴 때 과실을 놓쳤다. 목표를 더
+    # 깊게 주고 접촉 확인 뒤 maxForce를 30N 환산 토크로 낮춰 예압을 유지한다.
+    gripper_close_preload_rad: float = 0.70
+    # [사용자] RG2 명목 파지력. PhysX angular drive는 Nm를 받으므로
+    # mm.py에서 아래 유효 모멘트암을 곱해 토크로 환산한다.
+    gripper_grip_force_n: float = 30.0
+    # [유도] RG2 URDF outer-knuckle 구동축→손가락 collision 중심 약 122.9mm.
+    gripper_effective_lever_m: float = 0.1229
+    # 검증된 RG2 ParallelGripper 예제의 angular drive maxForce. 단순 모멘트암으로
+    # 환산한 3.69Nm는 링크 정지마찰도 이기지 못했으므로 구동 상한은 별도로 둔다.
+    gripper_drive_max_torque_nm: float = 20.0
+    # 좌우 손가락이 같은 과실에 닿고 30N 유지 토크로 전환된 뒤, 이 시간 동안
+    # 접촉이 연속 유지되어야 꽃자루 FixedJoint를 해제한다.
+    gripper_preload_settle_sec: float = 0.5
+
+    # RG2 손가락 좌우 중심선. URDF의 두 바깥 관절 x=10.05/44.05mm 중앙은 27.05mm다.
+    # gripper_body 원점 x=0은 손가락 중앙이 아니므로 그대로 쓰면 TCP 점이 한쪽으로 치우친다.
+    grasp_center_x: float = 0.02705    # m
+
+    # 파지 TCP의 접근축(+Z) 거리. 본체 끝 Z=98mm, 토마토 collider 반지름=34mm이므로
+    # 과실 중심이 패드 사이에 있고 본체에는 파고들지 않는 기하학적 중심은 132mm다.
+    # 기존 115mm는 과실 중심을 본체 안으로 17mm 요구해 접촉 뒤 RMPflow가 4cm 전후에서
+    # 정체되고 과실을 미는 원인이었다. 손끝 Z=148mm보다 16mm 안쪽이라 감싸기도 충분하다.
+    grasp_reach_z: float = 0.132       # m
 
     # [4] 임의 -> [3] 으로 옮길 값. 절단 성공 판정 반경 — 커터가 이 안에 들어오면
     #     자른 것으로 본다.
@@ -470,12 +489,11 @@ class EndEffectorConfig:
     #     마찰계수를 μ 스윕으로 처리한 것과 같은 방법.
     cut_tolerance: float = 0.01        # m
 
-    # [4] 임의 — 손끝 카메라(eye-in-hand) 장착 위치. 그리퍼 base_link 로컬(m).
-    #     +Z=손가락/접근, +Y=몸통 위쪽 (2026-07-18 축 탐침).
-    #     실물 D455를 그리퍼 위 9.5cm에 L 브래킷으로 얹고 파지점을 내려다보게 한다.
-    #     5.5cm에서는 스쿱이 RGB 영상 하단 절반을 가린 것을 실제 프레임으로 확인했다.
-    #     12cm는 허공에 뜬 인상이므로 중간값 9.5cm + 뒤쪽 3.5cm로 배치한다.
-    camera_offset: tuple[float, float, float] = (0.0, 0.095, -0.035)
+    # RG2 본체 메시 실측 범위(로컬): X=-5~63mm, Y=-31~19mm, Z=-20~98mm.
+    # 넓은 X-Z 면의 +Y 쪽에 D455를 밀착한다. X는 TCP/손가락 중심선 27.05mm와
+    # 정확히 일치시키고, Z는 본체 메시 중앙 (-20+98)/2=39mm에 맞춘다.
+    # 카메라 두께를 고려해 표면(Y≈19mm)에서 바깥쪽 16mm에 둔다.
+    camera_offset: tuple[float, float, float] = (0.02705, 0.035, 0.039)
 
 
 @dataclass
@@ -494,12 +512,20 @@ class RobotAssetConfig:
     base: tuple[str, ...] = (
         "/Isaac/Robots/Clearpath/RidgebackUr/ridgeback_ur5.usd",
     )
+    # 팔 = Doosan m0617 (reach ~1.7m). 반입 m0617.usd 는 이 Isaac 이 못 읽는 손상
+    # 크레이트라, tools/import_m0617_urdf.py 로 공식 URDF 에서 새로 임포트한 네이티브
+    # USD(defaultPrim=/m0617, root_joint+ArticulationRoot)를 쓴다. assets.resolve 가
+    # 로컬 절대경로면 에셋 루트를 안 붙이고 그대로 연다.
     arm: tuple[str, ...] = (
-        "/Isaac/Robots/UniversalRobots/ur10e/ur10e.usd",
-        "/Isaac/Robots/UR10e/ur10e.usd",
-        "/Isaac/Robots/UniversalRobots/ur10/ur10.usd",
+        "/home/rokey/cobot3_ws/isaacpjt/robots/m0617/m0617_isaac/m0617.usd",
     )
-    # FreeCAD STL에서 생성한 로컬 articulated USD. Nucleus의 2F-85는 사용하지 않는다.
+    gripper: tuple[str, ...] = (
+        # 기존 Doosan 실습에서 사용한 OnRobot RG2. quick_changer, gripper_body,
+        # finger_joint와 좌우 mimic finger가 포함된 PhysX USD다.
+        "/home/rokey/cobot3_ws/isaacpjt/M0609/onrobot_rg2/urdf/onrobot_rg2/onrobot_rg2.usd",
+    )
+    # FreeCAD STL에서 생성한 로컬 articulated USD (moveit_mm 스쿱 전용, 2026-07-24 격리).
+    # RG2(gripper)와 별개 필드라 공유 설정을 건드리지 않는다.
     scoop_gripper_usd: str = os.path.join(
         ISAAC_DIR, "robots", "quarter_basket_freecad", "generated",
         "coaxial_quarter_scoop_gripper.usd")
@@ -565,7 +591,7 @@ class LidarMount:
     offset: tuple[float, float, float]     # base_link 로컬 마운트 (m)
     yaw_deg: float                         # 정면 방향 (앞=0=+X, 뒤=180=−X)
     frame: str                             # TF 프레임 id = prim 이름 (laser_front/back)
-    scan_topic: str                        # LaserScan 토픽 (/scan_front, /scan_back)
+    scan_topic: str                        # LaserScan 토픽 (Nova Carter 규칙)
 
 
 @dataclass
@@ -583,20 +609,24 @@ class IwHubNavConfig:
     max_linear_speed: float = 1.0    # m/s   [4] 임의 (안전 상한)
     max_angular_speed: float = 1.5   # rad/s [4] 임의
 
-    # 안전 라이다 2기 — 앞/뒤 양끝, 데크(~0.25m) 아래 낮게(페이로드 미간섭), 각 270°(차체가
-    # 자기 후방을 가림)로 겹쳐 360°. 실물 AMR 방식이라 §5.5 근거가 선다(배치 패턴 = 산업 표준).
-    #   x=±0.6: iw.hub 길이 1431mm(실측·아래 assets 주석) → 반길이 0.72m 안쪽 앞/뒤 끝 [2].
+    # Nova Carter와 같은 SLAMTEC RPLIDAR S2E 2기 — 앞/뒤 양끝, 데크 아래
+    # 낮은 중심선에 배치한다. 각 센서는 360°, 0.05~30m, 10Hz 프로파일이다.
+    #   base_link 기준 실제 footprint는 x=[-1.0335,+0.3975]로 비대칭이다.
+    #   센서가 자기 차체를 장애물로 읽지 않도록 앞/뒤 외곽 바깥에 둔다.
     #   z=0.15: 안전스캐너 통상 높이 [3]. yaw: 기하 [2].
     #   ⚠ base_link 원점 위치·정확 오프셋과 RTX 라이다 생성 API 는 GPU 실측/probe 보정(§8).
     lidars: tuple[LidarMount, ...] = (
-        LidarMount("front", (0.6, 0.0, 0.15), 0.0, "laser_front", "/scan_front"),
-        LidarMount("back", (-0.6, 0.0, 0.15), 180.0, "laser_back", "/scan_back"),
+        LidarMount("front", (0.65, 0.0, 0.15), 0.0,
+                   "iwhub_0/front_2d_lidar", "/iwhub_0/front_2d_lidar/scan"),
+        LidarMount("back", (-1.08, 0.0, 0.15), 180.0,
+                   "iwhub_0/back_2d_lidar", "/iwhub_0/back_2d_lidar/scan"),
     )
-    # TF 프레임/토픽 (단일 로봇이라 네임스페이스 없이 Nav2 기본명)
-    odom_frame: str = "odom"
-    base_frame: str = "base_link"
-    cmd_vel_topic: str = "/cmd_vel"
-    odom_topic: str = "/odom"
+    # MM Nav2의 전역 토픽/프레임과 섞이지 않도록 IW 전체를 iwhub_0 아래에 격리한다.
+    odom_frame: str = "iwhub_0/odom"
+    base_frame: str = "iwhub_0/base_link"
+    tf_namespace: str = "iwhub_0"
+    cmd_vel_topic: str = "/iwhub_0/cmd_vel"
+    odom_topic: str = "/iwhub_0/odom"
 
 
 @dataclass
@@ -615,12 +645,12 @@ class HarvesterNavConfig:
     """
     # [1] Clearpath Ridgeback 공식 사양: 0.96 × 0.793 × 0.296 m, 최고 1.1 m/s, 적재 100 kg.
     # [4] 아래 상한은 사양이 아니라 **온실 통로 안전 상한** — 통로 1.5m 에서 1.1m/s 는 과하다.
-    max_vx: float = 0.5              # m/s   전후
+    max_vx: float = 0.8              # m/s   직선은 빠르게, 급회전 안정성 여유 확보
     # 2026-07-21 사용자 요청으로 옆걸음(게걸음) 제거 — 0.0 으로 하드 클램프.
     # Nav2 쪽(harvester_nav2.yaml FollowPath/velocity_smoother)도 이미 y=0 만
     # 내보내지만, 여기서 한 번 더 막아 다른 소스(teleop 등)의 y 도 차단한다.
     max_vy: float = 0.0              # m/s   좌우(게걸음) — 비활성
-    max_wz: float = 1.3              # rad/s 제자리 회전
+    max_wz: float = 8.0              # rad/s 제자리 회전 (2026-07-23 사용자: 지금의 2배 4.0→8.0)
 
     # 라이다 마운트 (Base/base_link 로컬). [2] 유도 — 차체 길이 0.96m 의 앞 끝(+0.45),
     # 높이는 차체 상면(0.30m) 바로 위. 팔이 접힌 상태에서 전방 시야를 가리지 않는 최소 높이.
@@ -658,21 +688,7 @@ class CameraBridgeConfig:
     rgb_topic: str = "/harvester/rgb"
     depth_topic: str = "/harvester/depth"
     info_topic: str = "/harvester/camera_info"
-    depth_info_topic: str = "/harvester/depth/camera_info"
-    pointcloud_topic: str = "/harvester/depth/points"
-    infra1_topic: str = "/harvester/infra1/image_raw"
-    infra2_topic: str = "/harvester/infra2/image_raw"
-    infra1_info_topic: str = "/harvester/infra1/camera_info"
-    infra2_info_topic: str = "/harvester/infra2/camera_info"
-    imu_topic: str = "/harvester/imu"
     frame_id: str = "d455_color"
-    depth_frame_id: str = "d455_depth_optical_frame"
-    infra1_frame_id: str = "d455_infra1_optical_frame"
-    infra2_frame_id: str = "d455_infra2_optical_frame"
-    imu_frame_id: str = "d455_imu_frame"
-    # 비어 있으면 위 절대 토픽을 그대로 사용한다. MoveIt 카메라는 런타임에
-    # node_namespace="harvester_moveit" + 상대 토픽으로 복제해 RMP MM과 완전히 격리한다.
-    node_namespace: str = ""
 
 
 @dataclass

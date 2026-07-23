@@ -15,7 +15,8 @@ import numpy as np
 from isaacsim.core.utils.types import ArticulationAction
 
 from robot_base import Driver, ros_fail
-from robots.harvester import HOME_POSE_DEG, HarvestMM
+from robots.harvester_moveit import HOME_POSE_DEG, HarvestMM
+from pjt_config.settings_moveit import scoop_robot_config
 
 # ★바닥 z 머지-세이프(2026-07-23): f2(팀원)가 공통바닥을 COMMON_FLOOR_Z=0.055 로 올리고
 #   mm.py POSE.z 도 같이 올린다. moveit_mm 도 같은 값을 fallback import 로 따라가 머지 전(0.0)/
@@ -62,7 +63,7 @@ class MMDriver(Driver):
         #   팀원 RMPflow 는 harvester_0 → 토픽/노드 안 겹침(같은 MM 을 각자 모드로).
         import sys as _sys
         self.ns = "harvester_moveit" if "--moveit" in _sys.argv else "harvester_0"
-        self._mm = HarvestMM(cfg.robots)
+        self._mm = HarvestMM(scoop_robot_config(cfg.robots))
         self._base_idx = None
         self._scoop_indices = None
         self._gripper_idx = None
@@ -1228,7 +1229,7 @@ def build_teleop(mm_robot, set_blade, gui: bool):
     import carb.input
     import omni.appwindow
 
-    from robots.control import HarvesterController
+    from robots.control_moveit import HarvesterController
 
     ctrl = HarvesterController(mm_robot)
     K = carb.input.KeyboardInput

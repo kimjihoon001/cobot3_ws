@@ -26,7 +26,7 @@
   isaac_python main.py --load --mm --mm-teleop --no-ros (기존 USD에서 MM만 텔레옵)
 
 로봇 3대 (물류 루프: MM 수확 → iw.hub 팔레트+KLT 운반 → 지게차 랙 적재):
-  /World/Harvester   수확 MM (Ridgeback+UR10e+동축 3축 1/4구 스쿱)          --mm
+  /World/Harvester   수확 MM (Ridgeback+UR10e+2F-85+커터지그+가동날+D455)   --mm
   /World/Forklift    지게차 B (포크 승강)                                    --fork
   /World/IwHub       운반 AMR (iw.hub, 차동+승강)                            --iw
 
@@ -34,8 +34,8 @@ ROS2 토픽 (§5.6: 판단은 ROS2 = dev 머신, 실행만 여기. domain 108):
   로봇별  /{ns}/joint_command  sensor_msgs/JointState  ← 관절 명령 (이름 지정)
           /{ns}/joint_states   sensor_msgs/JointState  → 관절 상태
           ns = harvester_0 / forklift_0 / iwhub_0
-  MM 전용 /harvester_0/cmd     std_msgs/String(JSON)   ← 아티큘레이션 밖 자유도:
-          {"blade": 0~35}      가동날 각도[deg] (별도 리볼루트 — JointState 에 안 잡힘)
+  MM 전용 /harvester_0/cmd     std_msgs/String(JSON):
+          {"gripper":{"closed":true}}  OnRobot RG2 닫기
           {"base": [x,y,yaw]}  홀로노믹 베이스 (키네마틱 — 위치드라이브 무시, 텔레포트만)
   공용    /clock
 
@@ -50,14 +50,8 @@ import sys
 from pathlib import Path
 
 GUI = "--headless" not in sys.argv
-AUTOPLAY = "--autoplay" in sys.argv
 NO_ROS = "--no-ros" in sys.argv
 QUIET = "--quiet" in sys.argv
-# --airfruit: nav 없이 팔 앞 도달권에 과실 하나 띄우고 /sim/tomato 로 발행 → MoveIt 로
-# 바로 잡는 테스트(주행·정렬 생략, 파지/TCP 빠른 반복). 시작 시 손가락 파지중심도 실측 출력.
-AIRFRUIT = "--airfruit" in sys.argv
-GRASP_MEAS_FILE = "/tmp/grasp_center_meas.txt"   # 파지중심 실측 결과(버퍼링 우회, ROS쪽서 읽음)
-GRIPPER_DUMP_FILE = "/tmp/gripper_structure.txt" # Robotiq 서브트리 링크/메시 덤프(RViz 정합용)
 # iw.hub Nav2 브리지 — 하나씩 켜며 GPU 검증(순서 drive→odom→scan). --nav 는 셋 다.
 # ⚠ 노드 타입명 미확정(tools/nav2_node_probe.py 로 먼저 실측). 기본 꺼짐이라 씬엔 영향 없음.
 NAV_DRIVE = "--nav-drive" in sys.argv or "--nav" in sys.argv
@@ -67,11 +61,13 @@ NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
 # ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로(main 이 예외 잡음).
 CAMERA = "--no-camera" not in sys.argv
 RMPFLOW = "--rmpflow" in sys.argv
-# ★제어 모드 분리 (ROS2 겹침 방지, 2026-07-23) — 같은 MM 을 MoveIt 또는 RMPflow 로.
-#   --moveit: 팔 브리지가 /joint_command 를 직접 적용(topic_based_ros2_control=MoveIt).
-#   없으면(기본): 팔 브리지 apply 안 함 → 팀원 RMPflow 가 팔을 구동(둘이 동시에 안 싸움).
+LEGACY_IK = "--legacy-ik" in sys.argv
+if LEGACY_IK and not RMPFLOW:
+    raise SystemExit("--legacy-ik는 --rmpflow와 함께 사용해야 합니다.")
+# ★제어 모드 분리(2026-07-23) — 스쿱 MM 을 MoveIt 로 구동. --moveit → moveit_mm
+#   (/World/HarvesterMoveit). --mm 은 rmp_mm(RG2/Doosan) 그대로 → --mm --moveit 동시 스폰 가능.
 MOVEIT = "--moveit" in sys.argv
-# MM 키보드 텔레옵 (팔·베이스·그리퍼·블레이드 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
+# MM 키보드 텔레옵 (팔·베이스·RG2 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
 # MM 키보드 입력은 명시적인 전용 플래그만 사용한다. --mm와 --iw를 같이 띄워도
 # 키 입력이 iw.hub에 전달되거나 전역 teleop 상태를 공유하지 않는다.
 MM_TELEOP = "--mm-teleop" in sys.argv
@@ -201,8 +197,7 @@ if not NO_ROS:
     # sensors.rtx + replicator: iw.hub RTX 라이다(LidarRtx)·렌더프로덕트 생성용(--nav-scan).
     for _ext in ("isaacsim.core.nodes", "isaacsim.ros2.bridge",
                  "omni.graph.bundle.action", "omni.graph.window.action",
-                 "isaacsim.sensors.rtx", "isaacsim.sensors.physics",
-                 "omni.replicator.core"):
+                 "isaacsim.sensors.rtx", "omni.replicator.core"):
         enable_extension(_ext)
     for _ in range(20):
         simulation_app.update()
@@ -224,6 +219,7 @@ class Opts:
         self.gui = GUI
         self.mm_teleop = MM_TELEOP
         self.rmpflow = RMPFLOW
+        self.legacy_ik = LEGACY_IK
         self.camera = CAMERA
         self.nav_drive = NAV_DRIVE
         self.nav_odom = NAV_ODOM
@@ -237,19 +233,20 @@ def build_drivers(cfg, task=None) -> list:
     if "--mm" in sys.argv:
         from rmp_mm import RmpMMDriver
         drivers.append(RmpMMDriver(cfg, task=task))
+    iw_driver = None
     if "--iw" in sys.argv:
         if WAREHOUSE_TEST:                       # --iw --fork (--mm 없음) → 창고 상차 단독 시험
             from iw_test import IwDriver
-            drivers.append(IwDriver(cfg, warehouse_test=True))
+            iw_driver = IwDriver(cfg, warehouse_test=True)
         else:                                    # 일반 통합 실행 — 깃허브용 iw.py(데크 적재)
             from iw import IwDriver
-            drivers.append(IwDriver(cfg))
+            iw_driver = IwDriver(cfg)
+        drivers.append(iw_driver)
     if "--fork" in sys.argv:
         from fork import ForkDriver
-        drivers.append(ForkDriver(cfg))
-    # ★MoveIt MM(내 것, 2026-07-23) — build_drivers 끝에 추가해 f2(iw) 의 --mm/--iw 변경과
-    #   영역이 안 겹치게 한다(머지 충돌 회피). --moveit → moveit_mm(/World/HarvesterMoveit,
-    #   harvester_moveit). --mm 은 팀원 RMPflow(rmp_mm.py) 그대로 → --mm --moveit 동시 스폰 가능.
+        drivers.append(ForkDriver(cfg, iw_driver=iw_driver))
+    # ★MoveIt MM(스쿱/UR10e, 2026-07-23) — 끝에 추가해 --mm/--iw 영역과 안 겹친다.
+    #   --moveit → moveit_mm(/World/HarvesterMoveit). --mm(rmp_mm)과 동시 스폰 가능.
     if MOVEIT:
         from moveit_mm import MMDriver as MoveitMMDriver
         drivers.append(MoveitMMDriver(cfg, task=task))
@@ -344,13 +341,6 @@ def run_loaded(path: str) -> None:
         from isaacsim.core.utils.viewports import set_camera_view
         set_camera_view(eye=[10.0, -18.0, 12.0], target=[0.0, 2.0, 0.5])
 
-    if not GUI or AUTOPLAY:
-        # 헤드리스엔 ▶Play 누를 사람이 없다 — 자동 재생. 안 하면 OnPlaybackTick 이
-        # 영원히 안 틱해서 브리지(/clock·joint_states)가 침묵한다(2026-07-22 실측).
-        world.play()
-        if GUI:
-            print("[Load] --autoplay: GUI 물리 재생 자동 시작", flush=True)
-
     was_playing = False
     while simulation_app.is_running():
         world.step(render=True)
@@ -360,177 +350,6 @@ def run_loaded(path: str) -> None:
         was_playing = is_playing
         if teleop is not None:
             teleop(is_playing)
-
-
-def _measure_grasp_center(stage, mm) -> None:
-    """실제 손가락 패드 중점(=진짜 파지중심)을 HarvestTCP 기준으로 실측 → URDF harvest_tcp 교정.
-    HarvestTCP 프레임은 tool0 방향과 일치(harvester.py 가 rot 없이 정의)하므로, 여기서 나온
-    오프셋을 그대로 URDF harvest_tcp origin(0,0,0.127)에 더하면 파지중심이 맞는다.
-    버퍼링 우회: 파일(GRASP_MEAS_FILE)에 flush 기록. 개별 패드 위치도 남겨 그리퍼 축 확인."""
-    from pxr import Gf, Usd, UsdGeom
-    cache = UsdGeom.XformCache()
-    tcp = None
-    for p in stage.Traverse():
-        if p.GetName() == "HarvestTCP":
-            tcp = p; break
-    if tcp is None:
-        print("[AirFruit] HarvestTCP 못 찾음 — 파지중심 측정 생략", flush=True); return
-    Tinv = cache.GetLocalToWorldTransform(tcp).GetInverse()
-    # ★ 링크 원점(=너클)이 아니라 손가락 PAD 콜라이더 메시의 월드 bbox 중심(실제 접촉면)을
-    #   쓴다 — 접근축(Z) 높이가 여기서 정해진다(2026-07-22, 너클 -0.115 는 접촉면 아님).
-    bbc = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
-                            [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
-    fps = {}
-    for p in stage.Traverse():
-        if p.GetName() in ("left_inner_finger", "right_inner_finger"):
-            r = bbc.ComputeWorldBound(p).ComputeAlignedRange()
-            if r.IsEmpty():
-                continue
-            c = r.GetMidpoint()
-            fps[p.GetName()] = Gf.Vec3d(Tinv.Transform(Gf.Vec3d(c)))
-    li = fps.get("left_inner_finger")
-    ri = fps.get("right_inner_finger")
-    lines = ["# 손가락 패드 위치 (HarvestTCP 로컬프레임, tool0 방향). 단위 m."]
-    for nm, c in fps.items():
-        lines.append(f"{nm:26s} ({c[0]:+.4f}, {c[1]:+.4f}, {c[2]:+.4f})")
-    if li is not None and ri is not None:
-        mid = (li + ri) * 0.5
-        span = (li - ri)                      # 두 패드 사이 벡터 = 그리퍼 닫힘축
-        lines.append("")
-        lines.append(f"GRASP_CENTER_offset  ({mid[0]:+.4f}, {mid[1]:+.4f}, {mid[2]:+.4f})  "
-                     f"# HarvestTCP→실제 파지중심. URDF harvest_tcp 에 이만큼 더할 것")
-        lines.append(f"CLOSE_AXIS_span      ({span[0]:+.4f}, {span[1]:+.4f}, {span[2]:+.4f})  "
-                     f"# 좌-우 패드 벡터 = 그리퍼 닫힘축 방향/거리")
-        lines.append(f"# 새 harvest_tcp origin = (0,0,0.127) + GRASP_CENTER_offset "
-                     f"= ({mid[0]:+.4f}, {mid[1]:+.4f}, {0.127+mid[2]:+.4f})")
-    text = "\n".join(lines) + "\n"
-    try:
-        with open(GRASP_MEAS_FILE, "w") as f:
-            f.write(text)
-    except OSError as exc:
-        print(f"[AirFruit] 측정파일 기록 실패: {exc}", flush=True)
-    print("[AirFruit] ★파지중심 측정 →\n" + text, flush=True)
-    _dump_gripper_structure(stage, tcp)
-
-
-def _dump_gripper_structure(stage, tcp_prim) -> None:
-    """그리퍼(Robotiq 2F-85) 서브트리의 각 링크 로컬변환 + 메시참조를 덤프.
-    HarvestTCP 로컬프레임(=URDF harvest_tcp 방향) 기준 → URDF 손가락 링키지를 실제 배치로
-    재구성해 RViz 를 Isaac 과 일치시키기 위함(사용자 요청 2026-07-22). 버퍼링 우회=파일."""
-    from pxr import Gf, UsdGeom, UsdPhysics
-    cache = UsdGeom.XformCache()
-    Tinv = cache.GetLocalToWorldTransform(tcp_prim).GetInverse()
-    lines = ["# Robotiq 2F-85 링크 구조 (HarvestTCP 로컬프레임, tool0 방향, 단위 m).",
-             "# 열: 프리즘경로 | pos(x,y,z) | 메시에셋(있으면)"]
-    for p in stage.Traverse():
-        path = str(p.GetPath())
-        if "Robotiq" not in path and "Gripper" not in path:
-            continue
-        tp = p.GetTypeName()
-        if tp not in ("Xform", "Mesh"):
-            continue
-        m = cache.GetLocalToWorldTransform(p)
-        pos = Gf.Vec3d(Tinv.Transform(m.ExtractTranslation()))
-        mesh = ""
-        try:                                   # 메시 파일 참조(references 메타데이터)
-            refs = p.GetMetadata("references")
-            if refs and getattr(refs, "prependedItems", None):
-                mesh = ";".join(str(i.assetPath) for i in refs.prependedItems)
-        except Exception:
-            pass
-        # 물리 콜라이더 판별용 — 적용 스키마(Collision/Physx 만 표시)
-        schemas = [s for s in p.GetAppliedSchemas()
-                   if "Colli" in s or "Physx" in s or "RigidBody" in s or "Material" in s]
-        sch = ("[" + ",".join(schemas) + "]") if schemas else ""
-        lines.append(f"{path:70s} ({pos[0]:+.4f},{pos[1]:+.4f},{pos[2]:+.4f}) {sch} {mesh}")
-    # --- 조인트(RevoluteJoint): 손가락 링키지 피벗·축 (URDF 재구성용) ---
-    lines.append("")
-    lines.append("# --- RevoluteJoint (parent->child, axis, localPos0=부모기준피벗, localPos1=자식기준피벗) ---")
-    for p in stage.Traverse():
-        path = str(p.GetPath())
-        if "Robotiq" not in path or not p.IsA(UsdPhysics.RevoluteJoint):
-            continue
-        j = UsdPhysics.RevoluteJoint(p)
-        b0 = j.GetBody0Rel().GetTargets(); b1 = j.GetBody1Rel().GetTargets()
-        b0s = str(b0[0]).split("/")[-1] if b0 else "?"
-        b1s = str(b1[0]).split("/")[-1] if b1 else "?"
-        lp0 = j.GetLocalPos0Attr().Get(); lp1 = j.GetLocalPos1Attr().Get()
-        lr0 = j.GetLocalRot0Attr().Get(); lr1 = j.GetLocalRot1Attr().Get()
-        axis = j.GetAxisAttr().Get()
-        lines.append(f"JOINT {p.GetName():28s} {b0s}->{b1s} axis={axis} "
-                     f"lp0={lp0} lp1={lp1} lr0={lr0} lr1={lr1}")
-    text = "\n".join(lines) + "\n"
-    try:
-        with open(GRIPPER_DUMP_FILE, "w") as f:
-            f.write(text)
-        print(f"[AirFruit] 그리퍼 구조 덤프 → {GRIPPER_DUMP_FILE} ({len(lines)-2} prim)", flush=True)
-    except OSError as exc:
-        print(f"[AirFruit] 그리퍼 덤프 기록 실패: {exc}", flush=True)
-
-
-def _spawn_one_airfruit(stage, world_pos, idx: int) -> str:
-    """공중 과실 1개 스폰(실제 토마토 USD Body + 중심 충돌구 + 그립 줄기 원통). 인덱스별
-    독립 머티리얼(/World/PM/airfruit_i, airstem_i)로 케이스마다 마찰을 따로 스윕. 반환: prim 경로."""
-    from pxr import Gf, Usd, UsdGeom
-    from isaacsim.core.utils.stage import add_reference_to_stage
-    from scene.physics import (add_sphere_collider, add_rigid_body, add_cylinder_collider,
-                               create_physics_material, bind_physics_material)
-    S = 0.001675                                       # 씬 토마토 스케일(settings)
-    body_usd = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "assets", "tomato", "tomato_ripe_03.usd")
-    cache = UsdGeom.XformCache()
-    path = f"/World/AirFruit_{idx}"
-    fruit = UsdGeom.Xform.Define(stage, path)
-    xf = UsdGeom.Xformable(fruit.GetPrim())
-    xf.AddTranslateOp().Set(Gf.Vec3d(world_pos))
-    xf.AddScaleOp().Set(Gf.Vec3f(S, S, S))
-    add_reference_to_stage(body_usd, path + "/Body")
-    body_prim = stage.GetPrimAtPath(path + "/Body")
-    cw = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
-                          [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
-                          ).ComputeWorldBound(body_prim).ComputeAlignedRange().GetMidpoint()
-    cl = cache.GetLocalToWorldTransform(fruit.GetPrim()).GetInverse().Transform(cw)
-    add_sphere_collider(stage, path + "/Collision", 0.025 / S,
-                        center=(cl[0], cl[1], cl[2]))
-    add_rigid_body(fruit.GetPrim(), 1000.0, kinematic=True)
-    bind_physics_material(fruit.GetPrim(),
-                          create_physics_material(stage, f"/World/PM/airfruit_{idx}", 0.9, 0.7))
-    _up = (0.025 + 0.025) / S                              # 과실 중심 위(로컬)
-    add_cylinder_collider(stage, path + "/GripStem", 0.005 / S, 0.05 / S,
-                          center=(cl[0], cl[1], cl[2] + _up), visible=True)
-    bind_physics_material(stage.GetPrimAtPath(path + "/GripStem"),
-                          create_physics_material(stage, f"/World/PM/airstem_{idx}", 0.9, 0.7))
-    return path
-
-
-def _setup_air_fruit(stage, drivers) -> None:
-    """nav 없이 팔 앞 도달권에 **실제 토마토 USD** 테스트 과실을 띄운다.
-
-    기본 데모는 화면 앞을 가리던 과실 배열 대신 한 개만 만든다. 마찰 스윕처럼 여러
-    샘플이 필요한 경우에만 ``AIRFRUIT_N``을 명시적으로 늘린다.
-    """
-    from pxr import Gf, UsdGeom
-    # ★name 분리 대응(2026-07-23, Codex): moveit_mm 은 name="mm_moveit" 이므로 "mm" 로만
-    #   찾으면 --moveit --airfruit 에서 못 찾는다. name 이 "mm" 로 시작하는 MM 계열을 잡는다.
-    mm = next((d for d in drivers if getattr(d, "name", "").startswith("mm")), None)
-    if mm is None:
-        print("[AirFruit] MM 드라이버 없음 — --mm 또는 --moveit 필요"); return
-    base = stage.GetPrimAtPath(f"{mm.root}/Base/base_link")
-    if not base.IsValid():
-        print("[AirFruit] base_link 못 찾음"); return
-    n = int(os.environ.get("AIRFRUIT_N", "1"))
-    dy = float(os.environ.get("AIRFRUIT_DY", "0.07"))     # 과실 간 가로 간격(섀시 Y, m)
-    cache = UsdGeom.XformCache()
-    b2w = cache.GetLocalToWorldTransform(base)
-    paths = []
-    for i in range(n):
-        y = (i - (n - 1) / 2.0) * dy                       # 중앙 대칭 한 줄
-        world_pos = b2w.Transform(Gf.Vec3d(0.6, y, 1.0))
-        paths.append(_spawn_one_airfruit(stage, world_pos, i))
-    mm.set_air_fruits(paths)
-    print(f"[AirFruit] 테스트 토마토 {n}개 스폰 — 섀시 (0.6, ±, 1.0) "
-          f"(Body USD + 충돌구 + 절단표시 줄기)", flush=True)
-    _measure_grasp_center(stage, mm)
 
 
 def main() -> None:
@@ -549,8 +368,6 @@ def main() -> None:
     drivers = build_drivers(cfg, task=task)
     if drivers:
         _assemble_robots(world, stage, drivers)
-        if AIRFRUIT:
-            _setup_air_fruit(stage, drivers)
     else:
         print("[Main] 로봇 플래그 없음 — 환경(씬)만 띄운다. "
               "(--mm / --iw / --fork 로 로봇 선택)")
@@ -581,23 +398,14 @@ def main() -> None:
         if not GUI:
             return                               # 헤드리스면 저장만 하고 종료(아래 close)
 
-    if not GUI or AUTOPLAY:
-        # 헤드리스엔 ▶Play 누를 사람이 없다 — 자동 재생. 안 하면 OnPlaybackTick 이
-        # 안 틱해서 브리지(/clock·joint_states)가 침묵한다(2026-07-22 실측).
-        world.play()
-        if GUI:
-            print("[Main] --autoplay: GUI 물리 재생 자동 시작", flush=True)
-
-    # Play/Stop 반복 시 동일한 초기 상태에서 재시작 (재현성)
+    # GUI Stop→Play는 리셋이 아니라 일시정지→재개로 취급한다.
+    # 여기서 world.reset()을 호출하면 /clock이 0으로 되감기고 odom/AMCL 상태도 초기화돼,
+    # 이미 실행 중인 외부 Nav2가 새 goal을 받아도 cmd_vel을 정상 생성하지 못한다.
+    # 초기화는 위 조립 단계에서 끝났고, 로봇별 런타임 컨트롤러 재동기화는 update()가 맡는다.
     was_playing = False
     while simulation_app.is_running():
-        # 최상위 독립 강체인 커터 날은 첫 물리 스텝 전에 그리퍼 위치로 맞춰야 한다.
-        # 기존 순서는 step 후 reset이라 Play 첫 프레임에 힌지가 날을 순간 가속했다.
         pre_playing = world.is_playing()
         if pre_playing and not was_playing:
-            for d in drivers:
-                d.update(False)
-            world.reset()
             for d in drivers:
                 d.update(False)
         world.step(render=True)

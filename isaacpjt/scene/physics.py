@@ -5,13 +5,12 @@
   physics:kinematicEnabled / physics:approximation / physics:mass
   physics:staticFriction / physics:dynamicFriction / physics:breakForce
 
-과실 설계 (성능 + 재현성):
-  매달린 과실은 kinematic RigidBody 로 둔다. 물리 솔버가 매 스텝 풀지 않으므로
-  수백 개를 놔둬도 비용이 거의 없고, Play/Stop 반복 시 항상 같은 자리에 있다.
-  수확 순간에만 kinematic 을 꺼서 dynamic 으로 전환한다 (= 줄기에서 분리).
+과실 설계 (접촉 연속성 + 재현성):
+  과실은 dynamic RigidBody로 두고 꽃자루 FixedJoint가 줄기에 매단다.
+  수확 순간 물리 모드는 바꾸지 않고 jointEnabled만 꺼서 분리한다.
   -> 트라이앵글 메시 충돌 금지. 콜라이더는 convexHull 로 근사.
 """
-from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 
 
 def add_shape_collider(prim: Usd.Prim) -> None:
@@ -81,41 +80,20 @@ def add_rigid_body(prim: Usd.Prim, density: float,
     과실마다 계산한다. 변형별 부피가 6배까지 차이나므로(작은 unripe ~
     큰 ripe) 질량을 상수로 박으면 작은 과실이 납덩어리가 된다.
 
-    kinematic=True  : 중력/충돌로 움직이지 않음 (매달린 과실)
-    kinematic=False : 물리로 움직임 (수확된 과실)
+    kinematic=True  : 중력/충돌로 움직이지 않음
+    kinematic=False : 꽃자루 조인트/접촉/중력에 반응하는 과실
     """
     rb = UsdPhysics.RigidBodyAPI.Apply(prim)
     rb.CreateKinematicEnabledAttr(kinematic)
     UsdPhysics.MassAPI.Apply(prim).CreateDensityAttr(density)
-    # 절단(kinematic→dynamic) 순간 손가락 침투복구 임펄스로 과실이 튕기는 것 방지.
-    # ★ 스폰 시점에 박아야 한다 — PhysX 는 이 속성을 body 생성 때 읽으므로 런타임
-    #   set_kinematic 시점에 붙이면 이미 스폰된 body 엔 안 먹는다(2026-07-22 실측).
-    px = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
-    px.CreateMaxDepenetrationVelocityAttr(0.05)      # m/s — 부드러운 복구로 마찰이 붙잡을 시간
-    px.CreateSolverPositionIterationCountAttr(32)    # 접촉 수렴
-    px.CreateSolverVelocityIterationCountAttr(4)
 
 
 def set_kinematic(prim: Usd.Prim, kinematic: bool) -> None:
-    """수확 순간 호출 — kinematic 을 꺼서 과실을 줄기에서 분리한다.
-
-    물리적 breakForce 대신 이 방식을 쓰는 이유:
-      breakForce 로 끊으면 매번 결과가 미세하게 달라져 재현성이 깨진다.
-      코드로 끊으면 결정적이라 Play/Stop 반복 시 동일 결과가 나온다.
+    """호환용 rigid-body 모드 전환. 현재 정상 수확 경로에서는 사용하지 않는다.
     """
     rb = UsdPhysics.RigidBodyAPI(prim)
-    if not rb:
-        return
-    rb.GetKinematicEnabledAttr().Set(kinematic)
-    if not kinematic:
-        # 파지 중 kinematic 과실에 파고들어 있던 손가락이 dynamic 전환 순간 강한
-        # 침투복구 임펄스로 과실을 튕겨낸다(2026-07-22 실측: finger 0.37→0.80 즉시 이탈).
-        # 침투복구 속도를 낮추고(부드럽게 밀어냄) 접촉 반복을 늘려 마찰(μ0.9)이 붙잡게 한다.
-        px = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
-        px.CreateMaxDepenetrationVelocityAttr(0.1)      # m/s (기본 수 m/s → 큰 임펄스)
-        px.CreateSolverPositionIterationCountAttr(32)   # 접촉 수렴
-        px.CreateSolverVelocityIterationCountAttr(4)
-        px.CreateEnableCCDAttr(True)                     # 얇은 손가락 사이 터널링 방지
+    if rb:
+        rb.GetKinematicEnabledAttr().Set(kinematic)
 
 
 def disable_physics(stage: Usd.Stage, root_path: str) -> int:
@@ -195,6 +173,15 @@ def bind_physics_material(prim: Usd.Prim, material: UsdShade.Material) -> None:
         material, UsdShade.Tokens.weakerThanDescendants, "physics")
 
 
+def add_sphere_collider(stage: Usd.Stage, path: str, radius: float) -> None:
+    """파지용 구 콜라이더 — 시각 과실 표면 크기에 맞춘 안 보이는 해석적 구.
+    radius 는 프림 로컬 단위(부모 스케일이 곱해져 월드 크기가 된다)."""
+    sph = UsdGeom.Sphere.Define(stage, path)
+    sph.CreateRadiusAttr(float(radius))
+    UsdGeom.Imageable(sph.GetPrim()).MakeInvisible()   # 충돌 전용, 시각 숨김
+    UsdPhysics.CollisionAPI.Apply(sph.GetPrim())
+
+
 def set_material_friction(stage: Usd.Stage, mat_path: str, mu: float) -> bool:
     """기존 물리 머티리얼의 마찰(static=dynamic=mu)을 실시간 변경 + combineMode='min'.
     스파이크 마찰 스윕용(2026-07-22): 과실/줄기 머티리얼만 바꿔도 combineMode=min 이라
@@ -209,61 +196,3 @@ def set_material_friction(stage: Usd.Stage, mat_path: str, mu: float) -> bool:
     px = PhysxSchema.PhysxMaterialAPI.Apply(mat)
     px.CreateFrictionCombineModeAttr().Set("min")
     return True
-
-
-def add_sphere_collider(stage: Usd.Stage, path: str, radius: float,
-                        center: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> None:
-    """파지용 작은 구 콜라이더 — 시각 메시(convexHull)보다 작게 둬 그리퍼가 어긋나도
-    손가락이 과실을 안 때리고 감싸게 한다(2026-07-22). 안 보이는 해석적 구(정확).
-    radius·center 는 프림 로컬 단위(부모 스케일이 곱해져 월드 크기가 된다).
-
-    center: 과실 원점이 메시 중심과 안 맞을 때(토마토 USD 미centering) 구를 메시 중심으로
-    옮긴다. 파지 목표(_publish_sim_tomato 의 bbox 중심)와 일치시켜야 그리퍼가 헛 닫히지
-    않는다("치고 간다" 방지 2026-07-22)."""
-    sph = UsdGeom.Sphere.Define(stage, path)
-    sph.CreateRadiusAttr(float(radius))
-    if any(center):
-        UsdGeom.Xformable(sph.GetPrim()).AddTranslateOp().Set(
-            Gf.Vec3d(float(center[0]), float(center[1]), float(center[2])))
-    UsdGeom.Imageable(sph.GetPrim()).MakeInvisible()   # 충돌 전용, 시각 숨김
-    UsdPhysics.CollisionAPI.Apply(sph.GetPrim())
-
-
-def add_cylinder_collider(stage: Usd.Stage, path: str, radius: float, height: float,
-                          center: tuple[float, float, float] = (0.0, 0.0, 0.0),
-                          visible: bool = True) -> Usd.Prim:
-    """그립용 원통 콜라이더(줄기) — 과실 위에 수직 원통. 강체 구는 평행패드에서 squeeze-pop
-    으로 튕기지만 원통은 옆면을 물어 마찰로 확실히 잡힌다(2026-07-22 줄기 파지). radius·
-    height·center 는 프림 로컬 단위(부모 스케일이 곱해져 월드 크기). 반환: 원통 prim."""
-    cyl = UsdGeom.Cylinder.Define(stage, path)
-    cyl.CreateRadiusAttr(float(radius))
-    cyl.CreateHeightAttr(float(height))
-    cyl.CreateAxisAttr("Z")
-    cyl.CreateExtentAttr([Gf.Vec3f(-radius, -radius, -height / 2.0),
-                          Gf.Vec3f(radius, radius, height / 2.0)])
-    if any(center):
-        UsdGeom.Xformable(cyl.GetPrim()).AddTranslateOp().Set(
-            Gf.Vec3d(float(center[0]), float(center[1]), float(center[2])))
-    if not visible:
-        UsdGeom.Imageable(cyl.GetPrim()).MakeInvisible()
-    UsdPhysics.CollisionAPI.Apply(cyl.GetPrim())
-    return cyl.GetPrim()
-
-
-def add_box_collider(stage: Usd.Stage, path: str,
-                     size: tuple[float, float, float],
-                     center: tuple[float, float, float] = (0.0, 0.0, 0.0),
-                     visible: bool = True) -> Usd.Prim:
-    """그립용 육면체 콜라이더 — 평평한 면이라 평행조가 '면 접촉(form-fit)'으로 안정 파지.
-    강체 구는 점접촉 squeeze-pop, 얇은 원통은 지나침이 있지만 육면체는 면이 맞물려 확실히 잡힌다
-    (2026-07-23 사용자 아이디어). size=(sx,sy,sz) 프림 로컬 전체 크기(부모 스케일 곱해져 월드)."""
-    cube = UsdGeom.Cube.Define(stage, path)
-    cube.CreateSizeAttr(1.0)                              # 단위정육면체(-0.5~0.5) → 스케일로 크기
-    xf = UsdGeom.Xformable(cube.GetPrim())
-    if any(center):
-        xf.AddTranslateOp().Set(Gf.Vec3d(float(center[0]), float(center[1]), float(center[2])))
-    xf.AddScaleOp().Set(Gf.Vec3f(float(size[0]), float(size[1]), float(size[2])))
-    if not visible:
-        UsdGeom.Imageable(cube.GetPrim()).MakeInvisible()
-    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
-    return cube.GetPrim()
