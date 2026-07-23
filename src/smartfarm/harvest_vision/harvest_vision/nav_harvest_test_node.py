@@ -32,7 +32,7 @@ class NavHarvestTestNode(Node):
         self.declare_parameter("basket_pose_topic", "/iw/basket/empty_slot_pose")
         self.declare_parameter("basket_frame", "harvester_0/base_link")
         # IW가 붙기 전 시험용 tool0 release pose. 실제 바스켓 중심 좌표가 아니다.
-        self.declare_parameter("mock_basket_release_xyz", [0.45, -0.35, 0.45])
+        self.declare_parameter("mock_basket_release_xyz", [1.32, -0.20, 0.45])
         self.declare_parameter("search_timeout_sec", 30.0)
         self.declare_parameter("accept_initial_succeeded_goal", True)
         self.declare_parameter("resume_search_after_start_sec", 2.0)
@@ -62,8 +62,8 @@ class NavHarvestTestNode(Node):
             String, "/harvest_test/status", latched)
         self._isaac_command_pub = self.create_publisher(
             String, str(self.get_parameter("isaac_command_topic").value), 10)
-        # IW 연동(2026-07-23, 1차·단순): iw 는 Isaac 실좌표로 MM 뒤를 텔레포트 추종하고,
-        # 만재(N=1) 시 지게차로 보낸다. iw 도착 보고를 받으면 지게차 하역을 트리거한다.
+        # IW 연동: mission_nav_node가 FOLLOW/FORKLIFT를 IW 전용 Nav2 goal로 변환한다.
+        # 만재(N=1) 도킹 완료 보고를 받으면 지게차 하역을 트리거한다.
         self._iw_mission_pub = self.create_publisher(String, "/iw/mission", latched)
         self._forklift_dock_pub = self.create_publisher(
             Bool, "/forklift/amr_docked", 10)

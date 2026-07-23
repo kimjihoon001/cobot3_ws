@@ -17,7 +17,13 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    IncludeLaunchDescription,
+    TimerAction,
+)
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
@@ -31,6 +37,7 @@ def generate_launch_description():
     default_map = os.path.join(pkg, "maps", "greenhouse.yaml")
     map_yaml = LaunchConfiguration("map")
     use_sim_time = LaunchConfiguration("use_sim_time")
+    rviz = LaunchConfiguration("rviz")
     namespace = "iwhub_0"
     tf_remaps = [("/tf", "tf"), ("/tf_static", "tf_static")]
     with open(os.path.join(pkg, "urdf", "iwhub.urdf")) as urdf_file:
@@ -42,6 +49,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "map", default_value=default_map,
             description="IW가 사용할 정적 map yaml"),
+        DeclareLaunchArgument(
+            "rviz", default_value="true",
+            description="IW 전용 RViz 실행 여부"),
 
         Node(
             package="robot_state_publisher",
@@ -80,16 +90,37 @@ def generate_launch_description():
                     "use_sim_time": use_sim_time,
                     "params_file": nav2_params,
                     "map": map_yaml,
+                    # 상위 MM Nav2의 use_composition 값이 중첩 launch로
+                    # 전파되면 존재하지 않는 iwhub_0/nav2_container를 기다린다.
+                    "use_composition": "False",
                 }.items(),
             ),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(os.path.join(
-                    nav2_bringup, "launch", "navigation_launch.py")),
-                launch_arguments={
-                    "namespace": namespace,
-                    "use_sim_time": use_sim_time,
-                    "params_file": nav2_params,
-                }.items(),
+            # 통합 launch에서 MM composed Nav2 플러그인 로딩과 IW DWB lifecycle
+            # configure가 동시에 겹치면 FastDDS service 응답이 유실될 수 있다.
+            # MM 로딩이 끝난 뒤 IW navigation lifecycle을 시작한다.
+            TimerAction(
+                period=3.0,
+                actions=[
+                    # TimerAction은 지연 실행 시 바깥 PushRosNamespace 문맥을
+                    # 보존하지 않는다. 여기서 namespace를 다시 적용해야 MM의
+                    # 전역 controller_server와 이름이 충돌하지 않는다.
+                    GroupAction(actions=[
+                        PushRosNamespace(namespace),
+                        IncludeLaunchDescription(
+                            PythonLaunchDescriptionSource(os.path.join(
+                                nav2_bringup, "launch", "navigation_launch.py")),
+                            launch_arguments={
+                                "namespace": namespace,
+                                "use_sim_time": use_sim_time,
+                                "params_file": nav2_params,
+                                "use_composition": "False",
+                                # mission_nav_node가 모든 프로세스 로드 후 STARTUP하고
+                                # action 서버가 없으면 자동 재시도한다.
+                                "autostart": "False",
+                            }.items(),
+                        ),
+                    ]),
+                ],
             ),
         ]),
 
@@ -103,5 +134,6 @@ def generate_launch_description():
             output="screen",
             arguments=["-d", os.path.join(pkg, "config", "iwhub_nav2.rviz")],
             parameters=[{"use_sim_time": use_sim_time}],
+            condition=IfCondition(rviz),
         ),
     ])

@@ -606,13 +606,14 @@ class IwHubNavConfig:
 
     # Nova Carter와 같은 SLAMTEC RPLIDAR S2E 2기 — 앞/뒤 양끝, 데크 아래
     # 낮은 중심선에 배치한다. 각 센서는 360°, 0.05~30m, 10Hz 프로파일이다.
-    #   앞 x=+0.65, 뒤 x=-0.60: iw.hub 길이 1431mm(반길이 약 0.72m) 안쪽 끝 [2].
+    #   base_link 기준 실제 footprint는 x=[-1.0335,+0.3975]로 비대칭이다.
+    #   센서가 자기 차체를 장애물로 읽지 않도록 앞/뒤 외곽 바깥에 둔다.
     #   z=0.15: 안전스캐너 통상 높이 [3]. yaw: 기하 [2].
     #   ⚠ base_link 원점 위치·정확 오프셋과 RTX 라이다 생성 API 는 GPU 실측/probe 보정(§8).
     lidars: tuple[LidarMount, ...] = (
         LidarMount("front", (0.65, 0.0, 0.15), 0.0,
                    "iwhub_0/front_2d_lidar", "/iwhub_0/front_2d_lidar/scan"),
-        LidarMount("back", (-0.6, 0.0, 0.15), 180.0,
+        LidarMount("back", (-1.08, 0.0, 0.15), 180.0,
                    "iwhub_0/back_2d_lidar", "/iwhub_0/back_2d_lidar/scan"),
     )
     # MM Nav2의 전역 토픽/프레임과 섞이지 않도록 IW 전체를 iwhub_0 아래에 격리한다.

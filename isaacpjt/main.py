@@ -388,16 +388,14 @@ def main() -> None:
         if not GUI:
             return                               # 헤드리스면 저장만 하고 종료(아래 close)
 
-    # Play/Stop 반복 시 동일한 초기 상태에서 재시작 (재현성)
+    # GUI Stop→Play는 리셋이 아니라 일시정지→재개로 취급한다.
+    # 여기서 world.reset()을 호출하면 /clock이 0으로 되감기고 odom/AMCL 상태도 초기화돼,
+    # 이미 실행 중인 외부 Nav2가 새 goal을 받아도 cmd_vel을 정상 생성하지 못한다.
+    # 초기화는 위 조립 단계에서 끝났고, 로봇별 런타임 컨트롤러 재동기화는 update()가 맡는다.
     was_playing = False
     while simulation_app.is_running():
-        # 최상위 독립 강체인 커터 날은 첫 물리 스텝 전에 그리퍼 위치로 맞춰야 한다.
-        # 기존 순서는 step 후 reset이라 Play 첫 프레임에 힌지가 날을 순간 가속했다.
         pre_playing = world.is_playing()
         if pre_playing and not was_playing:
-            for d in drivers:
-                d.update(False)
-            world.reset()
             for d in drivers:
                 d.update(False)
         world.step(render=True)

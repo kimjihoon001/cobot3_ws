@@ -32,8 +32,10 @@ class IwHub:
     LIFT_JOINT = "lift_joint"                                   # 위치 명령(승강)
     # 적재 팔레트의 접지 마찰을 이기고 좌우 바퀴를 반대로 돌릴 수 있는 velocity drive.
     # angular drive의 damping은 속도 오차에 대한 구동 토크 이득, maxForce는 토크 상한이다.
-    DRIVE_DAMPING = 1500.0
-    DRIVE_MAX_FORCE = 2500.0
+    # 적재 상태에서 베드/장애물 모서리에 닿아도 전후진·제자리 회전 명령을
+    # 실제 바퀴 속도로 밀어낼 수 있게 기존 대비 2배로 보강한다.
+    DRIVE_DAMPING = 3000.0
+    DRIVE_MAX_FORCE = 5000.0
     WHEEL_STATIC_FRICTION = 1.2
     WHEEL_DYNAMIC_FRICTION = 1.0
 
@@ -48,18 +50,26 @@ class IwHub:
 
     def spawn(self, stage: Usd.Stage, root: str = "/World/IwHub",
               position: tuple[float, float, float] = (0.0, 0.0, 0.0),
-              log=print) -> str:
+              yaw_deg: float = 0.0, log=print) -> str:
         """놓는다. 반환: root 경로."""
         from isaacsim.core.utils.stage import add_reference_to_stage
 
         url = assets.resolve(self._cfg.assets.iwhub, "운반 AMR(iw.hub)")
         log(f"[IwHub] 에셋 {url}")
         add_reference_to_stage(url, root)
-        # 참조 prim 은 자체 xformOp 을 가질 수 있다 → 기존 op 재사용(§8)
-        set_translate(stage.GetPrimAtPath(root), position)
+        # 참조 prim 은 자체 xformOp 을 가질 수 있다 → 기존 op 재사용(§8).
+        # yaw=180°이면 긴 후방 오버행이 MM 반대쪽을 향해 추종 회전 시 충돌하지 않는다.
+        yaw = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), yaw_deg).GetQuat()
+        set_pose(
+            stage.GetPrimAtPath(root), position,
+            Gf.Quatd(yaw.GetReal(), yaw.GetImaginary()),
+        )
         self._root = root
         self._configure_drive_torque(stage, log)
-        log(f"[IwHub] 배치 완료: {root} @ {tuple(round(v, 2) for v in position)}")
+        log(
+            f"[IwHub] 배치 완료: {root} @ "
+            f"{tuple(round(v, 2) for v in position)}, yaw={yaw_deg:.1f}°"
+        )
         return root
 
     def _configure_drive_torque(self, stage: Usd.Stage, log=print) -> None:
@@ -181,6 +191,7 @@ class IwHub:
         bp = UsdGeom.Xformable(stage.GetPrimAtPath(src)).ComputeLocalToWorldTransform(
             Usd.TimeCode.Default()).ExtractTranslation()
         cargo_x, cargo_y = float(bp[0]), float(bp[1])
+        cargo_quat = Gf.Quatd(1.0)
         chassis = f"{self._root}/chassis"
         chassis_prim = stage.GetPrimAtPath(chassis)
         if chassis_prim.IsValid():
@@ -189,24 +200,41 @@ class IwHub:
                     Usd.TimeCode.Default(),
                     [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
                 )
+                # local bound를 사용해야 IW를 180° 돌려도 어느 쪽이 차체의 +X
+                # 앞면인지 유지된다. world AABB의 max X는 회전 후 뒤쪽을 뜻한다.
                 chassis_range = (
-                    bbox_cache.ComputeWorldBound(chassis_prim).ComputeAlignedRange()
+                    bbox_cache.ComputeLocalBound(chassis_prim).ComputeAlignedRange()
                 )
-                chassis_center = chassis_range.GetMidpoint()
                 chassis_front_x = float(chassis_range.GetMax()[0])
-                cargo_x = chassis_front_x - PALLET_SIZE[0] / 2.0
-                cargo_y = float(chassis_center[1])
+                chassis_center_y = float(chassis_range.GetMidpoint()[1])
+                chassis_world = UsdGeom.Xformable(
+                    chassis_prim).ComputeLocalToWorldTransform(
+                        Usd.TimeCode.Default())
+                cargo_center = chassis_world.Transform(
+                    Gf.Vec3d(
+                        chassis_front_x - PALLET_SIZE[0] / 2.0,
+                        chassis_center_y,
+                        0.0,
+                    )
+                )
+                cargo_x, cargo_y = float(cargo_center[0]), float(cargo_center[1])
+                cargo_quat = Gf.Quatd(
+                    chassis_world.ExtractRotationQuat().GetNormalized())
                 log(
                     "[IwHub] 팔레트/IW 앞면 정렬: "
                     f"root 대비 dx={cargo_x - float(bp[0]):+.3f}m, "
                     f"dy={cargo_y - float(bp[1]):+.3f}m, "
-                    f"front_x={chassis_front_x:.3f}m"
+                    f"local_front_x={chassis_front_x:.3f}m"
                 )
             except Exception as e:
                 log(f"[IwHub] ⚠ chassis bbox 중심 계산 실패 — root 중심 사용: {e}")
         root = "/World/IwHubCargo"
         UsdGeom.Xform.Define(stage, root)
-        set_translate(stage.GetPrimAtPath(root), (cargo_x, cargo_y, bp[2] + deck_z))
+        set_pose(
+            stage.GetPrimAtPath(root),
+            (cargo_x, cargo_y, bp[2] + deck_z),
+            cargo_quat,
+        )
         ident = Gf.Quatd(1.0, 0.0, 0.0, 0.0)
         rng = random.Random(7)
 

@@ -60,7 +60,7 @@ def generate_launch_description():
             namespace="iwhub_0",
             remappings=tf_remaps,
             arguments=[
-                "--x", "-0.6", "--y", "0.0", "--z", "0.15",
+                "--x", "-1.08", "--y", "0.0", "--z", "0.15",
                 "--yaw", "3.141592653589793", "--pitch", "0.0", "--roll", "0.0",
                 "--frame-id", "iwhub_0/chassis", "--child-frame-id", "iwhub_0/back_2d_lidar",
             ],

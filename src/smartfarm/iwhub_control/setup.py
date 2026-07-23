@@ -33,6 +33,7 @@ setup(
         "console_scripts": [
             # /cmd_vel→바퀴속도(joint_command) + joint_states→odom(+TF). Isaac joint 브리지와 짝.
             "base_node = iwhub_control.base_node:main",
+            "mission_nav_node = iwhub_control.mission_nav_node:main",
         ],
     },
 )
