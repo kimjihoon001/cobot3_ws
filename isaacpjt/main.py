@@ -230,16 +230,18 @@ def build_drivers(cfg, task=None) -> list:
     if "--mm" in sys.argv:
         from rmp_mm import RmpMMDriver
         drivers.append(RmpMMDriver(cfg, task=task))
+    iw_driver = None
     if "--iw" in sys.argv:
         if WAREHOUSE_TEST:                       # --iw --fork (--mm 없음) → 창고 상차 단독 시험
             from iw_test import IwDriver
-            drivers.append(IwDriver(cfg, warehouse_test=True))
+            iw_driver = IwDriver(cfg, warehouse_test=True)
         else:                                    # 일반 통합 실행 — 깃허브용 iw.py(데크 적재)
             from iw import IwDriver
-            drivers.append(IwDriver(cfg))
+            iw_driver = IwDriver(cfg)
+        drivers.append(iw_driver)
     if "--fork" in sys.argv:
         from fork import ForkDriver
-        drivers.append(ForkDriver(cfg))
+        drivers.append(ForkDriver(cfg, iw_driver=iw_driver))
     return drivers
 
 

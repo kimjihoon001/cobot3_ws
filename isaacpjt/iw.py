@@ -9,6 +9,7 @@ from __future__ import annotations
 from robot_base import Driver, ros_fail
 from robots.iwhub import IwHub
 from scene.ground import COMMON_FLOOR_Z
+from iw_dock import WarehouseDockController
 
 # [2] Ridgeback 0.96m, IW 1.431m, 차체 사이 빈 공간 0.50m:
 # 중심거리 = 0.96/2 + 0.50 + 1.431/2 = 1.6955m.
@@ -26,6 +27,7 @@ class IwDriver(Driver):
         super().__init__()
         self._cfg = cfg
         self._iw = IwHub(cfg.robots)
+        self._warehouse_dock = None
 
     def spawn(self, stage):
         self._iw.spawn(stage, self.root, POSE, yaw_deg=SPAWN_YAW_DEG)
@@ -33,6 +35,9 @@ class IwDriver(Driver):
     def finalize(self, world, stage, opts):
         self._iw.load_cargo(
             stage, self._cfg.tomato_assets, self._cfg.physics)
+        self._warehouse_dock = WarehouseDockController(
+            stage, self.robot, self.art
+        )
 
         if opts.no_ros:
             return
@@ -48,6 +53,20 @@ class IwDriver(Driver):
             build_nav_sensors(
                 stage, self._iw, self.art,
                 self._cfg.robots.iwhub_nav, opts)
+
+    def set_warehouse_dock_locked(self, locked: bool) -> bool:
+        return bool(
+            self._warehouse_dock
+            and self._warehouse_dock.set_dock_locked(locked)
+        )
+
+    def set_warehouse_pallet_attached(
+        self, attached: bool, pallet_id: int
+    ) -> bool:
+        return bool(
+            self._warehouse_dock
+            and self._warehouse_dock.set_pallet_on_deck(attached, pallet_id)
+        )
 
 
 def build_nav_sensors(stage, iw, art_path: str, nav, opts) -> None:

@@ -52,6 +52,11 @@ class ForkLiftReturnNode(ForkLiftNode):
 
         self._expected_pallet = initial_pallet
         self._next_pallet = (initial_pallet + 1) % self.PALLET_COUNT
+        # 회수 노드가 움직일 때 팔레트는 IW DeckJoint에 연결돼 있다.
+        # 첫 명령에서 이를 실수로 해제하지 않도록 소유 상태를 이어받는다.
+        self._pallet_deck_attached_command = True
+        self._iw_dock_locked_command = False
+        self._pallet_target_command = initial_pallet
         self._mode = self.MODE_WAIT_INITIAL
         self._auto_start_at = None
 
@@ -79,6 +84,9 @@ class ForkLiftReturnNode(ForkLiftNode):
         # 들어오므로 항상 기억한다. 실제 회수는 다음 도킹 이벤트에서만 시작한다.
         self._expected_pallet = pallet
         self._next_pallet = (pallet + 1) % self.PALLET_COUNT
+        self._pallet_deck_attached_command = True
+        self._iw_dock_locked_command = False
+        self._pallet_target_command = pallet
         self.get_logger().info(
             f"IW 적재 팔레트 확인: Pallet_{pallet:02d}, "
             f"다음 공급 Pallet_{self._next_pallet:02d}"
@@ -185,6 +193,17 @@ class ForkLiftReturnNode(ForkLiftNode):
         rack_carry_lift = rack_place_lift + rack_raise
 
         steps: list[Step] = [
+            self._dock_lock(
+                True, "snap and lock IW at canonical handoff pose"
+            ),
+            self._pose_check(
+                wait_x,
+                wait_y,
+                wait_yaw,
+                f"Pallet_{pallet:02d} straight pickup alignment gate",
+                position_tolerance=0.03,
+                yaw_tolerance=math.radians(1.0),
+            ),
             self._lift(amr_lift, f"IW Pallet_{pallet:02d} hole height"),
             self._straight_y(
                 amr_insert_y,
@@ -195,10 +214,10 @@ class ForkLiftReturnNode(ForkLiftNode):
                 precise=True,
             ),
             self._wait(0.4, f"IW Pallet_{pallet:02d} insertion settle"),
-            self._coupler(
-                True,
+            self._pallet_owner(
+                "fork",
                 pallet,
-                f"connect IW Pallet_{pallet:02d} to fork carriage",
+                f"transfer IW Pallet_{pallet:02d} from deck to fork",
             ),
             self._wait(0.4, f"IW Pallet_{pallet:02d} coupler settle"),
         ]
