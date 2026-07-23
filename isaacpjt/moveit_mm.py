@@ -45,7 +45,10 @@ class MMDriver(Driver):
     name = "mm_moveit"      # ★scene.add 등록명 분리(2026-07-23, Codex): 팀원 mm.py=name"mm" 와
     #                        동시(--mm --moveit) 실행 시 world.scene.add(name=) 충돌 방지.
     ns = "harvester_0"
-    root = "/World/HarvesterMoveit"       # ★stage 격리(2026-07-23): 팀원 mm.py=/World/Harvester 와 별개
+    # ★prim 경로 접두사 회피(2026-07-24): "/World/Harvester"(rmp)가 physics view 정규식으로
+    #   "/World/HarvesterMoveit"를 re.match 해, --mm --moveit 동시 실행 시 두 팔이 한 뷰로 묶여
+    #   (2,6) velocity tensor 에러가 났다. 접두사 안 겹치는 이름으로 바꿔 해결(stage 격리도 유지).
+    root = "/World/MoveitMM"
 
     SCOOP_JOINTS = ("scoop_quarter_1_joint",
                     "scoop_quarter_2_joint",
