@@ -54,7 +54,7 @@ from pjt_utils.ripeness import RED, BROWN         # 클래스 단색 (씬 색 �
 from scene.greenhouse_task import GreenhouseTask
 from robots.harvester import HOME_POSE_DEG, HarvestMM
 from robot_base import art_root
-from mm import POSE as MM_POSE, BASE_JOINTS
+from rmp_mm import POSE as MM_POSE, BASE_JOINTS
 
 # ===== 설정 =====
 FRAME_CAP = int(sys.argv[1]) if len(sys.argv) > 1 else None  # 빠른 테스트용 상한(없으면 전체)

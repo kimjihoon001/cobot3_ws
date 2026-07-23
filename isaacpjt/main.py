@@ -235,8 +235,8 @@ def build_drivers(cfg, task=None) -> list:
     아예 불러오지 않는다(팀원이 그 파일을 깨뜨려도 내 로봇은 돌아간다)."""
     drivers = []
     if "--mm" in sys.argv:
-        from mm import MMDriver
-        drivers.append(MMDriver(cfg, task=task))
+        from rmp_mm import RmpMMDriver
+        drivers.append(RmpMMDriver(cfg, task=task))
     if "--iw" in sys.argv:
         if WAREHOUSE_TEST:                       # --iw --fork (--mm 없음) → 창고 상차 단독 시험
             from iw_test import IwDriver
@@ -249,7 +249,7 @@ def build_drivers(cfg, task=None) -> list:
         drivers.append(ForkDriver(cfg))
     # ★MoveIt MM(내 것, 2026-07-23) — build_drivers 끝에 추가해 f2(iw) 의 --mm/--iw 변경과
     #   영역이 안 겹치게 한다(머지 충돌 회피). --moveit → moveit_mm(/World/HarvesterMoveit,
-    #   harvester_moveit). --mm 은 팀원 RMPflow(mm.py) 그대로 → --mm --moveit 동시 스폰 가능.
+    #   harvester_moveit). --mm 은 팀원 RMPflow(rmp_mm.py) 그대로 → --mm --moveit 동시 스폰 가능.
     if MOVEIT:
         from moveit_mm import MMDriver as MoveitMMDriver
         drivers.append(MoveitMMDriver(cfg, task=task))
@@ -335,7 +335,7 @@ def run_loaded(path: str) -> None:
         for _ in range(15):
             world.step(render=False)
         if MM_TELEOP:
-            from mm import build_teleop, find_blade_setter
+            from rmp_mm import build_teleop, find_blade_setter
             teleop = build_teleop(mm_robot, find_blade_setter(stage), GUI)
     else:
         print("[Load] Harvester 아티큘레이션을 못 찾음 — 텔레옵 불가.")
