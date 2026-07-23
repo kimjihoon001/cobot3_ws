@@ -78,6 +78,7 @@ class Step:
     max_steering: float = 0.0
     max_rotation: float = 0.0
     attached: bool = False
+    deck_attached: bool = False
     attempt: int = 0
     validate_alignment: bool = True
 
@@ -278,6 +279,10 @@ class ForkLiftNode(Node):
         self._drive_command = 0.0
         self._steer_command = 0.0
         self._pallet_attached_command = False
+        self._pallet_deck_attached_command = False
+        # 상하차 중에는 IW를 canonical dock pose에 고정한다. 상차 완료 뒤
+        # 명시적인 dock_lock 해제 단계에서만 IW가 다시 이동할 수 있다.
+        self._iw_dock_locked_command = True
         self._pallet_target_command = 0
 
         self._mode = self.MODE_WAIT_INITIAL
@@ -656,7 +661,8 @@ class ForkLiftNode(Node):
         # 랙 바로 앞에서 포크를 올리면 선반 밑면과 충돌하므로 접근 중에는
         # 이 높이를 그대로 유지한다.
         steps = [
-            self._lift(lift, f"rack {pallet} hole height at wait pose")
+            self._dock_lock(True, "lock IW at canonical handoff pose"),
+            self._lift(lift, f"rack {pallet} hole height at wait pose"),
         ]
         steps += self._turn_from_wait_to_rack(pallet)
         # U턴 뒤 안전 후진까지 끝난 다음에만 제한 조향 접근을 시작한다.
@@ -1133,7 +1139,9 @@ class ForkLiftNode(Node):
                 precise=True,
             ),
             self._wait(0.4, "IW Pallet_00 insertion settle"),
-            self._coupler(True, pallet, "connect IW Pallet_00 to fork carriage"),
+            self._pallet_owner(
+                "fork", pallet, "transfer IW Pallet_00 from deck to fork"
+            ),
             self._wait(0.4, "IW Pallet_00 coupler settle"),
         ] + slow_raise + [
             self._wait(0.8, "IW Pallet_00 lifted hold"),
@@ -1420,10 +1428,10 @@ class ForkLiftNode(Node):
             self._wait(0.5, "IW loaded placement settle"),
         ] + slow_lower + [
             self._wait(0.8, f"Pallet_{pallet:02d} supported on IW"),
-            self._coupler(
-                False,
+            self._pallet_owner(
+                "deck",
                 pallet,
-                f"release Pallet_{pallet:02d} on IW",
+                f"transfer Pallet_{pallet:02d} from fork to IW deck",
             ),
             self._wait(
                 0.8,
@@ -1444,6 +1452,11 @@ class ForkLiftNode(Node):
                 wait_y,
                 wait_yaw,
                 "IW wait pose final alignment check",
+                position_tolerance=0.03,
+                yaw_tolerance=math.radians(1.0),
+            ),
+            self._dock_lock(
+                False, "release IW after forklift clears handoff axis"
             ),
         ]
 
@@ -1676,7 +1689,16 @@ class ForkLiftNode(Node):
             timeout=self._step_timeout,
         )
 
-    def _pose_check(self, x: float, y: float, yaw: float, label: str) -> Step:
+    def _pose_check(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        label: str,
+        *,
+        position_tolerance: float | None = None,
+        yaw_tolerance: float | None = None,
+    ) -> Step:
         """추가 주행 없이 현재 pose가 목표 허용오차 안인지 확인한다."""
         return Step(
             kind="pose_check",
@@ -1684,8 +1706,16 @@ class ForkLiftNode(Node):
             x=x,
             y=y,
             yaw=wrap_angle(yaw),
-            position_tolerance=max(self._position_tol, 0.10),
-            yaw_tolerance=max(self._yaw_tol, math.radians(10.0)),
+            position_tolerance=(
+                max(self._position_tol, 0.10)
+                if position_tolerance is None
+                else position_tolerance
+            ),
+            yaw_tolerance=(
+                max(self._yaw_tol, math.radians(10.0))
+                if yaw_tolerance is None
+                else yaw_tolerance
+            ),
             timeout=2.0,
         )
 
@@ -1697,6 +1727,30 @@ class ForkLiftNode(Node):
             label=label,
             attached=attached,
             pallet_id=pallet,
+            timeout=5.0,
+        )
+
+    @staticmethod
+    def _pallet_owner(owner: str, pallet: int, label: str) -> Step:
+        """Isaac에서 팔레트를 포크 또는 IW 데크로 원자적으로 넘긴다."""
+        if owner not in ("fork", "deck", "none"):
+            raise ValueError(f"지원하지 않는 팔레트 owner: {owner}")
+        return Step(
+            kind="pallet_owner",
+            label=label,
+            attached=owner == "fork",
+            deck_attached=owner == "deck",
+            pallet_id=pallet,
+            timeout=5.0,
+        )
+
+    @staticmethod
+    def _dock_lock(locked: bool, label: str) -> Step:
+        """IW를 canonical dock pose에 고정하거나 이동을 위해 해제한다."""
+        return Step(
+            kind="dock_lock",
+            label=label,
+            attached=locked,
             timeout=5.0,
         )
 
@@ -1784,6 +1838,16 @@ class ForkLiftNode(Node):
         elif step.kind == "coupler":
             self._pallet_target_command = step.pallet_id
             self._pallet_attached_command = step.attached
+            self._publish_command(0.0, 0.0)
+            done = elapsed >= 0.25
+        elif step.kind == "pallet_owner":
+            self._pallet_target_command = step.pallet_id
+            self._pallet_attached_command = step.attached
+            self._pallet_deck_attached_command = step.deck_attached
+            self._publish_command(0.0, 0.0)
+            done = elapsed >= 0.25
+        elif step.kind == "dock_lock":
+            self._iw_dock_locked_command = step.attached
             self._publish_command(0.0, 0.0)
             done = elapsed >= 0.25
         elif step.kind == "wait":
@@ -2391,6 +2455,8 @@ class ForkLiftNode(Node):
             "back_wheel_swivel",
             "back_wheel_drive",
             "pallet_attach",
+            "pallet_deck_attach",
+            "iw_dock_lock",
             "pallet_id",
         ]
         msg.position = [
@@ -2398,9 +2464,19 @@ class ForkLiftNode(Node):
             steering,
             math.nan,
             1.0 if self._pallet_attached_command else 0.0,
+            1.0 if self._pallet_deck_attached_command else 0.0,
+            1.0 if self._iw_dock_locked_command else 0.0,
             float(self._pallet_target_command),
         ]
-        msg.velocity = [math.nan, math.nan, drive, math.nan, math.nan]
+        msg.velocity = [
+            math.nan,
+            math.nan,
+            drive,
+            math.nan,
+            math.nan,
+            math.nan,
+            math.nan,
+        ]
         self._command_pub.publish(msg)
 
     def _stop(self) -> None:

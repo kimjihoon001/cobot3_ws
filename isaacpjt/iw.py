@@ -9,6 +9,7 @@ from __future__ import annotations
 from robot_base import Driver, ros_fail
 from robots.iwhub import IwHub
 from scene.ground import COMMON_FLOOR_Z
+from iw_dock import WarehouseDockController
 
 # 임시 배치 — 온실 앞마당(MM 옆). 물류 동선 확정 후 조정.
 POSE = (2.0, -12.0, COMMON_FLOOR_Z)
@@ -24,6 +25,7 @@ class IwDriver(Driver):
         super().__init__()
         self._cfg = cfg
         self._iw = IwHub(cfg.robots)
+        self._warehouse_dock = None
 
     def spawn(self, stage):
         self._iw.spawn(stage, self.root, POSE)
@@ -31,6 +33,9 @@ class IwDriver(Driver):
     def finalize(self, world, stage, opts):
         # iw.hub 데크에 '적재된 세트'(팔레트+KLT 8 + 토마토 15개 꼭지포함·동적강체, 3칸 산포)
         self._iw.load_cargo(stage, self._cfg.tomato_assets, self._cfg.physics)
+        self._warehouse_dock = WarehouseDockController(
+            stage, self.robot, self.art
+        )
 
         if not opts.no_ros:
             try:
@@ -42,6 +47,20 @@ class IwDriver(Driver):
             if opts.nav_drive or opts.nav_odom or opts.nav_scan:
                 build_nav(stage, self._iw, self.art,
                           self._cfg.robots.iwhub_nav, opts)
+
+    def set_warehouse_dock_locked(self, locked: bool) -> bool:
+        return bool(
+            self._warehouse_dock
+            and self._warehouse_dock.set_dock_locked(locked)
+        )
+
+    def set_warehouse_pallet_attached(
+        self, attached: bool, pallet_id: int
+    ) -> bool:
+        return bool(
+            self._warehouse_dock
+            and self._warehouse_dock.set_pallet_on_deck(attached, pallet_id)
+        )
 
 
 def build_nav(stage, iw, art_path: str, nav, opts) -> None:
