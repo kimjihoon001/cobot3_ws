@@ -30,6 +30,9 @@ class IwDriver(Driver):
         self._warehouse_test = warehouse_test
         self._iw = IwHub(cfg.robots)
         self._warehouse_dock = None
+        self._deck_geometry_pub = None
+        self._last_deck_geometry = None
+        self._deck_geometry_error_logged = False
 
     def spawn(self, stage):
         pose = WAREHOUSE_DOCK_POSE if self._warehouse_test else POSE
@@ -46,7 +49,9 @@ class IwDriver(Driver):
             self._warehouse_dock = WarehouseDockController(
                 stage, self.robot, self.art
             )
-            if self._warehouse_dock.set_dock_locked(True):
+            # 아직 physics loop가 시작되기 전의 scene construction이므로
+            # 초기 고정만 동기적으로 생성해도 안전하다.
+            if self._warehouse_dock.set_dock_locked(True, immediate=True):
                 print("[WarehouseTest] AMR rigid body를 월드 FixedJoint로 고정했습니다")
         else:
             self._iw.load_cargo(stage, self._cfg.tomato_assets, self._cfg.physics)
@@ -59,11 +64,38 @@ class IwDriver(Driver):
                 from ros import robot_bridge as RB
                 RB.build_joint_bridge(stage, f"/World/RosBridge_{self.ns}",
                                       self.ns, self.art)
+                geometry_node = RB.build_string_pub(
+                    "/World/RosDeckGeometry_iwhub_0",
+                    "/iwhub_0/deck_geometry",
+                )
+                self._deck_geometry_pub = RB.StringPublisher(geometry_node)
             except Exception:
                 ros_fail("iw.hub 조인트 브리지")
             if opts.nav_drive or opts.nav_odom or opts.nav_scan:
                 build_nav(stage, self._iw, self.art,
                           self._cfg.robots.iwhub_nav, opts)
+
+    def update(self, is_playing: bool):
+        """실측 데크 높이를 ROS 지게차 제어기에 계속 제공한다."""
+        if (
+            not is_playing
+            or self._warehouse_dock is None
+            or self._deck_geometry_pub is None
+        ):
+            return
+        try:
+            # deck geometry는 이 실행 동안 불변이다. 동적 articulation을
+            # 주행시키는 동안 매 frame BBoxCache로 Fabric을 읽지 않는다.
+            if self._last_deck_geometry is None:
+                payload = self._warehouse_dock.geometry_json()
+                if self._deck_geometry_pub.publish(payload):
+                    self._last_deck_geometry = payload
+                    print(f"[IW Deck Measure] ROS 발행 시작: {payload}")
+            self._deck_geometry_error_logged = False
+        except Exception as exc:
+            if not self._deck_geometry_error_logged:
+                print(f"[IW Deck Measure] ROS 발행 실패: {exc}")
+                self._deck_geometry_error_logged = True
 
     def set_warehouse_dock_locked(self, locked: bool) -> bool:
         return bool(

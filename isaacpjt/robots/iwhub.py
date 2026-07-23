@@ -21,7 +21,8 @@ import random
 from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from pjt_config.settings import RobotConfig
-from pjt_utils.xform import set_pose, set_scale, set_translate
+from pjt_utils.deck_geometry import PALLET_SUPPORT_CLEARANCE
+from pjt_utils.xform import set_pose, set_scale
 from robots import assets
 
 
@@ -295,8 +296,8 @@ class IwHub:
           · 토마토 = **별도 동적 강체**(Load 아님) → KLT 안에서 흔들리며 접촉으로 실려간다.
           참조 에셋(팔레트·KLT)이 자체 강체를 갖고 오므로 disable_physics 로 벗긴 뒤
           Load 강체의 콜라이더로 붙인다(중첩강체 경고 방지 §8). 꼭지=몸통 자식(장식).
-        deck_z: 데크 높이(root 기준 오프셋). [2] 유도 — bbox 상단은 0.198(measure_deck.py)이나
-                GUI 실측상 0.225 라야 팔레트가 데크에 얹힌다(0.25=52mm 뜸, 0.20=박힘). GUI 확인.
+        deck_z: chassis 형상을 읽지 못했을 때만 쓰는 root 기준 비상 오프셋.
+                정상 경로는 실제 chassis bbox 상면을 매번 측정해 팔레트 하면을 맞춘다.
         반환: 얹은 토마토 수(0이면 에셋 없음).
         """
         from isaacsim.core.utils.stage import add_reference_to_stage
@@ -325,16 +326,15 @@ class IwHub:
                                  calyx if os.path.exists(calyx) else None))
 
         # ── iw.hub 데크 월드 포즈 (적재 세트 원점) ──
-        # 컨테이너 root 원점은 실제 차체 기하 중심과 일치하지 않는다. 적재물 중심을 차체
-        # 중심에 맞추면 짧은 팔레트(1.213m)의 앞면이 IW 앞면보다 10.9cm 뒤로 들어간다.
-        # 사용자 지정대로 두 앞면이 같은 수직면이 되게 chassis bbox의 +X 앞면에서
-        # 팔레트 길이 절반을 빼 cargo 중심을 정한다. Z는 기존 데크 실측값을 쓴다.
+        # 컨테이너 root 원점은 실제 차체 기하 중심과 일치하지 않는다. root 오프셋이나
+        # 부모 변환을 다시 적용하지 않도록 chassis의 월드 bbox 중심/상면을 직접 쓴다.
         src = f"{self._root}/base_link"
         if not stage.GetPrimAtPath(src).IsValid():
             src = self._root
         bp = UsdGeom.Xformable(stage.GetPrimAtPath(src)).ComputeLocalToWorldTransform(
             Usd.TimeCode.Default()).ExtractTranslation()
         cargo_x, cargo_y = float(bp[0]), float(bp[1])
+        cargo_z = float(bp[2]) + deck_z
         cargo_quat = Gf.Quatd(1.0)
         chassis = f"{self._root}/chassis"
         chassis_prim = stage.GetPrimAtPath(chassis)
@@ -344,31 +344,24 @@ class IwHub:
                     Usd.TimeCode.Default(),
                     [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
                 )
-                # local bound를 사용해야 IW를 180° 돌려도 어느 쪽이 차체의 +X
-                # 앞면인지 유지된다. world AABB의 max X는 회전 후 뒤쪽을 뜻한다.
                 chassis_range = (
-                    bbox_cache.ComputeLocalBound(chassis_prim).ComputeAlignedRange()
+                    bbox_cache.ComputeWorldBound(
+                        chassis_prim
+                    ).ComputeAlignedRange()
                 )
-                chassis_front_x = float(chassis_range.GetMax()[0])
-                chassis_center_y = float(chassis_range.GetMidpoint()[1])
                 chassis_world = UsdGeom.Xformable(
                     chassis_prim).ComputeLocalToWorldTransform(
                         Usd.TimeCode.Default())
-                cargo_center = chassis_world.Transform(
-                    Gf.Vec3d(
-                        chassis_front_x - PALLET_SIZE[0] / 2.0,
-                        chassis_center_y,
-                        0.0,
-                    )
-                )
-                cargo_x, cargo_y = float(cargo_center[0]), float(cargo_center[1])
+                deck_top_z = float(chassis_range.GetMax()[2])
+                cargo_z = deck_top_z + PALLET_SUPPORT_CLEARANCE
                 cargo_quat = Gf.Quatd(
                     chassis_world.ExtractRotationQuat().GetNormalized())
                 log(
-                    "[IwHub] 팔레트/IW 앞면 정렬: "
+                    "[IwHub] 팔레트/IW 실측 데크 정렬: "
                     f"root 대비 dx={cargo_x - float(bp[0]):+.3f}m, "
                     f"dy={cargo_y - float(bp[1]):+.3f}m, "
-                    f"local_front_x={chassis_front_x:.3f}m"
+                    f"deck_top_z={deck_top_z:.5f}m, "
+                    f"pallet_base_z={cargo_z:.5f}m"
                 )
             except Exception as e:
                 log(f"[IwHub] ⚠ chassis bbox 중심 계산 실패 — root 중심 사용: {e}")
@@ -376,7 +369,7 @@ class IwHub:
         UsdGeom.Xform.Define(stage, root)
         set_pose(
             stage.GetPrimAtPath(root),
-            (cargo_x, cargo_y, bp[2] + deck_z),
+            (cargo_x, cargo_y, cargo_z),
             cargo_quat,
         )
         ident = Gf.Quatd(1.0, 0.0, 0.0, 0.0)
@@ -451,8 +444,11 @@ class IwHub:
             bound = "chassis 결속(로봇 따라감·창고서 해제→지게차 인수)"
         else:
             bound = "⚠ chassis 링크 없음 → 데크 위 비결속 배치"
-        log(f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 {n_tom}개(동적강체). "
-            f"Load {bound}. deck_z={deck_z} [4] GPU 보정 요")
+        log(
+            f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 "
+            f"{n_tom}개(동적강체). Load {bound}. "
+            f"pallet_base_z={cargo_z:.5f}"
+        )
         return n_tom
 
     # 에셋에 이미 있을 법한 라이다 프림 이름/타입 키워드 (Idealworks iw.hub 는 실물 AMR).

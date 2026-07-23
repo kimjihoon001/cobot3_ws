@@ -188,7 +188,10 @@ class ForkLiftReturnNode(ForkLiftNode):
 
         amr_lift = self._amr_lift_target()
         amr_carry_lift = amr_lift + self._pickup_raise
-        rack_place_lift = max(0.0, self._rack_lift_target(pallet) - 0.06)
+        rack_place_lift = max(
+            0.0,
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
+        )
         rack_raise = self._rack_pickup_raise(pallet)
         rack_carry_lift = rack_place_lift + rack_raise
 

@@ -210,18 +210,24 @@ ros2 topic echo /forklift/task_complete
 ```yaml
 initial_pose: [0.0, 14.5, -1.5708]
 wait_pose: [0.0, 14.5, -1.5708]
-amr_hole_center: [0.0, 10.84885, 0.45]
+amr_hole_center: [0.0, 10.84885, 0.45]  # 실측 토픽이 없을 때만 쓰는 비상값
+require_iw_deck_geometry: true
 ```
 
-실제 위치가 정해지면 다음처럼 실행 시 덮어쓴다.
+정상 실행에서는 Isaac이 IW의 실제 chassis bbox 상면 높이를 측정해
+`/iwhub_0/deck_geometry`로 canonical 도킹 중심과 팔레트 구멍 높이를 계속 발행한다.
+지게차 노드는 이 값을 받은 뒤에만 작업을 시작하므로 `amr_hole_center`의 고정 Z를
+수동 보정할 필요가 없다. 토픽 없이 예전 수동 좌표로 시험할 때만 다음처럼 덮어쓴다.
 
 ```bash
 ros2 run warehouse_dock fork_lift_node --ros-args \
+  -p require_iw_deck_geometry:=false \
   -p wait_pose:="[4.0, 15.0, 1.5708]" \
   -p amr_hole_center:="[2.0, 14.5, 0.45]"
 ```
 
 `amr_hole_center`의 세 번째 값은 AMR 위 팔레트의 **구멍 중심 월드 Z**다.
+실측 토픽을 사용하는 기본 운용에서는 이 값이 런타임 측정값으로 교체된다.
 
 ## 팔레트/포크 GPU 실측 좌표
 
@@ -261,7 +267,8 @@ isaac_python tools/measure_pallet_fork_geometry.py --/log/level=error
 - `insertion_depth`: 팔레트 안으로 실제 삽입할 깊이
 - `rack_fork_insert_travel`: 팔레트 정면 대기점부터 포크 삽입점까지 직진 거리(기본 0.95m)
 - `wait_pose`: 지게차 대기 위치
-- `amr_hole_center`: AMR 도킹 시 팔레트 구멍 중심
+- `/iwhub_0/deck_geometry`: IW chassis 상면에서 계산한 도킹 중심·팔레트 구멍 높이
+- `amr_hole_center`: 실측 토픽을 끌 때만 사용하는 비상 수동 좌표
 
 Warehouse 단독 시험도 실제 pose/joint-state 연결을 확인한 뒤 자동 시작하며 실제
 GUI 자세를 경로 제어에 사용한다. U턴 단계 제한시간은 60초다.

@@ -23,6 +23,7 @@ Warehouse 단독 시험 기본값은 명령 적분 자세를 사용하며 상태
 from __future__ import annotations
 
 import fcntl
+import json
 import math
 import os
 import queue
@@ -125,6 +126,10 @@ class ForkLiftNode(Node):
     FORK_BLADE_CENTER_Z_AT_ZERO = (
         FORK_BLADE_BOTTOM_Z_AT_ZERO + FORK_BLADE_TOP_Z_AT_ZERO
     ) / 2.0
+    # 랙 삽입 때 포크 중심을 구멍 중심보다 6cm 낮춰 잡은 상태로 팔레트가
+    # 연결된다. 따라서 IW에 내려놓을 때도 목표 구멍 높이보다 6cm 낮은 포크
+    # 자세를 사용해야 팔레트 하면이 실제 데크 상면에 닿는다.
+    RACK_PICKUP_UNDERSHOOT = 0.06
 
     def __init__(
         self,
@@ -235,8 +240,12 @@ class ForkLiftNode(Node):
         self.declare_parameter("require_joint_state_feedback", True)
         self.declare_parameter("require_pose_feedback", True)
         self.declare_parameter("use_pose_feedback", True)
+        # IW가 Isaac에서 측정해 보내는 실제 chassis 상면/팔레트 구멍 높이를
+        # 받은 뒤에만 작업한다. 예전 고정 Z=0.45m로 상차하면 팔레트가 뜬다.
+        self.declare_parameter("require_iw_deck_geometry", True)
 
         self._load_parameters()
+        self._iw_deck_geometry_received = False
 
         self._command_pub = self.create_publisher(
             JointState, "/forklift_0/joint_command", 10
@@ -258,6 +267,12 @@ class ForkLiftNode(Node):
         )
         self.create_subscription(
             PoseStamped, "/forklift_0/pose", self._on_pose, 10
+        )
+        self.create_subscription(
+            String,
+            "/iwhub_0/deck_geometry",
+            self._on_iw_deck_geometry,
+            10,
         )
         self.create_subscription(
             HandoffEvent, "/handoff/tray_ready", self._on_handoff, 10
@@ -457,6 +472,9 @@ class ForkLiftNode(Node):
         self._use_pose_feedback = bool(
             self.get_parameter("use_pose_feedback").value
         )
+        self._require_iw_deck_geometry = bool(
+            self.get_parameter("require_iw_deck_geometry").value
+        )
 
     # ------------------------------------------------------------------
     # ROS 입력
@@ -549,6 +567,48 @@ class ForkLiftNode(Node):
             self.get_logger().info(f"/forklift_0/pose 연결 완료 ({mode})")
             self._pose_feedback_logged = True
 
+    def _on_iw_deck_geometry(self, msg: String) -> None:
+        """Isaac이 실제 IW 형상에서 측정한 도킹 중심과 구멍 높이를 적용한다."""
+        try:
+            payload = json.loads(msg.data)
+            measured = (
+                float(payload["dock_x"]),
+                float(payload["dock_y"]),
+                float(payload["pallet_hole_center_z"]),
+            )
+            deck_top_z = float(payload["deck_top_z"])
+            if not all(math.isfinite(value) for value in (*measured, deck_top_z)):
+                raise ValueError("유한하지 않은 좌표")
+            if not 0.05 <= deck_top_z <= 1.0:
+                raise ValueError(f"비정상 deck_top_z={deck_top_z:.5f}")
+            if not deck_top_z < measured[2] < deck_top_z + 0.20:
+                raise ValueError(
+                    "팔레트 구멍 높이가 데크 상면 범위를 벗어남: "
+                    f"deck={deck_top_z:.5f}, hole={measured[2]:.5f}"
+                )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.get_logger().warning(
+                f"/iwhub_0/deck_geometry 잘못된 측정값 무시: {exc}"
+            )
+            return
+
+        previous = self._amr_hole
+        self._amr_hole = measured
+        first = not self._iw_deck_geometry_received
+        self._iw_deck_geometry_received = True
+        if first or any(
+            abs(current - old) > 0.002
+            for current, old in zip(measured, previous)
+        ):
+            self.get_logger().info(
+                "[IW Deck Measure] 실측 좌표 적용: "
+                f"center=({measured[0]:.5f}, {measured[1]:.5f}), "
+                f"deck_top_z={deck_top_z:.5f}, "
+                f"pallet_hole_z={measured[2]:.5f}, "
+                f"pickup_lift={self._amr_lift_target():.5f}, "
+                f"place_lift={self._amr_place_lift_target():.5f}"
+            )
+
     def _on_handoff(self, msg: HandoffEvent) -> None:
         self.get_logger().info(
             f"AMR 도킹 이벤트: tray_id={msg.tray_id}, amr_id={msg.amr_id}"
@@ -579,6 +639,14 @@ class ForkLiftNode(Node):
     # 미션 구성
 
     def _handle_amr_docked(self) -> None:
+        if (
+            self._require_iw_deck_geometry
+            and not self._iw_deck_geometry_received
+        ):
+            self.get_logger().warning(
+                "IW 실측 데크 좌표 수신 전이라 도킹 이벤트를 보류합니다"
+            )
+            return
         if self._require_joint_state_feedback and self._joint_state_time is None:
             self.get_logger().warning(
                 "ForkliftB joint_states 연결 전이라 도킹 이벤트를 무시합니다"
@@ -648,13 +716,26 @@ class ForkLiftNode(Node):
 
     def _start_selected_load(self, pallet: int) -> None:
         """초기 대기점에서 선택한 0~5번 팔레트를 집어 IW에 올린다."""
+        if (
+            self._require_iw_deck_geometry
+            and not self._iw_deck_geometry_received
+        ):
+            self.get_logger().warning(
+                "IW 실측 데크 좌표 수신 전이라 작업을 시작하지 않습니다. "
+                "Isaac의 /iwhub_0/deck_geometry 연결을 확인하세요"
+            )
+            return
         if not 0 <= pallet < self.PALLET_COUNT:
             self._fail(f"아직 지원하지 않는 팔레트 번호입니다: {pallet}")
             return
         self._publish_clear(False)
         pre_y, insert_y, stage_y = self._approach_y(self._rack_front_y)
         # 검증 경로에서는 GPU 기하 중심값보다 포크를 6cm 낮춰 삽입한다.
-        lift = clamp(self._rack_lift_target(pallet) - 0.06, 0.0, 2.0)
+        lift = clamp(
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
+            0.0,
+            2.0,
+        )
         pickup_raise = self._rack_pickup_raise(pallet)
         rack_carry_lift = lift + pickup_raise
         # 대기 위치에서 먼저 선택한 팔레트 구멍 높이를 맞춘 뒤 움직인다.
@@ -1102,7 +1183,7 @@ class ForkLiftNode(Node):
 
         # 첫 상차 때 사용한 0번 랙 삽입·운반 높이를 그대로 재사용한다.
         rack_place_lift = clamp(
-            self._rack_lift_target(pallet) - 0.06,
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
             0.0,
             2.0,
         )
@@ -1173,7 +1254,7 @@ class ForkLiftNode(Node):
         rack_x = self.RACK_CENTER_X[pallet]
         pre_y, insert_y, _ = self._approach_y(self._rack_front_y)
         rack_place_lift = clamp(
-            self._rack_lift_target(pallet) - 0.06,
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
             0.0,
             2.0,
         )
@@ -1238,13 +1319,13 @@ class ForkLiftNode(Node):
         rack_x = self.RACK_CENTER_X[pallet]
         pre_y, insert_y, stage_y = self._approach_y(self._rack_front_y)
         rack_lift = clamp(
-            self._rack_lift_target(pallet) - 0.06,
+            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
             0.0,
             2.0,
         )
         pickup_raise = self._rack_pickup_raise(pallet)
         rack_carry_lift = rack_lift + pickup_raise
-        amr_carry_lift = self._amr_lift_target() + pickup_raise
+        amr_carry_lift = self._amr_place_lift_target() + pickup_raise
 
         slow_raise = [
             self._lift(
@@ -1364,7 +1445,7 @@ class ForkLiftNode(Node):
         x, center_y, _ = self._amr_hole
         insert_y = self._amr_insert_y(center_y)
         wait_x, wait_y, wait_yaw = self._wait_pose
-        lift = self._amr_lift_target()
+        lift = self._amr_place_lift_target()
         return self._turn_from_rack_to_wait() + [
             self._move(wait_x, wait_y, wait_yaw, "AMR straight approach start loaded"),
             self._lift(lift + self._pickup_raise, "AMR carry height"),
@@ -1400,7 +1481,7 @@ class ForkLiftNode(Node):
         _, center_y, _ = self._amr_hole
         insert_y = self._amr_insert_y(center_y)
         wait_x, wait_y, wait_yaw = self._wait_pose
-        place_lift = self._amr_lift_target()
+        place_lift = self._amr_place_lift_target()
 
         # 랙 운반 높이에서 IW 구멍 중심 높이까지 약 2cm씩 내린다. 현재 기본값은
         # 0.32407m -> 0.24378m라서 정확히 5단계로 천천히 내려간다.
@@ -1452,7 +1533,9 @@ class ForkLiftNode(Node):
                 wait_y,
                 wait_yaw,
                 "IW wait pose final alignment check",
-                position_tolerance=0.03,
+                # 직선 인출 뒤 7~8cm 정적 오차는 기본 도착 허용치 안이다.
+                # 3cm로만 검사하면 정상 상차 뒤에도 ERROR로 끝난다.
+                position_tolerance=self._position_tol,
                 yaw_tolerance=math.radians(1.0),
             ),
             self._dock_lock(
@@ -1491,6 +1574,14 @@ class ForkLiftNode(Node):
 
     def _amr_lift_target(self) -> float:
         return clamp(self._amr_hole[2] - self._fork_zero_z, 0.0, 2.0)
+
+    def _amr_place_lift_target(self) -> float:
+        """랙에서 6cm 낮게 연결된 팔레트를 IW 데크에 놓는 포크 높이."""
+        return clamp(
+            self._amr_lift_target() - self.RACK_PICKUP_UNDERSHOOT,
+            0.0,
+            2.0,
+        )
 
     # ------------------------------------------------------------------
     # Step 생성 헬퍼
@@ -1785,6 +1876,9 @@ class ForkLiftNode(Node):
             ) or (
                 self._require_pose_feedback
                 and self._pose_feedback_time is None
+            ) or (
+                self._require_iw_deck_geometry
+                and not self._iw_deck_geometry_received
             ):
                 self._publish_command(0.0, 0.0)
                 return

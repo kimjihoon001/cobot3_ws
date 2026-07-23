@@ -225,6 +225,11 @@ class ForkDriver(Driver):
     def _set_iw_dock_locked(self, requested: bool) -> None:
         """Lock/snap the IW for handoff, or release it for navigation."""
         if requested == self._iw_dock_locked:
+            # A lock request can be cancelled while the dock controller is in
+            # its multi-frame stop/snap phase. Forward False so that pending
+            # native-physics mutations are discarded as well.
+            if not requested and self._iw_driver is not None:
+                self._iw_driver.set_warehouse_dock_locked(False)
             return
         if self._iw_driver is None:
             print("[IW Dock] --iw 없이 도킹 고정 명령을 처리할 수 없습니다")
@@ -250,9 +255,17 @@ class ForkDriver(Driver):
             if self._iw_driver is None:
                 print("[Pallet Handoff] --iw 없이 데크 연결을 만들 수 없습니다")
                 return
-            # Remove the fork constraint first, then create the deck constraint
-            # before the next physics step.
+            # Joint 제거와 새 Joint 생성을 같은 physics frame에 하지 않는다.
+            # 반복 수신되는 동일 ROS 명령이 다음 frame에 deck Joint를 만든다.
+            fork_was_attached = self._pallet_attached
             self._set_pallet_attached(False, pallet_id=pallet_id)
+            if fork_was_attached:
+                self._deck_pallet_attached = False
+                print(
+                    "[Pallet Handoff] 포크 Joint 해제 완료 — "
+                    "다음 물리 프레임에 IW Deck Joint 생성"
+                )
+                return
             if self._iw_driver.set_warehouse_pallet_attached(True, pallet_id):
                 self._deck_pallet_attached = True
                 self._pallet_id = pallet_id
@@ -260,16 +273,32 @@ class ForkDriver(Driver):
 
         if fork_requested:
             if self._iw_driver is not None:
+                deck_was_attached = self._deck_pallet_attached
                 if not self._iw_driver.set_warehouse_pallet_attached(
-                    False, pallet_id
+                    False,
+                    pallet_id,
                 ):
                     print("[Pallet Handoff] IW 데크 연결 해제에 실패했습니다")
+                    return
+                if deck_was_attached:
+                    self._deck_pallet_attached = False
+                    print(
+                        "[Pallet Handoff] IW Deck Joint 해제 완료 — "
+                        "다음 물리 프레임에 포크 Joint 생성"
+                    )
                     return
             self._deck_pallet_attached = False
             self._set_pallet_attached(True, pallet_id=pallet_id)
             return
 
+        fork_was_attached = self._pallet_attached
         self._set_pallet_attached(False, pallet_id=pallet_id)
+        if fork_was_attached:
+            print(
+                "[Pallet Handoff] 포크 Joint 해제 완료 — "
+                "다음 물리 프레임에 Deck Joint 상태 정리"
+            )
+            return
         if self._iw_driver is not None:
             self._iw_driver.set_warehouse_pallet_attached(False, pallet_id)
         self._deck_pallet_attached = False
