@@ -29,6 +29,8 @@ setup(
     entry_points={
         "console_scripts": [
             "fleet_dispatch_node = fleet_dispatch.fleet_dispatch_node:main",
+            "cmd_vel_watchdog = fleet_dispatch.cmd_vel_watchdog:main",
+            "nav2_lifecycle_activator = fleet_dispatch.nav2_lifecycle_activator:main",
         ],
     },
 )

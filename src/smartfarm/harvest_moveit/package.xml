@@ -17,11 +17,15 @@
   <exec_depend>moveit_planners_chomp</exec_depend>
   <exec_depend>pilz_industrial_motion_planner</exec_depend>
   <exec_depend>moveit_kinematics</exec_depend>
+  <exec_depend>moveit_servo</exec_depend>
+  <exec_depend>moveit_task_constructor_core</exec_depend>
+  <exec_depend>moveit_task_constructor_capabilities</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>action_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>topic_based_ros2_control</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>

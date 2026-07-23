@@ -92,6 +92,7 @@ class MMDriver(Driver):
         self._teleop = None
         self._stage = None
         self._twist = None                    # /cmd_vel 폴러 (Nav2 주행)
+        self._nav = None                      # MoveIt MM 전용 namespace/속도 설정
         self._dt = 1.0 / 60.0                 # finalize 에서 월드 실제 물리 dt 로 덮어씀
         self._rmpflow = None
         self._was_playing = False
@@ -232,12 +233,23 @@ class MMDriver(Driver):
                 nav = _dc.replace(
                     self._cfg.robots.harvester_nav,
                     tf_namespace=self.ns,
+                    # 공용 HarvesterNavConfig에는 과거 게걸음 금지(max_vy=0)가 남아 있다.
+                    # 이 로봇의 수확 탐색은 이랑 방향인 base y축으로 주행하므로 MoveIt
+                    # 인스턴스에서만 x를 막고 y를 허용한다. 이 값이 없으면 Nav2가
+                    # cmd_vel_safe.y를 내도 _drive_base() 클램프에서 항상 0이 된다.
+                    max_vx=0.0,
+                    max_vy=0.4,
+                    max_wz=0.35,
                     # Nav2 원출력 대신 0.35초 watchdog 중계 토픽을 받는다. OmniGraph
                     # SubscribeTwist가 마지막 비영(非零) 값을 영구 유지하는 runaway 방지.
                     cmd_vel_topic=f"/{self.ns}/cmd_vel_safe",
                     odom_topic=f"/{self.ns}/odom",
                     scan_topic=f"/{self.ns}/scan",
                     base_frame="mm_base")
+                # _drive_base()도 반드시 이 인스턴스 전용 제한값을 사용해야 한다.
+                # 공용 cfg에는 max_vy=0이므로 원본을 다시 읽으면 DWB의 횡속도가
+                # 정상 수신돼도 여기서 0으로 잘려 베이스가 출발하지 않는다.
+                self._nav = nav
                 self._twist = build_nav(stage, self._mm, nav, opts)
 
         # ── MoveIt 전환(2026-07-22): RMPflow 비활성(주석 보존). 팔은 MoveIt 이
@@ -1163,7 +1175,9 @@ class MMDriver(Driver):
         base 텔레포트로 조인트가 바뀌어도 자동으로 그 자리에서 이어간다(상태 두 벌 금지).
         """
         vx, vy, wz = self._twist.poll()
-        nav = self._cfg.robots.harvester_nav
+        nav = self._nav
+        if nav is None:
+            return
         vx = max(-nav.max_vx, min(nav.max_vx, vx))   # Nav2 가 상한을 어겨도 여기서 막는다
         vy = max(-nav.max_vy, min(nav.max_vy, vy))
         wz = max(-nav.max_wz, min(nav.max_wz, wz))

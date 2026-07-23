@@ -6,7 +6,7 @@
 #   [2] Ridgeback 으로 바뀌는 부분은 아래 4곳뿐 — 나머지는 재사용:
 #         (a) 프레임/토픽 이름  → 상대 cmd_vel, odom, scan
 #             (launch namespace 아래에서만 해석되어 다른 로봇과 충돌하지 않음)
-#         (b) 주행 방식         → 횡이동 없는 전후+회전(DifferentialMotionModel)
+#         (b) 주행 방식         → 홀로노믹 이동 + 식물 방향 완만한 정렬(OmniMotionModel)
 #         (c) 풋프린트          → Ridgeback 0.96 × 0.793 m
 #         (d) 인플레이션 반경   → 온실 통로 1.5m 에 맞춰 축소
 #   [4] 나머지 수치(critic 가중치, AMCL alpha, BT 타임아웃)는 nav2 기본값 그대로 —
@@ -33,12 +33,14 @@ amcl:
     odom_frame_id: "odom"
     global_frame_id: "map"
     scan_topic: scan
-    # MM은 게걸음을 금지하고 전후+회전만 사용하므로 AMCL도 차동 운동 모델을 쓴다.
-    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    # Isaac MoveIt MM의 dummy base는 x/y/yaw 독립 3축이다. x/y 홀로노믹 이동과
+    # 카메라가 식물을 향하기 위한 완만한 yaw 정렬을 함께 추정한다.
+    robot_model_type: "nav2_amcl::OmniMotionModel"
     alpha1: 0.2
     alpha2: 0.2
     alpha3: 0.2
     alpha4: 0.2
+    alpha5: 0.2
     max_particles: 2000
     min_particles: 500
     laser_model_type: "likelihood_field"
@@ -73,7 +75,7 @@ controller_server:
     use_sim_time: true
     controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
-    min_y_velocity_threshold: 0.5        # 횡속도는 노이즈로 취급해 0으로 만든다
+    min_y_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
     failure_tolerance: 0.3
     odom_topic: odom
@@ -93,37 +95,47 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       stateful: true
       xy_goal_tolerance: 0.15
-      yaw_goal_tolerance: 0.10
+      yaw_goal_tolerance: 0.35
 
-    # ★ 방향전환은 제자리 회전으로 한다(사용자 지정 2026-07-20) — Carter 설정의
-    #   RotationShimController 를 그대로 유지한다. 차체 정면(라이다·팔)이 진행방향을
-    #   보도록 먼저 회전하고 전진한다.
-    #   Shim 은 경로 시작 방향과 현재 헤딩이 angular_dist_threshold 이상 벌어지면
-    #   **먼저 제자리에서 돌고**, 정렬되면 primary_controller(DWB)에 넘긴다.
-    #   min/max_vel_y=0이라 DWB의 모든 y 샘플은 0이다. vy_samples는 DWB가 요구하는
-    #   양수로 두되 횡이동 후보는 생성되지 않는다.
+    # 수확 탐색은 이랑과 평행한 y축으로만 주행한다. x는 식물과의 작업거리이므로
+    # 고정하고, GoalAlign의 완만한 yaw 회전만 허용해 카메라/팔이 식물을 향하게 한다.
     FollowPath:
-      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.4
-      lookahead_dist: 0.6
-      min_lookahead_dist: 0.3
-      max_lookahead_dist: 0.9
-      lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 1.3
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: false
+      # DWB trajectory generator는 x 속도/가속도를 완전 0으로 두면 lifecycle
+      # activate 단계에서 정상 샘플 집합을 만들지 못할 수 있다. 내부 계획에는 아주
+      # 작은 x 후보만 남기고, 실제 Isaac moveit_mm에서 max_vx=0으로 하드 차단한다.
+      min_vel_x: -0.05
+      min_vel_y: -0.4
+      max_vel_x: 0.05
+      max_vel_y: 0.4
+      max_vel_theta: 0.35
+      min_speed_xy: 0.0
+      max_speed_xy: 0.4
+      min_speed_theta: 0.0
+      acc_lim_x: 0.5
+      acc_lim_y: 1.0
+      acc_lim_theta: 0.7
+      decel_lim_x: -0.5
+      decel_lim_y: -1.0
+      decel_lim_theta: -0.7
+      vx_samples: 3
+      vy_samples: 15
+      vtheta_samples: 9
+      sim_time: 1.7
+      linear_granularity: 0.05
+      angular_granularity: 0.025
       transform_tolerance: 0.2
-      use_velocity_scaled_lookahead_dist: false
-      min_approach_linear_velocity: 0.05
-      approach_velocity_scaling_dist: 0.6
-      use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 1.0
-      use_regulated_linear_velocity_scaling: true
-      use_cost_regulated_linear_velocity_scaling: false
-      regulated_linear_scaling_min_radius: 0.9
-      regulated_linear_scaling_min_speed: 0.25
-      use_rotate_to_heading: true
-      rotate_to_heading_min_angle: 0.785
-      max_angular_accel: 2.5
-      max_robot_pose_search_dist: 10.0
+      xy_goal_tolerance: 0.15
+      trans_stopped_velocity: 0.05
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      critics: ["Oscillation", "BaseObstacle", "GoalAlign", "PathDist", "GoalDist"]
+      BaseObstacle.scale: 0.02
+      GoalAlign.scale: 16.0
+      GoalAlign.forward_point_distance: 0.1
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -299,14 +311,11 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    # ★ 홀로노믹 이식 (b) — 배열 순서는 [x, y, theta]. Carter(차동)는 y 자리를 0.0 으로 둔다.
-    # ⚠ 2026-07-21 사용자 요청으로 옆걸음 제거 — y 를 Carter 와 같이 0.0 으로.
-    #   controller_server 가 이미 vy=0 만 내보내지만, 다른 소스(teleop 등)가 y 를
-    #   보내도 여기서 한 번 더 막는다.
-    max_velocity: [0.5, 0.0, 1.3]
-    min_velocity: [-0.5, 0.0, -1.3]
-    max_accel: [1.0, 1.0, 2.5]
-    max_decel: [-1.0, -1.0, -2.5]
+    # DWB 내부의 작은 x 후보는 통과시키되, 실제 Isaac 적용부가 x를 0으로 차단한다.
+    max_velocity: [0.05, 0.4, 0.35]
+    min_velocity: [-0.05, -0.4, -0.35]
+    max_accel: [0.5, 1.0, 0.7]
+    max_decel: [-0.5, -1.0, -0.7]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

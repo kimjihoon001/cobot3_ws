@@ -44,8 +44,9 @@ class CmdVelWatchdog(Node):
 
     def destroy_node(self):
         # 정상 종료 때도 Isaac 구독 출력이 반드시 0으로 갱신되게 한다.
-        for _ in range(3):
-            self._publisher.publish(Twist())
+        if rclpy.ok(context=self.context):
+            for _ in range(3):
+                self._publisher.publish(Twist())
         return super().destroy_node()
 
 

@@ -114,6 +114,9 @@ def generate_launch_description():
 
     moveit_controllers = _yaml(
         os.path.join(share, "config", "moveit_controllers.yaml"))
+    servo_params = {
+        "moveit_servo": _yaml(os.path.join(share, "config", "servo.yaml"))
+    }
 
     trajectory_execution = {
         "moveit_manage_controllers": True,
@@ -169,6 +172,17 @@ def generate_launch_description():
         remappings=_TF_REMAP,
         output="screen",
     )
+    # Servo는 평소 정지 상태이며 수확 오케스트레이터가 start/stop 서비스를 호출한
+    # 짧은 카메라 미세보정 구간에만 JTC joint_trajectory를 발행한다.
+    servo = Node(
+        package="moveit_servo",
+        executable="servo_node_main",
+        name="servo_node",
+        parameters=[servo_params, robot_description,
+                    robot_description_semantic, kinematics_file, sim],
+        remappings=_TF_REMAP,
+        output="screen",
+    )
     rviz = Node(
         package="rviz2", executable="rviz2",
         condition=IfCondition(LaunchConfiguration("rviz")),
@@ -185,7 +199,7 @@ def generate_launch_description():
     #   frame_prefix 걸면 MoveIt 이 URDF 무접두 프레임을 못 찾아 깨진다; 완전 tf 격리는 후속).
     isolated = GroupAction([
         PushRosNamespace(LaunchConfiguration("ns")),
-        control_node, rsp, move_group, rviz,
+        control_node, rsp, move_group, servo, rviz,
         # 서비스가 뜬 뒤 한 번에 로드·설정·활성화한다.
         TimerAction(period=4.0, actions=[spawner_controllers]),
     ])

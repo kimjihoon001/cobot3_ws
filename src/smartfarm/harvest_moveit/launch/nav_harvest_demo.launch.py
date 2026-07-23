@@ -92,8 +92,9 @@ def generate_launch_description():
     demo = GroupAction([
         vision_node, vision_view,
         TimerAction(
-            # 컨트롤러 묶음 스포너가 4초 뒤 시작하므로 충분히 활성화된 다음 실행한다.
-            period=15.0,
+            # 컨트롤러 스포너가 4초에 시작한다. 오케스트레이터는 5초에 띄우고 내부의
+            # MoveIt/Nav2 서버 대기로 준비를 동기화해 불필요한 15초 고정 지연을 없앤다.
+            period=5.0,
             # 수확 오케스트레이터 = grasp_proto (반복 HARVEST_N회 + YOLO 탐지 게이트 + 부착 파지).
             #   좌표는 /sim/tomato(정답), YOLO 탐지되면 접근·파지. MM 은 스폰위치서 바로 수확(나브 옵션).
             actions=[
@@ -121,6 +122,15 @@ def generate_launch_description():
                             LaunchConfiguration("goal_y"), value_type=float),
                         "goal_yaw": ParameterValue(
                             LaunchConfiguration("goal_yaw"), value_type=float),
+                        "stop_on_tomato": ParameterValue(
+                            LaunchConfiguration("stop_on_tomato"),
+                            value_type=bool),
+                        "detection_confirm_frames": ParameterValue(
+                            LaunchConfiguration("detection_confirm_frames"),
+                            value_type=int),
+                        "detection_stop_max_depth_m": ParameterValue(
+                            LaunchConfiguration("detection_stop_depth"),
+                            value_type=float),
                         "start_x": ParameterValue(
                             LaunchConfiguration("initial_pose_x"), value_type=float),
                         "start_y": ParameterValue(
@@ -170,6 +180,15 @@ def generate_launch_description():
         DeclareLaunchArgument("goal_y", default_value="-8.0",
                               description="수확 정차 위치(map 좌표)"),
         DeclareLaunchArgument("goal_yaw", default_value="3.141592653589793"),
+        DeclareLaunchArgument(
+            "stop_on_tomato", default_value="true",
+            description="Nav2 이동 중 작업거리 토마토 연속 검출 시 정지·수확"),
+        DeclareLaunchArgument(
+            "detection_confirm_frames", default_value="3",
+            description="Nav2 정지에 필요한 YOLO 연속 검출 프레임 수"),
+        DeclareLaunchArgument(
+            "detection_stop_depth", default_value="0.65",
+            description="이 거리(m) 안의 YOLO 토마토만 정지 트리거"),
         DeclareLaunchArgument("slam", default_value="false"),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("ns", default_value="harvester_moveit",
@@ -184,8 +203,11 @@ def generate_launch_description():
                               description="1=과실 위 줄기를 collision object 로 등록(접근 계획이 회피). OMPL 실패 시 0"),
         DeclareLaunchArgument("stem_grip", default_value="0",
                               description="구형 2F 줄기파지 실험만 1. 동축 스쿱은 0"),
-        DeclareLaunchArgument("yolo_gate", default_value="1",
-                              description="1=YOLO 탐지 대기 후 수확(원거리 탐지→접근)"),
+        DeclareLaunchArgument(
+            "yolo_gate", default_value="0",
+            description=(
+                "1=YOLO 탐지가 있어야 수확. 기본 0은 YOLO 화면/추론은 유지하되 "
+                "검출 실패가 /sim/tomato 좌표 기반 수확을 막지 않음")),
         DeclareLaunchArgument("nav_rviz", default_value="false"),
         DeclareLaunchArgument("moveit_rviz", default_value="true"),
         DeclareLaunchArgument("yolo", default_value="true",

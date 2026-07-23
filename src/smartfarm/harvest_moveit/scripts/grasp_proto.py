@@ -12,7 +12,8 @@ import time
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from geometry_msgs.msg import Pose, PoseStamped, Quaternion, Vector3
+from geometry_msgs.msg import (Pose, PoseStamped, Quaternion, TwistStamped,
+                               Vector3)
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (AllowedCollisionEntry, AttachedCollisionObject,
                              BoundingVolume, CollisionObject, Constraints,
@@ -25,6 +26,7 @@ from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import String
 from std_msgs.msg import Float64, Float64MultiArray
+from std_srvs.srv import Trigger
 
 FRAME = "mm_base"           # 계획 프레임 = 섀시(base_link) — URDF 루트
 TOOL_LEN = 0.120            # tool0→1/4구 과실 중심 = URDF harvest_tcp
@@ -54,6 +56,12 @@ class Grasp(Node):
         self.ik = self.create_client(GetPositionIK, "compute_ik")
         self.apply_scene = self.create_client(ApplyPlanningScene, "apply_planning_scene")
         self.get_scene = self.create_client(GetPlanningScene, "get_planning_scene")
+        self.servo_twist = self.create_publisher(
+            TwistStamped, "servo_node/delta_twist_cmds", 10)
+        self.servo_start = self.create_client(
+            Trigger, "servo_node/start_servo")
+        self.servo_stop = self.create_client(
+            Trigger, "servo_node/stop_servo")
         # 명령 계측 — ±2π 초과 명령(=지난번 -40π 와인딩 범인)을 현행범으로 잡는다
         self.phase = "INIT"
         self.cmd_minmax = {}
@@ -109,11 +117,21 @@ class Grasp(Node):
         try:
             d = json.loads(m.data)
             pos = tuple(round(v, 3) for v in d["position"])
-            self.fruits[pos] = time.time()
             if "fruit_id" in d:
                 fruit_id = int(d["fruit_id"])
+                # 베이스 이동 후 같은 과실의 섀시 좌표가 바뀌면 이전 좌표를 남겨두지
+                # 않는다. 예전 구현은 좌표 tuple을 key로 10초간 누적해 nearest()가
+                # 이동 전 좌표를 다시 고르고, 접근 후 재검출에서 베이스 이동량만큼
+                # 과실이 움직였다고 오판했다.
+                previous = self.fruit_tracks.get(fruit_id)
+                if previous is not None:
+                    previous_pos = previous[0]
+                    if previous_pos != pos:
+                        self.fruits.pop(previous_pos, None)
+                        self.fruit_ids.pop(previous_pos, None)
                 self.fruit_ids[pos] = fruit_id
                 self.fruit_tracks[fruit_id] = (pos, time.time())
+            self.fruits[pos] = time.time()
         except (ValueError, KeyError):
             pass
 
@@ -223,6 +241,92 @@ class Grasp(Node):
               f"{p.orientation.y:.3f},{p.orientation.z:.3f})")
         return (p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z), \
                (p.position.x, p.position.y, p.position.z)
+
+    def current_tcp_position(self):
+        """현재 관절 상태의 harvest_tcp 위치(mm_base)를 FK로 읽는다."""
+        if not all(joint in self.js for joint in JOINTS):
+            return None
+        req = GetPositionFK.Request()
+        req.header.frame_id = FRAME
+        req.fk_link_names = ["harvest_tcp"]
+        req.robot_state.joint_state.name = JOINTS
+        req.robot_state.joint_state.position = [self.js[j] for j in JOINTS]
+        fut = self.fk.call_async(req)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=1.0)
+        res = fut.result()
+        if res is None or not res.pose_stamped:
+            return None
+        p = res.pose_stamped[0].pose.position
+        return (float(p.x), float(p.y), float(p.z))
+
+    def servo_refine(self, target, timeout=2.5):
+        """OMPL 도착 뒤 재검출된 안전점까지 Servo로 몇 cm만 미세 보정한다.
+
+        큰 이동은 Servo가 아니라 다시 계획해야 한다. 위치만 보정하고 각속도는 0으로
+        두므로 MTC/IK가 고른 U자 스쿱 방향은 그대로 유지된다.
+        """
+        current = self.current_tcp_position()
+        if current is None:
+            print("  [Servo] 현재 TCP FK 없음 — Pilz 단계로 계속", flush=True)
+            return False
+        initial_error = math.dist(current, target)
+        max_shift = float(os.environ.get("SERVO_REFINE_MAX_M", "0.05"))
+        tolerance = float(os.environ.get("SERVO_REFINE_TOL_M", "0.006"))
+        if initial_error <= tolerance:
+            print(f"  [Servo] 보정 불필요 ({initial_error*1000:.1f}mm)", flush=True)
+            return True
+        if initial_error > max_shift:
+            print(f"  [Servo] 오차 {initial_error*1000:.0f}mm > "
+                  f"{max_shift*1000:.0f}mm — 큰 이동은 Pilz/MTC에 맡김", flush=True)
+            return False
+        if not self.servo_start.wait_for_service(timeout_sec=1.0):
+            print("  [Servo] start_servo 서비스 없음 — Pilz 단계로 계속", flush=True)
+            return False
+        start = self.servo_start.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, start, timeout_sec=2.0)
+        if start.result() is None or not start.result().success:
+            print("  [Servo] 시작 실패 — Pilz 단계로 계속", flush=True)
+            return False
+
+        deadline = time.monotonic() + timeout
+        final_error = initial_error
+        try:
+            while rclpy.ok() and time.monotonic() < deadline:
+                current = self.current_tcp_position()
+                if current is None:
+                    break
+                error = tuple(target[i] - current[i] for i in range(3))
+                final_error = math.sqrt(sum(value * value for value in error))
+                if final_error <= tolerance:
+                    break
+                gain = 1.2
+                max_speed = float(os.environ.get("SERVO_REFINE_SPEED_MPS", "0.025"))
+                velocity = [gain * value for value in error]
+                speed = math.sqrt(sum(value * value for value in velocity))
+                if speed > max_speed:
+                    velocity = [value * max_speed / speed for value in velocity]
+                command = TwistStamped()
+                command.header.stamp = self.get_clock().now().to_msg()
+                command.header.frame_id = FRAME
+                command.twist.linear.x = velocity[0]
+                command.twist.linear.y = velocity[1]
+                command.twist.linear.z = velocity[2]
+                self.servo_twist.publish(command)
+                rclpy.spin_once(self, timeout_sec=0.02)
+        finally:
+            for _ in range(5):
+                halt = TwistStamped()
+                halt.header.stamp = self.get_clock().now().to_msg()
+                halt.header.frame_id = FRAME
+                self.servo_twist.publish(halt)
+                rclpy.spin_once(self, timeout_sec=0.02)
+            if self.servo_stop.wait_for_service(timeout_sec=0.5):
+                stop = self.servo_stop.call_async(Trigger.Request())
+                rclpy.spin_until_future_complete(self, stop, timeout_sec=1.0)
+        ok = final_error <= tolerance
+        print(f"  [Servo] 미세보정 {'완료' if ok else '제한시간 종료'}: "
+              f"{initial_error*1000:.1f}→{final_error*1000:.1f}mm", flush=True)
+        return ok
 
     def goal_pose(self, pos, quat, pipeline, planner="", vel=0.3):
         g = MoveGroup.Goal()
@@ -761,6 +865,9 @@ def harvest_once(g: Grasp) -> bool:
             pre = (grasp[0] - entry_back * math.cos(yaw),
                    grasp[1] - entry_back * math.sin(yaw),
                    grasp[2] - entry_drop)
+            safe = (pre[0] - lin_approach * math.cos(yaw),
+                    pre[1] - lin_approach * math.sin(yaw),
+                    pre[2])
             circ_interim = (
                 0.5 * (pre[0] + grasp[0]),
                 0.5 * (pre[1] + grasp[1]),
@@ -772,6 +879,11 @@ def harvest_once(g: Grasp) -> bool:
                 return False
             print(f"  [접근 중 보정] Δ={tuple(round(v*1000) for v in reacquire_delta)}mm",
                   flush=True)
+        # MTC/OMPL이 만든 안전점에 도착한 뒤 재검출로 목표가 몇 cm 바뀌었다면,
+        # 큰 재계획 대신 Servo가 충돌·특이점을 감시하며 새 안전점에 짧게 정렬한다.
+        # Servo가 없거나 보정 범위를 넘으면 기존 Pilz LIN이 그대로 이어받는다.
+        if os.environ.get("SERVO_REFINE", "1") == "1":
+            g.servo_refine(safe)
         if not g.run_goal(g.goal_pose(
                 pre, q, pipeline="pilz_industrial_motion_planner",
                 planner="LIN", vel=0.08), "PREGRASP(Pilz LIN)"):
