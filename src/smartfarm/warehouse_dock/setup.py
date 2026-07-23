@@ -14,13 +14,18 @@ setup(
     zip_safe=True,
     maintainer="rokey",
     maintainer_email="pfr0213@gmail.com",
-    description="트랙 C - 창고 하역: handoff_node, fork_lift_node",
+    description=(
+        "트랙 C - 창고 하역: handoff_node, fork_lift_node, "
+        "fork_lift_return_node"
+    ),
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "handoff_node = warehouse_dock.handoff_node:main",
             "fork_lift_node = warehouse_dock.fork_lift_node:main",
+            "fork_lift_return_node = "
+            "warehouse_dock.fork_lift_return_node:main",
         ],
     },
 )

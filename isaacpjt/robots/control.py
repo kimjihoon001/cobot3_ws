@@ -1216,6 +1216,7 @@ class TransporterController:
         self._steer = float(q[self._steer_i[0]])
         self._drive_vel = 0.0
         self._kinematic_moving = False
+        self._stationary_pose = None
         # ForkliftB 에셋은 구동 관절이 돌아도 접촉 마찰 상태에 따라 차체가 전혀
         # 전진하지 않는 경우가 있다. 바퀴 명령과 함께 평면 차량 운동을 적용할
         # 호출자를 위해 실측 스파이크와 같은 바퀴 반지름/축거를 보관한다.
@@ -1261,9 +1262,11 @@ class TransporterController:
 
         # ForkliftB의 후륜 구동은 에셋/바닥 마찰에 따라 바퀴만 헛돌 수 있다.
         # dt를 준 호출자는 물리 추진 대신 Ackermann 평면 운동만 적용한다.
-        # 정지 중에는 pose를 건드리지 않아 리프트 물리와 팔레트 접촉을
-        # 불필요하게 방해하지 않는다.
+        # 정지 중에는 마지막 root pose를 유지하되 관절 드라이브는 계속
+        # 적용하므로 리프트와 조향의 목표 제어는 그대로 동작한다.
         if dt is not None and abs(self._drive_vel) > 1e-6:
+            # 정지 중 고정해 둔 pose는 다음 이동을 시작할 때 해제한다.
+            self._stationary_pose = None
             position, quat = self._robot.get_world_pose()
             position = np.asarray(position, dtype=float).copy()
             quat = np.asarray(quat, dtype=float)  # Isaac Core: [w, x, y, z]
@@ -1294,9 +1297,23 @@ class TransporterController:
                 orientation=np.array([np.cos(half), 0.0, 0.0, np.sin(half)]),
             )
             self._kinematic_moving = True
-        elif dt is not None and self._kinematic_moving:
+        elif dt is not None:
+            # 속도를 한 번만 0으로 만든 뒤 동적 강체로 두면 바퀴 접촉과
+            # 포크/팔레트 하중이 차체에 매 프레임 미세한 병진·회전을 만든다.
+            # 자동화 경로는 이미 주행 중 root pose를 kinematic하게 적분하므로,
+            # 정지 중에도 마지막 pose를 유지해 대기 위치의 creep/jitter를 막는다.
+            if self._stationary_pose is None:
+                position, orientation = self._robot.get_world_pose()
+                self._stationary_pose = (
+                    np.asarray(position, dtype=float).copy(),
+                    np.asarray(orientation, dtype=float).copy(),
+                )
             self._robot.set_linear_velocity(np.zeros(3, dtype=float))
             self._robot.set_angular_velocity(np.zeros(3, dtype=float))
+            self._robot.set_world_pose(
+                position=self._stationary_pose[0],
+                orientation=self._stationary_pose[1],
+            )
             self._kinematic_moving = False
 
     def joint_report(self) -> str:

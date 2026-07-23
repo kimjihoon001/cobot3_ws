@@ -69,6 +69,7 @@ class Step:
     duration: float = 0.0
     max_drive: float = 0.0
     position_tolerance: float = 0.0
+    x_tolerance: float = 0.0
     yaw_tolerance: float = 0.0
     timeout: float = 60.0
     pallet_id: int = -1
@@ -124,10 +125,17 @@ class ForkLiftNode(Node):
         FORK_BLADE_BOTTOM_Z_AT_ZERO + FORK_BLADE_TOP_Z_AT_ZERO
     ) / 2.0
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        node_name: str = "fork_lift_node",
+        instance_lock_path: str | None = None,
+        console_enabled: bool = True,
+    ):
         # 같은 PC에서 노드 두 개가 /forklift_0/joint_command에 동시에 명령을
         # 보내는 상황을 막는다. 프로세스가 비정상 종료돼도 flock은 자동 해제된다.
-        self._instance_lock = open(self.INSTANCE_LOCK_PATH, "a+", encoding="utf-8")
+        lock_path = instance_lock_path or self.INSTANCE_LOCK_PATH
+        self._instance_lock = open(lock_path, "a+", encoding="utf-8")
         try:
             fcntl.flock(
                 self._instance_lock.fileno(),
@@ -143,7 +151,7 @@ class ForkLiftNode(Node):
         self._instance_lock.write(str(os.getpid()))
         self._instance_lock.flush()
 
-        super().__init__("fork_lift_node")
+        super().__init__(node_name)
 
         # 좌표 파라미터. 실제 도킹 위치가 정해지면 이 세 항목을 먼저 보정한다.
         self.declare_parameter("initial_pose", [0.0, 14.5, -math.pi / 2.0])
@@ -188,6 +196,14 @@ class ForkLiftNode(Node):
         self.declare_parameter(
             "alignment_recovery_max_steering", math.radians(8.0)
         )
+        # 랙 직선 삽입 전 최종 정렬 조건. 잔진동 제거 뒤 남는 정적 오차를
+        # 재진입으로 보정하되, X ±4cm / yaw ±3° 안에서만 삽입을 허용한다.
+        self.declare_parameter("rack_entry_x_tolerance", 0.04)
+        self.declare_parameter(
+            "rack_entry_yaw_tolerance", math.radians(3.0)
+        )
+        # 랙 재진입과 IW 공통축 보정에 동일한 상한을 적용한다.
+        self.declare_parameter("max_reentry_attempts", 5)
         # spike 06처럼 후륜 swivel을 크게 꺾어 좁게 회전한다. 25°에서는 반경이
         # 약 4.4m지만 70°에서는 약 0.75m다.
         self.declare_parameter("max_steering_angle", math.radians(70.0))
@@ -210,6 +226,9 @@ class ForkLiftNode(Node):
         # 필요할 때만 -p auto_start:=true로 0번 자동 작업을 활성화한다.
         self.declare_parameter("auto_start", False)
         self.declare_parameter("auto_start_delay", 2.0)
+        # 별도 fork_lift_return_node와 함께 실행할 때는 이 노드가 IW 귀환
+        # 이벤트를 처리하지 않는다. 예전 단일 노드 P0→P1 시험이 필요하면 true.
+        self.declare_parameter("enable_internal_return_cycle", False)
         # GUI 차체가 실제로 움직인 사실을 확인한 뒤에만 상태기를 진행한다. 피드백 없이
         # dead reckoning만 쓰면 DDS 도메인이 달라도 ROS 로그상 작업이 끝난 것처럼 보인다.
         self.declare_parameter("require_joint_state_feedback", True)
@@ -225,6 +244,9 @@ class ForkLiftNode(Node):
         self._clear_pub = self.create_publisher(Bool, "/forklift/clear", 10)
         self._complete_pub = self.create_publisher(
             Int32, "/forklift/task_complete", 10
+        )
+        self._pallet_on_iw_pub = self.create_publisher(
+            Int32, "/forklift/pallet_on_iw", 10
         )
 
         self.create_subscription(
@@ -288,7 +310,7 @@ class ForkLiftNode(Node):
                 "초기화 완료: ForkliftB 연결 후 터미널에 0~5번을 "
                 "입력하세요"
             )
-        if sys.stdin.isatty():
+        if console_enabled and sys.stdin.isatty():
             threading.Thread(
                 target=self._read_console_requests,
                 name="forklift-pallet-selector",
@@ -372,6 +394,23 @@ class ForkLiftNode(Node):
         self._alignment_recovery_max_steer = float(
             self.get_parameter("alignment_recovery_max_steering").value
         )
+        self._rack_entry_x_tol = float(
+            self.get_parameter("rack_entry_x_tolerance").value
+        )
+        self._rack_entry_yaw_tol = float(
+            self.get_parameter("rack_entry_yaw_tolerance").value
+        )
+        self._max_reentry_attempts = int(
+            self.get_parameter("max_reentry_attempts").value
+        )
+        if self._rack_entry_x_tol <= 0.0:
+            raise ValueError("rack_entry_x_tolerance은 0보다 커야 합니다")
+        if not 0.0 < self._rack_entry_yaw_tol <= math.radians(3.0):
+            raise ValueError(
+                "rack_entry_yaw_tolerance은 0보다 크고 3도 이하여야 합니다"
+            )
+        if not 0 <= self._max_reentry_attempts <= 5:
+            raise ValueError("max_reentry_attempts는 0부터 5 사이여야 합니다")
         self._max_steer = float(
             self.get_parameter("max_steering_angle").value
         )
@@ -400,6 +439,9 @@ class ForkLiftNode(Node):
         self._auto_start = bool(self.get_parameter("auto_start").value)
         self._auto_start_delay = float(
             self.get_parameter("auto_start_delay").value
+        )
+        self._enable_internal_return_cycle = bool(
+            self.get_parameter("enable_internal_return_cycle").value
         )
         self._require_pose_feedback = bool(
             self.get_parameter("require_pose_feedback").value
@@ -563,6 +605,11 @@ class ForkLiftNode(Node):
                 return
             self._start_initial_load()
         elif self._mode == self.MODE_WAIT_RETURN:
+            if not self._enable_internal_return_cycle:
+                self.get_logger().info(
+                    "IW 귀환 처리는 fork_lift_return_node가 담당합니다"
+                )
+                return
             dx = self._x - self._wait_pose[0]
             dy = self._y - self._wait_pose[1]
             position_error = math.hypot(dx, dy)
@@ -1519,8 +1566,11 @@ class ForkLiftNode(Node):
             # 가운데/오른쪽 랙 S자 합류는 중심선 진입과 차체 복원 회전량을
             # 모두 누적하므로 최대 약 60°가 필요하다. 70°에서 안전 제한한다.
             max_rotation=math.radians(70.0),
+            # 목표 Y 도달은 기존 삽입 허용오차를 유지하고, 랙 중심 X 오차는
+            # 별도의 더 엄격한 기준으로 판정한다.
             position_tolerance=self._insert_tol,
-            yaw_tolerance=self._yaw_tol,
+            x_tolerance=self._rack_entry_x_tol,
+            yaw_tolerance=self._rack_entry_yaw_tol,
             timeout=min(30.0, self._step_timeout),
             attempt=attempt,
         )
@@ -1689,7 +1739,9 @@ class ForkLiftNode(Node):
             self._handle_amr_docked()
 
         if self._mode != self.MODE_BUSY or not self._steps:
-            self._publish_command(0.0, 0.0)
+            # 별도 회수 노드가 같은 명령 토픽의 제어권을 이어받을 수 있도록
+            # 유휴 상태에서는 반복 발행하지 않는다. 큐 종료·오류 진입 시에는
+            # _finish_queue/_fail이 정지 명령을 한 번 확실히 보낸다.
             return
 
         if self._require_joint_state_feedback and (
@@ -1850,6 +1902,7 @@ class ForkLiftNode(Node):
 
     def _run_pallet_approach(self, step: Step) -> bool:
         """U턴 후 선택 랙 중심선으로 완만한 S자 합류를 수행한다."""
+        max_alignment_retries = self._max_reentry_attempts
         if self._arc_last_yaw is None:
             self._arc_last_yaw = self._yaw
         else:
@@ -1872,43 +1925,52 @@ class ForkLiftNode(Node):
         # 정지한다. 이때 직선 삽입 가능한 횡·각도 오차인지 함께 검증한다.
         if self._y >= step.y - step.position_tolerance:
             self._publish_command(0.0, 0.0)
-            if abs(dx) <= 0.08 and abs(yaw_error) <= math.radians(3.0):
+            if (
+                abs(dx) <= step.x_tolerance
+                and abs(yaw_error) <= step.yaw_tolerance
+            ):
                 self.get_logger().info(
                     f"[APPROACH] aligned at ({self._x:.3f}, {self._y:.3f}), "
                     f"x_error={dx:.3f}m, "
                     f"yaw_error={math.degrees(yaw_error):.1f}deg"
                 )
                 return True
-            if step.attempt == 0:
+            if step.attempt < max_alignment_retries:
                 recovery_y = step.y - self._alignment_recovery_distance
                 recovery = self._alignment_recovery(
                     step.x,
                     recovery_y,
                     step.yaw,
-                    "alignment retry: reverse 2.5m with small steering",
+                    f"alignment retry {step.attempt + 1}/"
+                    f"{max_alignment_retries}: reverse 2.5m with small steering",
                 )
                 retry = self._approach_pallet(
                     step.x,
                     step.y,
                     step.yaw,
-                    "alignment retry: re-enter rack centerline once",
-                    attempt=1,
+                    f"alignment retry {step.attempt + 1}/"
+                    f"{max_alignment_retries}: re-enter rack centerline",
+                    attempt=step.attempt + 1,
                 )
-                # 현재 단계 뒤에 후진 복구와 단 한 번의 재진입을 예약한다.
+                # 현재 단계 뒤에 후진 복구와 재진입을 예약한다. 각 재진입은
+                # 같은 랙 앞 목표를 사용하므로 삽입점 쪽으로 계속 전진하지 않는다.
                 self._steps.insert(1, retry)
                 self._steps.insert(1, recovery)
                 self.get_logger().warning(
-                    "[ALIGNMENT RETRY 1/1] "
+                    f"[ALIGNMENT RETRY {step.attempt + 1}/"
+                    f"{max_alignment_retries}] "
                     f"x_error={dx:.3f}m, "
                     f"yaw_error={math.degrees(yaw_error):.1f}deg: "
                     f"{self._alignment_recovery_distance:.1f}m 후진 후 재진입"
                 )
                 self._publish_status(
-                    "정렬 재시도 1/1: 작은 조향으로 2.5m 후진 후 재진입"
+                    f"정렬 재시도 {step.attempt + 1}/"
+                    f"{max_alignment_retries}: 작은 조향으로 2.5m 후진 후 재진입"
                 )
                 return True
             self._fail(
-                "랙 중심선 정렬 재시도 실패, 현재 위치에서 정지: "
+                f"랙 중심선 정렬 {max_alignment_retries}회 재시도 실패, "
+                "현재 위치에서 정지: "
                 f"x_error={dx:.3f}m, "
                 f"yaw_error={math.degrees(yaw_error):.1f}deg"
             )
@@ -1922,7 +1984,7 @@ class ForkLiftNode(Node):
             straighten_ratio = clamp((2.5 - dy) / 1.5, 0.0, 1.0)
             lookahead = 1.5 + 10.5 * straighten_ratio
         else:
-            # 단 한 번의 재진입에서는 마지막 1.0m까지 X 보정을 유지한다.
+            # 재진입에서는 마지막 1.0m까지 X 보정을 유지한다.
             # 이후에도 미리보기를 8m까지만 늘려 조향을 완전히 약화시키지
             # 않으면서 차체 각도를 3° 안으로 함께 수렴시킨다.
             straighten_ratio = clamp((1.0 - dy) / 0.7, 0.0, 1.0)
@@ -2048,7 +2110,7 @@ class ForkLiftNode(Node):
 
     def _run_iw_axis_gate(self, step: Step) -> bool:
         """공통 대기 자세를 검사하고 최대 다섯 번의 3점 보정을 예약한다."""
-        max_attempts = 5
+        max_attempts = self._max_reentry_attempts
         dx = step.x - self._x
         dy = step.y - self._y
         yaw_error = wrap_angle(step.yaw - self._yaw)
@@ -2213,6 +2275,7 @@ class ForkLiftNode(Node):
                 f"Pallet_{step.pallet_id:02d} 토마토 적재 팔레트 창고 복귀 완료"
             )
         elif step.label == "loaded_on_amr":
+            self._pallet_on_iw_pub.publish(Int32(data=step.pallet_id))
             self._publish_status(
                 f"Pallet_{step.pallet_id:02d} 빈 팔레트 AMR 상차 완료"
             )

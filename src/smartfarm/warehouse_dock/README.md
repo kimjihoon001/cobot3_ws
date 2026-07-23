@@ -3,9 +3,55 @@
 ForkliftB가 창고의 빈 팔레트 6개를 순서대로 AMR에 공급하고, 토마토가 채워져
 돌아온 팔레트를 원래 슬롯에 되돌리는 ROS 2 패키지다.
 
-## 현재 작업 순서
+## 순환 운용: 상차 노드 + 회수 노드
 
-현재 자동 시작 시험은 다음 순서로 `Pallet_00`을 IW에 상차한 뒤 대기한다.
+순환 운용에서는 두 ROS 노드가 역할을 나눈다.
+
+- `fork_lift_node`: 최초 빈 `Pallet_n`을 랙에서 꺼내 IW에 상차
+- `fork_lift_return_node`: IW 귀환 신호를 받으면 `Pallet_n`을 n번 슬롯에
+  복귀하고, 다음 `Pallet_(n+1)%6`을 IW에 상차한 뒤 다음 귀환을 기다림
+
+두 노드는 같은 지게차를 제어하지만 동시에 명령하지 않는다. 상차 노드는 최초
+상차 큐가 끝나면 명령 발행을 멈추고, 회수 노드는 IW 도킹 이벤트를 받은 동안만
+명령을 발행한다. 기존 한 노드 안의 Pallet_00→01 시험을 다시 사용할 때만
+`fork_lift_node`에 `-p enable_internal_return_cycle:=true`를 지정한다.
+
+랙 직선 삽입 전 기본 정렬 조건은 X축 오차 ±4cm, 진입각 오차 ±3°이며,
+조건을 만족하지 못하면 2.5m 후진 후 재진입한다. 랙 재진입과 IW 축 보정은
+각각 최대 5회로 제한한다. 관련 파라미터는 `rack_entry_x_tolerance`,
+`rack_entry_yaw_tolerance`, `max_reentry_attempts`다.
+
+```bash
+# 터미널 1: Isaac Sim
+cd ~/cobot3_ws/isaacpjt
+isaac_python main.py --iw --fork
+
+# 터미널 2: 최초 상차 작업. 실행 후 0~5번 중 시작 팔레트를 입력한다.
+ros2 run warehouse_dock fork_lift_node
+
+# 터미널 3: 순환 회수 작업
+ros2 run warehouse_dock fork_lift_return_node
+```
+
+최초 상차가 끝나면 `/forklift/pallet_on_iw`에 팔레트 번호가 전달된다. IW가
+상하차 위치로 돌아왔을 때 실제 연동은 `/handoff/tray_ready`, 단독 시험은 아래
+Bool 토픽으로 회수 사이클을 시작한다.
+
+```bash
+ros2 topic pub --once /forklift/amr_docked std_msgs/msg/Bool "{data: true}"
+```
+
+회수 노드를 최초 상차 완료 후 늦게 실행해 번호 이벤트를 놓쳤다면 시작 번호를
+직접 지정한다.
+
+```bash
+ros2 run warehouse_dock fork_lift_return_node --ros-args -p initial_pallet:=2
+```
+
+## 기존 단일 노드 Pallet_00→01 시험
+
+`enable_internal_return_cycle:=true`로 실행하는 기존 시험은 다음 순서로
+`Pallet_00`을 IW에 상차한 뒤 대기한다.
 
 1. 대기 위치에서 포크를 실측 구멍 중심보다 6cm 낮은 `0.12407m`로 조정
 2. 포크 높이를 유지한 채 1.5m 후진
@@ -128,7 +174,7 @@ AMR 노드가 아직 없을 때는 시험용 도킹 신호를 한 번씩 보낼 
 ros2 topic pub --once /forklift/amr_docked std_msgs/msg/Bool "{data: true}"
 ```
 
-- `auto_start=true` 기본값에서 첫 번째 상차는 연결 후 2초 뒤 자동 시작
+- `auto_start:=true`로 지정하면 첫 번째 상차는 연결 후 2초 뒤 자동 시작
 - 첫 상차 완료 후 한 번 보낸 신호: IW의 `Pallet_00` 회수·0번 복귀 후
   `Pallet_01`을 비어 있는 IW에 상차
 - `Pallet_01` 상차 완료 후 추가 신호는 무시하고 대기 위치를 유지
