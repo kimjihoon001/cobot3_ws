@@ -62,6 +62,16 @@ class NavHarvestTestNode(Node):
             String, "/harvest_test/status", latched)
         self._isaac_command_pub = self.create_publisher(
             String, str(self.get_parameter("isaac_command_topic").value), 10)
+        # IW 연동(2026-07-23, 1차·단순): iw 는 Isaac 실좌표로 MM 뒤를 텔레포트 추종하고,
+        # 만재(N=1) 시 지게차로 보낸다. iw 도착 보고를 받으면 지게차 하역을 트리거한다.
+        self._iw_mission_pub = self.create_publisher(String, "/iw/mission", latched)
+        self._forklift_dock_pub = self.create_publisher(
+            Bool, "/forklift/amr_docked", 10)
+        self.create_subscription(String, "/iw/status",
+                                 self._iw_status_callback, latched)
+        self._iw_full = False
+        self._placed = False
+        self._iw_mission_pub.publish(String(data="FOLLOW"))   # 시작=추종
         self._buffer = Buffer()
         self._listener = TransformListener(self._buffer, self)
         self._nav_client = ActionClient(
@@ -239,9 +249,18 @@ class NavHarvestTestNode(Node):
             self._publish_mock_basket()
             self._basket_sent = True
             self._publish_status("MOCK_BASKET_SENT")
+        elif state in {"BASKET_APPROACH", "BASKET_PLACE", "PLACE_RELEASING"}:
+            self._placed = True                   # iw 데크에 놓기 진행 중
+            self._publish_status(f"HARVEST_{state}")
         elif state == "HOME_READY":
             self._publish_enable(False)
             self._publish_status("CYCLE_COMPLETE_HOME_READY")
+            # 1차·단순(N=1): 토마토 1개를 iw 데크에 놓으면 만재 → iw 를 지게차로.
+            if self._placed and not self._iw_full:
+                self._iw_full = True
+                self._iw_mission_pub.publish(String(data="FORKLIFT"))
+                self._publish_status("IW_FULL_TO_FORKLIFT")
+                self.get_logger().info("적재 1개(만재) → iw 지게차 이동 지시")
         elif state == "RETRY_VISION":
             # 실패 후 홈에 도달한 경우에는 원샷 게이트를 끄지 않는다. 홈 카메라의
             # 새로운 YOLO 프레임을 받도록 탐색 타이머와 수확 게이트를 다시 연다.
@@ -360,8 +379,21 @@ class NavHarvestTestNode(Node):
         pose.pose.orientation.w = 1.0
         self._basket_pub.publish(pose)
 
+    def _iw_status_callback(self, msg: String) -> None:
+        """iw 가 지게차에 도착하면 하역을 트리거한다(/forklift/amr_docked True)."""
+        if msg.data.strip().upper() == "ARRIVED_FORKLIFT":
+            self._forklift_dock_pub.publish(Bool(data=True))
+            self._publish_status("IW_DOCKED_FORKLIFT_TRIGGERED")
+            self.get_logger().info(
+                "iw 지게차 도착 → /forklift/amr_docked True (하역 트리거)")
+
     def _watchdog(self) -> None:
         now = self.get_clock().now().nanoseconds
+        # iw 데크(=놓을 위치) pose 를 계속 발행해 항상 최신으로 둔다. home_after_attempt=true
+        # 라도 _basket_place 가 미리 세팅돼 파지 후 홈으로 안 가고 iw 에 놓는다. iw 가 만재로
+        # 지게차로 떠난 뒤에는 발행을 멈춰(놓을 데 없음) 홈 복귀하게 한다.
+        if not self._iw_full:
+            self._publish_mock_basket()
         if self._waiting_home:
             retry = float(self.get_parameter("home_command_retry_sec").value)
             if (not self._last_home_command_ns

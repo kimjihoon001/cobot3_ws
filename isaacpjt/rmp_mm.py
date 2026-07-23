@@ -282,6 +282,14 @@ class RmpMMDriver(Driver):
                         home = cmd["rmp_home"]
                         if isinstance(home, dict):
                             self._rmpflow.go_home(int(home.get("id", 0)))
+                    if "rmp_preplace" in cmd and self._rmpflow is not None:
+                        # 파지 후 플레이스 전 자세(joint_3·5 들기).
+                        self._grasp_status = {}
+                        self._follow_status = {}
+                        self._fk_status = {}
+                        pp = cmd["rmp_preplace"]
+                        if isinstance(pp, dict):
+                            self._rmpflow.go_preplace(int(pp.get("id", 0)))
                     if "fk_check" in cmd and self._rmpflow is not None:
                         request = cmd["fk_check"]
                         check_id = (int(request.get("id", 0))
@@ -490,6 +498,10 @@ class RmpMMDriver(Driver):
                     d = float(np.dot(center - tcp, u))   # 축방향 전진거리(표면 여유)
                     desired_center = tcp + u * max(d, 0.0)  # 옆오차 제거, 전진거리 유지
                     shift = desired_center - center
+        # follow-check 기준 오프셋은 스냅 **후** 정착할 값이어야 한다. 스냅 전 값으로 두면
+        # 웰드가 과실을 옮긴 만큼 delta 가 커져 검증 실패 → 홈복귀(안 들림). 정착 offset =
+        # (스냅된 중심) − tcp.
+        self._grasp_tcp_offset = (center + shift) - tcp
         origin_world = np.asarray(m_fruit.ExtractTranslation(), dtype=float) + shift
         local_pos0 = rigid_grip.GetInverse().Transform(
             Gf.Vec3d(float(origin_world[0]), float(origin_world[1]),

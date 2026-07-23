@@ -19,6 +19,12 @@ import math
 import numpy as np
 from isaacsim.core.utils.types import ArticulationAction
 
+# 파지(흡착) 후 플레이스 전 자세(2026-07-23 사용자): 홈에서 joint_3·joint_5 만 조절해
+# 그리퍼를 지면과 수직으로 세우고 그리퍼 길이 절반쯤 들어올린다.
+# [4] 임의 — 시뮬에서 맞춰야 하는 값(홈: joint_3=60°, joint_5=60°). 절대각(deg).
+PREPLACE_JOINT3_DEG = 80.0   # 홈 60→40: 전완을 펴 TCP를 살짝 들어올린다(그리퍼 길이 절반쯤)
+PREPLACE_JOINT5_DEG = 120.0   # 그리퍼(link_6 +Z)를 지면과 수직(하향)으로 세운다
+
 
 class LegacyIkTargetController:
     """레거시 m0617 Cartesian waypoint + Lula IK 관절 위치 제어기.
@@ -563,6 +569,26 @@ class LegacyIkTargetController:
         self._solution = self._home_positions.copy()
         self._command_q = self._arm_q().copy()
 
+    def go_preplace(self, target_id: int = 0) -> None:
+        """파지 후 플레이스 전 자세 — 홈에서 joint_3·joint_5 만 바꿔 그리퍼를 지면과
+        수직으로 세우고 살짝 들어올린다. 관절공간(JOINT_ADJUST)으로 이동한다."""
+        target = self._home_positions.copy()
+        target[2] = math.radians(PREPLACE_JOINT3_DEG)   # joint_3
+        target[4] = math.radians(PREPLACE_JOINT5_DEG)   # joint_5
+        target = np.clip(target, self._joint_lower, self._joint_upper)
+        self._target_world = None
+        self._target_tcp_world = None
+        self._target_base = None
+        self._target_orientation_world = None
+        self._target_id = int(target_id)
+        self._phase = "PREPLACE"
+        self._mode = "JOINT_ADJUST"
+        self._motion_active = True
+        self._solution = target
+        self._command_q = self._arm_q().copy()
+        print(f"[PrePlace] joint_3={PREPLACE_JOINT3_DEG:.0f}° "
+              f"joint_5={PREPLACE_JOINT5_DEG:.0f}° 로 파지물 들기 id={target_id}")
+
     def _watch_divergence(self, distance: float) -> None:
         if (not self._motion_active
                 or self._phase not in {"PREGRASP", "GRASP"}):
@@ -892,25 +918,9 @@ class RmpFlowTargetController(LegacyIkTargetController):
             joint_indices=self._arm_dof))
 
     def _approach_max_step(self) -> float:
-        """TCP→과실 거리 기반 프레임당 관절 스텝(rad). 멀면 빠르게, 6cm 안에서 감속.
-        사용자 요청(2026-07-23)으로 원 기준(0.030/0.003)의 4배까지 올렸다 — 근/원거리 모두
-        추가로 2배(→0.120/0.012)."""
-        far_step, near_step, slow_radius = 0.120, 0.012, 0.06
-        distance = None
-        if self._target_tcp_world is not None and self._tool_tcp_prim:
-            from pxr import UsdGeom
-            tcp_prim = self._stage.GetPrimAtPath(self._tool_tcp_prim)
-            if tcp_prim.IsValid():
-                actual = np.asarray(
-                    UsdGeom.XformCache().GetLocalToWorldTransform(
-                        tcp_prim).ExtractTranslation(), dtype=float)
-                d = float(np.linalg.norm(self._target_tcp_world - actual))
-                distance = d if np.isfinite(d) else None
-        if distance is None or distance >= slow_radius:
-            return far_step
-        # 6cm→far_step, 0cm→near_step 선형 감속.
-        frac = max(0.0, distance / slow_radius)
-        return near_step + (far_step - near_step) * frac
+        """프레임당 관절 스텝(rad). 사용자 요청(2026-07-23): **거리 상관없이** 균일한
+        접근 속도. 흡착 그리퍼용으로 추가 2.5배 → 0.075→0.1875 로 고정(근접 감속 없음)."""
+        return 0.1875
 
     def reset(self) -> None:
         super().reset()

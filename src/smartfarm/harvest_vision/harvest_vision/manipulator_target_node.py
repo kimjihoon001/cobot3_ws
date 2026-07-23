@@ -20,7 +20,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 
 ACTIVE_SEQUENCE_STATES = {
     "PREGRASP", "GRASP", "GRASP_YAW_CORRECT", "GRIPPER_CLOSING", "GRASP_VERIFY",
-    "VERIFY_RETRACT", "GRASP_FOLLOW_CHECK", "RETRACT",
+    "VERIFY_RETRACT", "GRASP_FOLLOW_CHECK", "RETRACT", "PRE_PLACE",
     "WAIT_BASKET", "BASKET_APPROACH", "BASKET_PLACE", "PLACE_RELEASING",
     "GO_HOME",
     "NAV_REPOSITION_REQUIRED",
@@ -519,10 +519,13 @@ class ManipulatorTargetNode(Node):
                 return
             if bool(status.get("ok", False)):
                 self.get_logger().info(
-                    "GRASP TCP 근접 + 그리퍼 닫힘; "
-                    "pedicel FixedJoint 해제 "
-                    f"{float(status.get('d', 999.0)):.3f}m")
-                self._begin_verify_retract()
+                    "GRASP TCP 근접 + 흡착; pedicel FixedJoint 해제 "
+                    f"{float(status.get('d', 999.0)):.3f}m — 흡착 웰드라 파지검증 생략, "
+                    "바로 PRE_PLACE")
+                # 흡착은 웰드로 결정적으로 붙어있어 후퇴-동반이동 검증(verify_retract+
+                # follow_check)이 불필요하다. 그 카트지안 후퇴는 폐루프 보정이 없어 도달
+                # 판정에 못 들어가 멈춘다 → 파지 직후 바로 들기(PRE_PLACE)로 간다.
+                self._begin_preplace()
             else:
                 self._deadline_ns = 0
                 self._abort_to_home(
@@ -538,7 +541,7 @@ class ManipulatorTargetNode(Node):
                 self.get_logger().info(
                     "파지 동반 이동 검증 성공: 상대거리 변화 "
                     f"{float(status.get('delta', 999.0)):.3f}m")
-                self._send_rmp_goal(self._pregrasp_target, "RETRACT")
+                self._begin_preplace()
             else:
                 self._deadline_ns = 0
                 self._abort_to_home(
@@ -620,7 +623,7 @@ class ManipulatorTargetNode(Node):
                         "grasp_follow_max_delta_m").value),
                 }
             })))
-        elif self._state == "RETRACT":
+        elif self._state in ("RETRACT", "PRE_PLACE"):
             if self._basket_place is not None:
                 self._start_place()
             elif bool(self.get_parameter("home_after_attempt").value):
@@ -694,6 +697,19 @@ class ManipulatorTargetNode(Node):
         approach[2] += float(
             self.get_parameter("basket_approach_height_m").value)
         self._send_rmp_goal(approach, "BASKET_APPROACH")
+
+    def _begin_preplace(self) -> None:
+        """파지(흡착) 후 플레이스 전 자세 — Isaac 이 joint_3·5 로 파지물을 살짝 든다."""
+        self._sequence_id += 1
+        self._pending_id = self._sequence_id
+        self._transition("PRE_PLACE")
+        self._deadline_ns = (
+            self.get_clock().now().nanoseconds
+            + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+        )
+        self._isaac_command_pub.publish(String(data=json.dumps({
+            "rmp_preplace": {"id": self._pending_id},
+        })))
 
     def _send_home(self, retry_after_home: bool = False) -> None:
         self._basket_place = None
