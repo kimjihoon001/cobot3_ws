@@ -7,7 +7,7 @@ import time
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import ManageLifecycleNodes
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
@@ -17,6 +17,8 @@ from rclpy.time import Time
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformException, TransformListener
+
+from iwhub_control import lanes
 
 
 def _yaw_from_quaternion(q) -> float:
@@ -34,6 +36,9 @@ class MissionNavNode(Node):
         self.declare_parameter(
             "navigate_to_pose_action", "/iwhub_0/navigate_to_pose")
         self.declare_parameter(
+            "navigate_through_poses_action",
+            "/iwhub_0/navigate_through_poses")
+        self.declare_parameter(
             "lifecycle_manager_service",
             "/iwhub_0/lifecycle_manager_navigation/manage_nodes",
         )
@@ -44,10 +49,14 @@ class MissionNavNode(Node):
         self.declare_parameter("mm_base_frame", "base_link")
         self.declare_parameter("iw_odom_topic", "/iwhub_0/odom")
         self.declare_parameter("iw_tf_topic", "/iwhub_0/tf")
-        self.declare_parameter("follow_offset_x", 1.6955)
+        self.declare_parameter("follow_offset_x", 2.3)
         self.declare_parameter("follow_offset_y", 0.0)
         self.declare_parameter("follow_update_distance", 0.30)
         self.declare_parameter("follow_update_yaw", math.radians(30.0))
+        # 갭 게이팅(히스테리시스): min_gap 이하로 붙으면 정지(active goal cancel), resume_gap
+        # 이상으로 벌어지면 재개. follow_offset_x(2.3) 보다 작게 둬야 정상 추종점이 안 걸린다.
+        self.declare_parameter("follow_min_gap", 1.8)
+        self.declare_parameter("follow_resume_gap", 2.1)
         self.declare_parameter("dock_x", 0.0)
         self.declare_parameter("dock_y", 10.84885)
         self.declare_parameter("dock_yaw", math.pi / 2.0)
@@ -77,6 +86,10 @@ class MissionNavNode(Node):
             self, NavigateToPose,
             str(self.get_parameter("navigate_to_pose_action").value),
         )
+        self._through_client = ActionClient(
+            self, NavigateThroughPoses,
+            str(self.get_parameter("navigate_through_poses_action").value),
+        )
         self._lifecycle_client = self.create_client(
             ManageLifecycleNodes,
             str(self.get_parameter("lifecycle_manager_service").value),
@@ -90,6 +103,9 @@ class MissionNavNode(Node):
         self._last_target: tuple[float, float, float] | None = None
         self._request_pending = False
         self._dock_goal_sent = False
+        self._follow_held = False          # 갭 게이팅 히스테리시스 상태(hold 중?)
+        self._follow_goal_handle = None    # active FOLLOW goal handle (cancel 용)
+        self._goal_gen = 0                 # goal 세대 ID — 취소/교체된 goal의 늦은 콜백 무시
         self._started_at = time.monotonic()
         self._last_startup_attempt = 0.0
         self._startup_pending = False
@@ -211,19 +227,133 @@ class MissionNavNode(Node):
             )
             return
         if self._mission == "FORKLIFT":
+            # 도크로 레인 경로 주행(단일 goal 아님) — 통로 중심선만 타 배드 회피 보장.
             if self._dock_goal_sent:
                 return
-            target = (
-                float(self.get_parameter("dock_x").value),
-                float(self.get_parameter("dock_y").value),
-                float(self.get_parameter("dock_yaw").value),
-            )
-            self._dock_goal_sent = True
-        else:
-            target = self._follow_target()
-            if target is None or not self._target_changed(target):
+            if self._iw_pose is None:
+                return   # 레인 경로 계획에 현재 map pose 필요
+            if not self._through_client.server_is_ready():
+                self.get_logger().warning(
+                    "IW NavigateThroughPoses 서버 대기 중",
+                    throttle_duration_sec=5.0)
                 return
+            self._send_dock_route()
+            self._dock_goal_sent = True
+            return
+        # FOLLOW
+        if not self._follow_gap_ok():
+            return
+        target = self._follow_target()
+        if target is None or not self._target_changed(target):
+            return
         self._send_goal(target, self._mission)
+
+    def _mm_map_xy(self) -> tuple[float, float] | None:
+        """MM base_link 의 map 좌표 (x, y). TF 없으면 None."""
+        try:
+            t = self._buffer.lookup_transform(
+                str(self.get_parameter("mm_map_frame").value),
+                str(self.get_parameter("mm_base_frame").value),
+                Time(),
+            ).transform
+        except TransformException:
+            return None
+        return float(t.translation.x), float(t.translation.y)
+
+    def _follow_gap_ok(self) -> bool:
+        """MM↔IW 실거리 히스테리시스. hold 진입 시 active goal을 실제로 취소한다
+        (새 goal 미전송만으론 진행 중 goal이 계속 접근하므로). True=추종 진행 가능."""
+        if self._iw_pose is None:
+            return False
+        mm_xy = self._mm_map_xy()
+        if mm_xy is None:
+            return False
+        gap = math.hypot(mm_xy[0] - self._iw_pose[0],
+                         mm_xy[1] - self._iw_pose[1])
+        stop_gap = float(self.get_parameter("follow_min_gap").value)
+        resume_gap = float(self.get_parameter("follow_resume_gap").value)
+        if not self._follow_held and gap < stop_gap:
+            self._follow_held = True
+            self._cancel_follow_goal()
+            self.get_logger().info(
+                f"MM 근접 {gap:.2f}m<{stop_gap:.2f} — 추종 정지(goal cancel)")
+        elif self._follow_held and gap > resume_gap:
+            self._follow_held = False
+            self.get_logger().info(
+                f"갭 회복 {gap:.2f}m>{resume_gap:.2f} — 추종 재개")
+        return not self._follow_held
+
+    def _cancel_follow_goal(self) -> None:
+        """진행 중 FOLLOW goal을 취소하고, 늦은 콜백이 상태를 덮지 않게 세대를 올린다."""
+        if self._follow_goal_handle is not None:
+            try:
+                self._follow_goal_handle.cancel_goal_async()
+            except Exception as exc:
+                self.get_logger().warning(f"FOLLOW goal cancel 실패: {exc}")
+            self._follow_goal_handle = None
+        self._last_target = None
+        self._goal_gen += 1
+
+    def _make_pose(self, x: float, y: float, yaw: float) -> PoseStamped:
+        pose = PoseStamped()
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.header.frame_id = str(self.get_parameter("goal_frame").value)
+        pose.pose.position.x = float(x)
+        pose.pose.position.y = float(y)
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        return pose
+
+    def _send_dock_route(self) -> None:
+        """현재 위치→지게차 도크까지 통로 레인 경로를 NavigateThroughPoses로 보낸다."""
+        iw_x, iw_y, _ = self._iw_pose
+        route = lanes.dock_route(iw_x, iw_y)
+        goal = NavigateThroughPoses.Goal()
+        goal.poses = [self._make_pose(x, y, yaw) for (x, y, yaw) in route]
+        self._request_pending = True
+        self._goal_gen += 1
+        gen = self._goal_gen
+        self.get_logger().info(
+            f"IW 도크 레인 경로 {len(route)}웨이포인트 "
+            f"(시작 {iw_x:.1f},{iw_y:.1f} → 도크 "
+            f"{lanes.DOCK[0]:.1f},{lanes.DOCK[1]:.1f})")
+        future = self._through_client.send_goal_async(goal)
+        future.add_done_callback(
+            lambda result, g=gen: self._through_response(result, g))
+
+    def _through_response(self, future, gen) -> None:
+        self._request_pending = False
+        if gen != self._goal_gen:
+            return
+        try:
+            handle = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"IW 도크 경로 goal 전송 실패: {exc}")
+            self._dock_goal_sent = False
+            return
+        if not handle.accepted:
+            self.get_logger().warning("IW 도크 경로 goal 거부")
+            self._dock_goal_sent = False
+            return
+        result = handle.get_result_async()
+        result.add_done_callback(
+            lambda done, g=gen: self._through_result(done, g))
+
+    def _through_result(self, future, gen) -> None:
+        if gen != self._goal_gen:
+            return
+        try:
+            status = future.result().status
+        except Exception as exc:
+            self.get_logger().error(f"IW 도크 경로 결과 수신 실패: {exc}")
+            return
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self._status_pub.publish(String(data="ARRIVED_FORKLIFT"))
+            self.get_logger().info(
+                "IW 지게차 도킹 완료(레인 경로) → /iw/status ARRIVED_FORKLIFT")
+        elif status != GoalStatus.STATUS_CANCELED:
+            self.get_logger().warning(f"IW 도크 경로 실패(status={status})")
+            self._dock_goal_sent = False
 
     def _recover_nav2(self) -> None:
         """IW navigation lifecycle이 안 뜨면 STARTUP을 반복 요청한다."""
@@ -283,14 +413,18 @@ class MissionNavNode(Node):
         goal = NavigateToPose.Goal()
         goal.pose = pose
         self._request_pending = True
+        self._goal_gen += 1
+        gen = self._goal_gen
         future = self._client.send_goal_async(goal)
         future.add_done_callback(
-            lambda result, sent_mission=mission, sent_target=target:
-            self._goal_response(result, sent_mission, sent_target)
+            lambda result, m=mission, t=target, g=gen:
+            self._goal_response(result, m, t, g)
         )
 
-    def _goal_response(self, future, mission, target) -> None:
+    def _goal_response(self, future, mission, target, gen) -> None:
         self._request_pending = False
+        if gen != self._goal_gen:
+            return   # 취소/교체된 goal의 늦은 응답 — 무시
         try:
             handle = future.result()
         except Exception as exc:
@@ -304,16 +438,22 @@ class MissionNavNode(Node):
                 self._dock_goal_sent = False
             return
         self._last_target = target
+        if mission == "FOLLOW":
+            self._follow_goal_handle = handle
         self.get_logger().info(
             f"IW Nav2 {mission} goal: "
             f"({target[0]:.2f},{target[1]:.2f},{math.degrees(target[2]):.1f}°)")
         result = handle.get_result_async()
         result.add_done_callback(
-            lambda done, sent_mission=mission:
-            self._goal_result(done, sent_mission)
+            lambda done, m=mission, g=gen:
+            self._goal_result(done, m, g)
         )
 
-    def _goal_result(self, future, mission: str) -> None:
+    def _goal_result(self, future, mission: str, gen: int) -> None:
+        if gen != self._goal_gen:
+            return   # 취소/교체된 goal의 늦은 결과 — 무시
+        if mission == "FOLLOW":
+            self._follow_goal_handle = None
         try:
             status = future.result().status
         except Exception as exc:

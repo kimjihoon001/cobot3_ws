@@ -102,9 +102,13 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
-                "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.05
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "ObstacleFootprint",
+                "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      # 장애물 회피(2026-07-24, codex 검토 반영). BaseObstacle=중심셀 비용 그라디언트(원형 가정).
+      BaseObstacle.scale: 0.5
+      # ★ObstacleFootprint = 실제 긴 IW footprint(1.43×0.75)를 코스트맵에 대고 검사 →
+      #   뒤꽁무니가 배드를 클립하는 궤적까지 무효화. 충돌 궤적은 scale 무관하게 배제됨.
+      ObstacleFootprint.scale: 1.0
       PathAlign.scale: 24.0
       PathAlign.forward_point_distance: 0.35
       GoalAlign.scale: 18.0
@@ -166,10 +170,10 @@ local_costmap:
           raytrace_max_range: 25.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 실제 footprint 충돌 검사는 유지하고, 그 바깥의 선제 정지 띠만 1cm로 최소화한다.
-        # 전역 코스트맵의 5cm 회피 여유는 그대로라 경로 계획은 장애물에 붙지 않는다.
-        cost_scaling_factor: 30.0
-        inflation_radius: 0.01
+        # 로컬 안전 여유 띠(2026-07-24: 1cm→20cm). 그라디언트라 조기정지 아님 —
+        # 컨트롤러가 배드 가장자리를 피하도록 유도하되 통로 통과는 막지 않는다.
+        cost_scaling_factor: 6.0
+        inflation_radius: 0.20
 
 global_costmap:
   global_costmap:
@@ -212,8 +216,10 @@ global_costmap:
           raytrace_max_range: 25.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 12.0
-        inflation_radius: 0.05
+        # 배드 주변 비용 그라디언트로 계획 경로를 통로 중앙으로 민다(2026-07-24, 안정성).
+        # 2.9m 통로에 0.45m → 자유회랑 2.0m, iw 0.75m 여유충분. 배드 충돌 회피의 핵심.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.45
 
 planner_server:
   ros__parameters:
