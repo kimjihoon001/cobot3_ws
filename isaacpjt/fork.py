@@ -31,9 +31,10 @@ class ForkDriver(Driver):
     ns = "forklift_0"
     root = "/World/Forklift"
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, iw_driver=None):
         super().__init__()
         self._fk = TransporterAMR(cfg.robots, cfg.warehouse)
+        self._iw_driver = iw_driver
         self._controller = None
         self._stage = None
         self._poller = None
@@ -41,6 +42,8 @@ class ForkDriver(Driver):
         self._pose_ready_logged = False
         self._last_motion = None
         self._pallet_attached = False
+        self._deck_pallet_attached = False
+        self._iw_dock_locked = False
         self._pallet_id = 0
         self._physics_dt = 1.0 / 60.0
 
@@ -75,6 +78,8 @@ class ForkDriver(Driver):
         if cmd:
             names, positions, velocities = cmd
             pallet_attach_request = None
+            deck_attach_request = None
+            dock_lock_request = None
             pallet_id_request = self._pallet_id
             for name, value in zip(names, positions):
                 if not np.isfinite(value):
@@ -86,15 +91,33 @@ class ForkDriver(Driver):
                     self._controller.set_steer(float(value))
                 elif name == "pallet_attach":
                     pallet_attach_request = float(value) >= 0.5
+                elif name == "pallet_deck_attach":
+                    deck_attach_request = float(value) >= 0.5
+                elif name == "iw_dock_lock":
+                    dock_lock_request = float(value) >= 0.5
                 elif name == "pallet_id":
                     pallet_id_request = max(0, min(5, int(round(float(value)))))
             for name, value in zip(names, velocities):
                 if name == "back_wheel_drive" and np.isfinite(value):
                     # 스파이크에서 확인된 ForkliftB 구동 부호: 음수가 전진이다.
                     self._controller.set_drive(-float(value))
-            if pallet_attach_request is not None:
-                self._set_pallet_attached(
-                    pallet_attach_request,
+            if dock_lock_request is not None:
+                self._set_iw_dock_locked(dock_lock_request)
+            if (
+                pallet_attach_request is not None
+                or deck_attach_request is not None
+            ):
+                self._set_pallet_owner(
+                    fork_requested=(
+                        self._pallet_attached
+                        if pallet_attach_request is None
+                        else pallet_attach_request
+                    ),
+                    deck_requested=(
+                        self._deck_pallet_attached
+                        if deck_attach_request is None
+                        else deck_attach_request
+                    ),
                     pallet_id=pallet_id_request,
                 )
             motion = (round(self._controller._drive_vel, 2),
@@ -198,3 +221,84 @@ class ForkDriver(Driver):
             self._stage.RemovePrim(PALLET_CARRY_JOINT)
             print(f"[Forklift Coupler] 연결 해제: {attached_path}")
         self._pallet_attached = False
+
+    def _set_iw_dock_locked(self, requested: bool) -> None:
+        """Lock/snap the IW for handoff, or release it for navigation."""
+        if requested == self._iw_dock_locked:
+            # A lock request can be cancelled while the dock controller is in
+            # its multi-frame stop/snap phase. Forward False so that pending
+            # native-physics mutations are discarded as well.
+            if not requested and self._iw_driver is not None:
+                self._iw_driver.set_warehouse_dock_locked(False)
+            return
+        if self._iw_driver is None:
+            print("[IW Dock] --iw 없이 도킹 고정 명령을 처리할 수 없습니다")
+            return
+        if self._iw_driver.set_warehouse_dock_locked(requested):
+            self._iw_dock_locked = requested
+
+    def _set_pallet_owner(
+        self,
+        *,
+        fork_requested: bool,
+        deck_requested: bool,
+        pallet_id: int,
+    ) -> None:
+        """Switch ownership without a doubly-constrained physics step."""
+        if fork_requested and deck_requested:
+            print(
+                "[Pallet Handoff] 포크와 IW 데크를 동시에 요청해 명령을 거부합니다"
+            )
+            return
+
+        if deck_requested:
+            if self._iw_driver is None:
+                print("[Pallet Handoff] --iw 없이 데크 연결을 만들 수 없습니다")
+                return
+            # Joint 제거와 새 Joint 생성을 같은 physics frame에 하지 않는다.
+            # 반복 수신되는 동일 ROS 명령이 다음 frame에 deck Joint를 만든다.
+            fork_was_attached = self._pallet_attached
+            self._set_pallet_attached(False, pallet_id=pallet_id)
+            if fork_was_attached:
+                self._deck_pallet_attached = False
+                print(
+                    "[Pallet Handoff] 포크 Joint 해제 완료 — "
+                    "다음 물리 프레임에 IW Deck Joint 생성"
+                )
+                return
+            if self._iw_driver.set_warehouse_pallet_attached(True, pallet_id):
+                self._deck_pallet_attached = True
+                self._pallet_id = pallet_id
+            return
+
+        if fork_requested:
+            if self._iw_driver is not None:
+                deck_was_attached = self._deck_pallet_attached
+                if not self._iw_driver.set_warehouse_pallet_attached(
+                    False,
+                    pallet_id,
+                ):
+                    print("[Pallet Handoff] IW 데크 연결 해제에 실패했습니다")
+                    return
+                if deck_was_attached:
+                    self._deck_pallet_attached = False
+                    print(
+                        "[Pallet Handoff] IW Deck Joint 해제 완료 — "
+                        "다음 물리 프레임에 포크 Joint 생성"
+                    )
+                    return
+            self._deck_pallet_attached = False
+            self._set_pallet_attached(True, pallet_id=pallet_id)
+            return
+
+        fork_was_attached = self._pallet_attached
+        self._set_pallet_attached(False, pallet_id=pallet_id)
+        if fork_was_attached:
+            print(
+                "[Pallet Handoff] 포크 Joint 해제 완료 — "
+                "다음 물리 프레임에 Deck Joint 상태 정리"
+            )
+            return
+        if self._iw_driver is not None:
+            self._iw_driver.set_warehouse_pallet_attached(False, pallet_id)
+        self._deck_pallet_attached = False

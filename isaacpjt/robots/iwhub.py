@@ -14,13 +14,15 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import random
 
 from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from pjt_config.settings import RobotConfig
-from pjt_utils.xform import set_pose, set_scale, set_translate
+from pjt_utils.deck_geometry import PALLET_SUPPORT_CLEARANCE
+from pjt_utils.xform import set_pose, set_scale
 from robots import assets
 
 
@@ -38,6 +40,18 @@ class IwHub:
     DRIVE_MAX_FORCE = 5000.0
     WHEEL_STATIC_FRICTION = 1.2
     WHEEL_DYNAMIC_FRICTION = 1.0
+    # position[2]는 에셋 루트 높이가 아니라 "주행 바닥 높이"로 취급한다.
+    # iw_hub.usd 원점이 차체 중앙 근처라 루트를 바닥 높이에 그대로 놓으면 하부가
+    # 약 반 높이만큼 바닥에 박힌다. 로컬 bbox 최저점을 바닥보다 5mm 위에 놓고
+    # reset 뒤 중력으로 짧게 정착시켜 초기 관통/반발을 없앤다.
+    GROUND_CLEARANCE = 0.005
+    # 정지 중 접촉 솔버가 만드는 미세 병진·회전을 빨리 안정화한다. 구동 중에는
+    # wheel drive가 아티큘레이션을 깨우므로 주행 응답을 막지 않는다.
+    SLEEP_THRESHOLD = 0.01
+    STABILIZATION_THRESHOLD = 0.002
+    SOLVER_POSITION_ITERATIONS = 16
+    SOLVER_VELOCITY_ITERATIONS = 4
+    MAX_DEPENETRATION_VELOCITY = 0.5
 
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
@@ -57,20 +71,151 @@ class IwHub:
         url = assets.resolve(self._cfg.assets.iwhub, "운반 AMR(iw.hub)")
         log(f"[IwHub] 에셋 {url}")
         add_reference_to_stage(url, root)
+        grounded_position = self._grounded_position(
+            stage, root, position, log=log
+        )
         # 참조 prim 은 자체 xformOp 을 가질 수 있다 → 기존 op 재사용(§8).
         # yaw=180°이면 긴 후방 오버행이 MM 반대쪽을 향해 추종 회전 시 충돌하지 않는다.
         yaw = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), yaw_deg).GetQuat()
         set_pose(
-            stage.GetPrimAtPath(root), position,
+            stage.GetPrimAtPath(root), grounded_position,
             Gf.Quatd(yaw.GetReal(), yaw.GetImaginary()),
         )
         self._root = root
         self._configure_drive_torque(stage, log)
+        self._configure_rest_stability(stage, log)
         log(
             f"[IwHub] 배치 완료: {root} @ "
-            f"{tuple(round(v, 2) for v in position)}, yaw={yaw_deg:.1f}°"
+            f"{tuple(round(v, 3) for v in grounded_position)}, "
+            f"yaw={yaw_deg:.1f}°"
         )
         return root
+
+    def _grounded_position(
+        self,
+        stage: Usd.Stage,
+        root: str,
+        position: tuple[float, float, float],
+        log=print,
+    ) -> tuple[float, float, float]:
+        """에셋 로컬 bbox 최저점을 주행 바닥 바로 위로 맞춘 루트 pose를 반환한다."""
+        prim = stage.GetPrimAtPath(root)
+        try:
+            bbox_cache = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(),
+                [
+                    UsdGeom.Tokens.default_,
+                    UsdGeom.Tokens.render,
+                ],
+            )
+            local_range = (
+                bbox_cache.ComputeLocalBound(prim).ComputeAlignedRange()
+            )
+            local_min_z = float(local_range.GetMin()[2])
+            if not math.isfinite(local_min_z):
+                raise ValueError(f"유효하지 않은 bbox min z: {local_min_z}")
+        except Exception as exc:
+            log(
+                "[IwHub] ⚠ 로컬 bbox 접지 높이 계산 실패 — 요청 높이를 그대로 사용: "
+                f"{exc}"
+            )
+            return tuple(float(v) for v in position)
+
+        floor_z = float(position[2])
+        root_z = floor_z - local_min_z + self.GROUND_CLEARANCE
+        log(
+            "[IwHub] 바닥 관통 방지 자동 보정: "
+            f"floor_z={floor_z:.3f}m, local_min_z={local_min_z:+.3f}m, "
+            f"root_z={root_z:.3f}m, clearance={self.GROUND_CLEARANCE:.3f}m"
+        )
+        return float(position[0]), float(position[1]), root_z
+
+    @staticmethod
+    def _set_physx_attr(api, creator: str, value, log=print) -> bool:
+        """Isaac/PhysX 버전별 선택 속성을 지원되는 경우에만 설정한다."""
+        fn = getattr(api, creator, None)
+        if fn is None:
+            log(f"[IwHub] ⚠ PhysX 속성 API 없음: {creator}")
+            return False
+        fn(value)
+        return True
+
+    def _configure_rest_stability(self, stage: Usd.Stage, log=print) -> None:
+        """IW 아티큘레이션의 초기 관통 반발과 정지 잔진동을 줄인다."""
+        if not self._root:
+            return
+        root_prim = stage.GetPrimAtPath(self._root)
+        articulation_prim = next(
+            (
+                prim
+                for prim in Usd.PrimRange(root_prim)
+                if prim.HasAPI(UsdPhysics.ArticulationRootAPI)
+            ),
+            None,
+        )
+        if articulation_prim is None:
+            log("[IwHub] ⚠ 안정화할 articulation root를 찾지 못했습니다")
+            return
+
+        articulation = PhysxSchema.PhysxArticulationAPI.Apply(
+            articulation_prim
+        )
+        settings = (
+            ("CreateSleepThresholdAttr", self.SLEEP_THRESHOLD),
+            ("CreateStabilizationThresholdAttr", self.STABILIZATION_THRESHOLD),
+            (
+                "CreateSolverPositionIterationCountAttr",
+                self.SOLVER_POSITION_ITERATIONS,
+            ),
+            (
+                "CreateSolverVelocityIterationCountAttr",
+                self.SOLVER_VELOCITY_ITERATIONS,
+            ),
+        )
+        for creator, value in settings:
+            try:
+                self._set_physx_attr(articulation, creator, value, log=log)
+            except Exception as exc:
+                log(f"[IwHub] ⚠ {creator} 설정 실패: {exc}")
+
+        # 초기 bbox 오차가 남더라도 한 프레임에 큰 관통 보정 속도가 생기지 않게
+        # 섀시 강체의 depenetration 속도를 제한한다.
+        chassis = stage.GetPrimAtPath(f"{self._root}/chassis")
+        if (
+            not chassis.IsValid()
+            or not chassis.HasAPI(UsdPhysics.RigidBodyAPI)
+        ):
+            chassis = next(
+                (
+                    prim
+                    for prim in Usd.PrimRange(root_prim)
+                    if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                    and "chassis" in prim.GetName().lower()
+                ),
+                None,
+            )
+        if chassis is not None and chassis.IsValid():
+            rigid = PhysxSchema.PhysxRigidBodyAPI.Apply(chassis)
+            try:
+                self._set_physx_attr(
+                    rigid,
+                    "CreateMaxDepenetrationVelocityAttr",
+                    self.MAX_DEPENETRATION_VELOCITY,
+                    log=log,
+                )
+            except Exception as exc:
+                log(f"[IwHub] ⚠ chassis depenetration 제한 설정 실패: {exc}")
+            chassis_path = str(chassis.GetPath())
+        else:
+            chassis_path = "찾지 못함"
+
+        log(
+            "[IwHub] 정지 안정화: "
+            f"sleep={self.SLEEP_THRESHOLD:.3f}, "
+            f"stabilization={self.STABILIZATION_THRESHOLD:.3f}, "
+            f"solver={self.SOLVER_POSITION_ITERATIONS}/"
+            f"{self.SOLVER_VELOCITY_ITERATIONS}, chassis={chassis_path}"
+        )
 
     def _configure_drive_torque(self, stage: Usd.Stage, log=print) -> None:
         """적재 상태에서도 제자리 회전하도록 wheel drive와 접지 마찰을 보강한다."""
@@ -151,8 +296,8 @@ class IwHub:
           · 토마토 = **별도 동적 강체**(Load 아님) → KLT 안에서 흔들리며 접촉으로 실려간다.
           참조 에셋(팔레트·KLT)이 자체 강체를 갖고 오므로 disable_physics 로 벗긴 뒤
           Load 강체의 콜라이더로 붙인다(중첩강체 경고 방지 §8). 꼭지=몸통 자식(장식).
-        deck_z: 데크 높이(root 기준 오프셋). [2] 유도 — bbox 상단은 0.198(measure_deck.py)이나
-                GUI 실측상 0.225 라야 팔레트가 데크에 얹힌다(0.25=52mm 뜸, 0.20=박힘). GUI 확인.
+        deck_z: chassis 형상을 읽지 못했을 때만 쓰는 root 기준 비상 오프셋.
+                정상 경로는 실제 chassis bbox 상면을 매번 측정해 팔레트 하면을 맞춘다.
         반환: 얹은 토마토 수(0이면 에셋 없음).
         """
         from isaacsim.core.utils.stage import add_reference_to_stage
@@ -181,16 +326,15 @@ class IwHub:
                                  calyx if os.path.exists(calyx) else None))
 
         # ── iw.hub 데크 월드 포즈 (적재 세트 원점) ──
-        # 컨테이너 root 원점은 실제 차체 기하 중심과 일치하지 않는다. 적재물 중심을 차체
-        # 중심에 맞추면 짧은 팔레트(1.213m)의 앞면이 IW 앞면보다 10.9cm 뒤로 들어간다.
-        # 사용자 지정대로 두 앞면이 같은 수직면이 되게 chassis bbox의 +X 앞면에서
-        # 팔레트 길이 절반을 빼 cargo 중심을 정한다. Z는 기존 데크 실측값을 쓴다.
+        # 컨테이너 root 원점은 실제 차체 기하 중심과 일치하지 않는다. root 오프셋이나
+        # 부모 변환을 다시 적용하지 않도록 chassis의 월드 bbox 중심/상면을 직접 쓴다.
         src = f"{self._root}/base_link"
         if not stage.GetPrimAtPath(src).IsValid():
             src = self._root
         bp = UsdGeom.Xformable(stage.GetPrimAtPath(src)).ComputeLocalToWorldTransform(
             Usd.TimeCode.Default()).ExtractTranslation()
         cargo_x, cargo_y = float(bp[0]), float(bp[1])
+        cargo_z = float(bp[2]) + deck_z
         cargo_quat = Gf.Quatd(1.0)
         chassis = f"{self._root}/chassis"
         chassis_prim = stage.GetPrimAtPath(chassis)
@@ -200,31 +344,24 @@ class IwHub:
                     Usd.TimeCode.Default(),
                     [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
                 )
-                # local bound를 사용해야 IW를 180° 돌려도 어느 쪽이 차체의 +X
-                # 앞면인지 유지된다. world AABB의 max X는 회전 후 뒤쪽을 뜻한다.
                 chassis_range = (
-                    bbox_cache.ComputeLocalBound(chassis_prim).ComputeAlignedRange()
+                    bbox_cache.ComputeWorldBound(
+                        chassis_prim
+                    ).ComputeAlignedRange()
                 )
-                chassis_front_x = float(chassis_range.GetMax()[0])
-                chassis_center_y = float(chassis_range.GetMidpoint()[1])
                 chassis_world = UsdGeom.Xformable(
                     chassis_prim).ComputeLocalToWorldTransform(
                         Usd.TimeCode.Default())
-                cargo_center = chassis_world.Transform(
-                    Gf.Vec3d(
-                        chassis_front_x - PALLET_SIZE[0] / 2.0,
-                        chassis_center_y,
-                        0.0,
-                    )
-                )
-                cargo_x, cargo_y = float(cargo_center[0]), float(cargo_center[1])
+                deck_top_z = float(chassis_range.GetMax()[2])
+                cargo_z = deck_top_z + PALLET_SUPPORT_CLEARANCE
                 cargo_quat = Gf.Quatd(
                     chassis_world.ExtractRotationQuat().GetNormalized())
                 log(
-                    "[IwHub] 팔레트/IW 앞면 정렬: "
+                    "[IwHub] 팔레트/IW 실측 데크 정렬: "
                     f"root 대비 dx={cargo_x - float(bp[0]):+.3f}m, "
                     f"dy={cargo_y - float(bp[1]):+.3f}m, "
-                    f"local_front_x={chassis_front_x:.3f}m"
+                    f"deck_top_z={deck_top_z:.5f}m, "
+                    f"pallet_base_z={cargo_z:.5f}m"
                 )
             except Exception as e:
                 log(f"[IwHub] ⚠ chassis bbox 중심 계산 실패 — root 중심 사용: {e}")
@@ -232,7 +369,7 @@ class IwHub:
         UsdGeom.Xform.Define(stage, root)
         set_pose(
             stage.GetPrimAtPath(root),
-            (cargo_x, cargo_y, bp[2] + deck_z),
+            (cargo_x, cargo_y, cargo_z),
             cargo_quat,
         )
         ident = Gf.Quatd(1.0, 0.0, 0.0, 0.0)
@@ -307,8 +444,11 @@ class IwHub:
             bound = "chassis 결속(로봇 따라감·창고서 해제→지게차 인수)"
         else:
             bound = "⚠ chassis 링크 없음 → 데크 위 비결속 배치"
-        log(f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 {n_tom}개(동적강체). "
-            f"Load {bound}. deck_z={deck_z} [4] GPU 보정 요")
+        log(
+            f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 "
+            f"{n_tom}개(동적강체). Load {bound}. "
+            f"pallet_base_z={cargo_z:.5f}"
+        )
         return n_tom
 
     # 에셋에 이미 있을 법한 라이다 프림 이름/타입 키워드 (Idealworks iw.hub 는 실물 AMR).
