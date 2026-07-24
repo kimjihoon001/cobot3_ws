@@ -4,7 +4,7 @@ Isaac 짝:
   isaac_python main.py --mm
 
 실행:
-  ros2 launch mm_moveit harvest_pipeline.launch.py
+  ros2 launch mm_moveit vision_harvest_bringup.launch.py
 """
 import os
 
@@ -29,7 +29,7 @@ def generate_launch_description():
 
     moveit = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(share, "launch", "moveit_isaac.launch.py")),
+            os.path.join(share, "launch", "m0617_moveit_bringup.launch.py")),
         condition=IfCondition(LaunchConfiguration("start_moveit")),
         launch_arguments={
             "rviz": LaunchConfiguration("moveit_rviz"),

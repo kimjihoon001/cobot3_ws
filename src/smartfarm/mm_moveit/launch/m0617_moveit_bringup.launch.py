@@ -10,8 +10,8 @@
   - 스쿱/베이스는 MoveIt 밖: 스쿱 = gripper_controller/commands 3축, 베이스 = 텔레옵/Nav2
 
 사용:
-  ros2 launch mm_moveit moveit_isaac.launch.py            # RViz 포함
-  ros2 launch mm_moveit moveit_isaac.launch.py rviz:=false
+  ros2 launch mm_moveit m0617_moveit_bringup.launch.py            # RViz 포함
+  ros2 launch mm_moveit m0617_moveit_bringup.launch.py rviz:=false
   (로컬 검증용: use_sim_time:=false — Isaac 없이 스택만 띄워 파라미터 확인)
 """
 import os

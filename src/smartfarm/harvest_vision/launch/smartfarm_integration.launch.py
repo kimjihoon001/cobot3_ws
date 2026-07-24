@@ -48,7 +48,7 @@ def generate_launch_description():
         DeclareLaunchArgument("initial_pose_x", default_value="0.0"),
         DeclareLaunchArgument("initial_pose_y", default_value="-12.0"),
         DeclareLaunchArgument("initial_pose_yaw", default_value="0.0"),
-        # nav_harvest_pipeline.launch.py에서 실제 검증한 자동 수확 정차 위치.
+        # auto_nav_harvest.launch.py 단독에서 검증한 자동 수확 정차 위치.
         DeclareLaunchArgument("harvest_x", default_value="-0.487"),
         DeclareLaunchArgument("harvest_y", default_value="-8.207"),
         DeclareLaunchArgument("harvest_yaw", default_value="1.91"),
@@ -64,7 +64,7 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(
-                    mm_moveit, "launch", "nav_harvest_pipeline.launch.py")),
+                    mm_moveit, "launch", "nav2_harvest_bringup.launch.py")),
             launch_arguments={
                 "ns": "harvester_0",
                 "map": map_yaml,

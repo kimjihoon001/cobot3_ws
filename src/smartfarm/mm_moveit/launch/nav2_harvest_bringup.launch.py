@@ -25,7 +25,8 @@ def generate_launch_description():
 
     harvest = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(mm_share, "launch", "harvest_pipeline.launch.py")),
+            os.path.join(
+                mm_share, "launch", "vision_harvest_bringup.launch.py")),
         launch_arguments={
             "ns": ns,
             "use_sim_time": use_sim_time,

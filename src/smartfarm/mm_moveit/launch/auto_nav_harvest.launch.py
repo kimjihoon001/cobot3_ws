@@ -5,7 +5,7 @@ Isaac 짝:
   isaac_python main.py --mm --nav --camera
 
 ROS 2:
-  ros2 launch mm_moveit fixed_harvest_moveit.launch.py
+  ros2 launch mm_moveit auto_nav_harvest.launch.py
 """
 
 import os
@@ -22,7 +22,7 @@ def generate_launch_description():
     pipeline = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
-                mm_share, "launch", "nav_harvest_pipeline.launch.py")),
+                mm_share, "launch", "nav2_harvest_bringup.launch.py")),
         launch_arguments={
             "ns": LaunchConfiguration("ns"),
             "use_sim_time": LaunchConfiguration("use_sim_time"),

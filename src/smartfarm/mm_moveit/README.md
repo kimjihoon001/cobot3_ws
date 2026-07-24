@@ -32,15 +32,18 @@
 isaac_python main.py --mm --camera
 
 # 2-A) 팔/컨트롤러만 확인
-ros2 launch mm_moveit moveit_isaac.launch.py
-ros2 launch mm_moveit moveit_isaac.launch.py rviz:=false
+ros2 launch mm_moveit m0617_moveit_bringup.launch.py
+ros2 launch mm_moveit m0617_moveit_bringup.launch.py rviz:=false
 
 # 2-B) 현재 위치에서 비전→MoveIt 수확 파이프라인
-ros2 launch mm_moveit harvest_pipeline.launch.py
+ros2 launch mm_moveit vision_harvest_bringup.launch.py
 
 # 2-C) Nav2 이동→비전→MoveIt 수확 통합 시험
 # 이 경우 Isaac도 --nav를 추가해 실행한다.
-ros2 launch mm_moveit nav_harvest_pipeline.launch.py
+ros2 launch mm_moveit nav2_harvest_bringup.launch.py
+
+# 2-D) 검증된 고정 목표 자동 이동→원샷 수확
+ros2 launch mm_moveit auto_nav_harvest.launch.py
 ```
 
 경로: MoveIt(OMPL/Pilz/CHOMP) → `arm_controller`(JTC) → `topic_based_ros2_control`
