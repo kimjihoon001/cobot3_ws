@@ -42,10 +42,10 @@ Visualization Manager:
       Name: LaserScan
       Enabled: true
       Topic:
-        Value: /scan
+        Value: scan
         Depth: 5
         Durability Policy: Volatile
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         History Policy: Keep Last
       Size (m): 0.03
       Style: Flat Squares
@@ -59,7 +59,7 @@ Visualization Manager:
       Name: Map
       Enabled: true
       Topic:
-        Value: /map
+        Value: map
         Depth: 1
         Durability Policy: Transient Local
         Reliability Policy: Reliable
@@ -72,7 +72,7 @@ Visualization Manager:
       Name: Global Costmap
       Enabled: true
       Topic:
-        Value: /global_costmap/costmap
+        Value: global_costmap/costmap
         Depth: 1
         Durability Policy: Transient Local
         Reliability Policy: Reliable
@@ -86,7 +86,7 @@ Visualization Manager:
       Name: Local Costmap
       Enabled: true
       Topic:
-        Value: /local_costmap/costmap
+        Value: local_costmap/costmap
         Depth: 1
         Durability Policy: Transient Local
         Reliability Policy: Reliable
@@ -100,7 +100,7 @@ Visualization Manager:
       Name: Global Plan
       Enabled: true
       Topic:
-        Value: /plan
+        Value: plan
         Depth: 5
         Durability Policy: Volatile
         Reliability Policy: Reliable
@@ -114,7 +114,7 @@ Visualization Manager:
       Name: Local Plan
       Enabled: true
       Topic:
-        Value: /local_plan
+        Value: local_plan
         Depth: 5
         Durability Policy: Volatile
         Reliability Policy: Reliable
@@ -128,7 +128,7 @@ Visualization Manager:
       Name: Robot Footprint
       Enabled: true
       Topic:
-        Value: /local_costmap/published_footprint
+        Value: local_costmap/published_footprint
         Depth: 5
         Durability Policy: Volatile
         Reliability Policy: Reliable
@@ -139,7 +139,7 @@ Visualization Manager:
       Name: AMCL Particles
       Enabled: true
       Topic:
-        Value: /particle_cloud
+        Value: particle_cloud
         Depth: 5
         Durability Policy: Volatile
         Reliability Policy: Best Effort
@@ -158,20 +158,22 @@ Visualization Manager:
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/SetInitialPose
       Topic:
-        Value: /initialpose
+        Value: initialpose
+    # 외부 NavigateToPose 액션 응답이 DDS 타임아웃 나는 환경이라, bt_navigator가
+    # 직접 구독하는 goal_pose를 쓴다. 기능은 같은 Nav2 목표이며 액션은 BT 내부에서 생성된다.
     - Class: rviz_default_plugins/SetGoal
       Topic:
-        Value: /goal_pose
+        Value: goal_pose
   Value: true
   Views:
     Current:
       Class: rviz_default_plugins/TopDownOrtho
       Name: Current View
       Near Clip Distance: 0.01
-      Scale: 25
+      Scale: 22
       Target Frame: <Fixed Frame>
       X: 0
-      Y: 16
+      Y: 4
       Value: TopDownOrtho (rviz_default_plugins)
 Window Geometry:
   Height: 900

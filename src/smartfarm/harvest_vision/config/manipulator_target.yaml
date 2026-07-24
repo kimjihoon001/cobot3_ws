@@ -21,6 +21,7 @@ manipulator_target_node:
     max_jump_m: 0.5
     auto_grasp_enabled: true
     pregrasp_clearance_m: 0.15
+    grasp_z_offset_m: -0.02   # 파지점이 살짝 위로 잡혀서 목표 Z 를 내림(음수=아래, 2026-07-22)
     tool_grasp_reach_m: 0.115
     motion_timeout_sec: 10.0
     # 닫기 후 양쪽 손가락이 같은 토마토에 접촉하면 Isaac에서 30N 예압으로

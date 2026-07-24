@@ -41,12 +41,15 @@ class VisionNode(Node):
         super().__init__("vision_node")
 
         share = get_package_share_directory("harvest_vision")
-        self.declare_parameter("rgb_topic", "/harvester/rgb")
-        self.declare_parameter("depth_topic", "/harvester/depth")
-        self.declare_parameter("camera_info_topic", "/harvester/camera_info")
-        self.declare_parameter("annotated_topic", "/vision/annotated_image")
-        self.declare_parameter("target_topic", "/vision/approach_target")
-        self.declare_parameter("target_class_topic", "/vision/target_class")
+        # 모두 상대 이름: 노드 namespace 아래에만 생성되어 다른 로봇과 섞이지 않는다.
+        # namespace 없이 단독 실행하면 기존과 동일하게 /harvester/*, /vision/*가 된다.
+        self.declare_parameter("rgb_topic", "harvester/rgb")
+        self.declare_parameter("depth_topic", "harvester/depth")
+        self.declare_parameter("camera_info_topic", "harvester/camera_info")
+        self.declare_parameter("annotated_topic", "vision/annotated_image")
+        self.declare_parameter("target_topic", "vision/approach_target")
+        self.declare_parameter("target_class_topic", "vision/target_class")
+        self.declare_parameter("detections_topic", "vision/tomato_detections")
         self.declare_parameter("detector_model_path", os.path.join(share, "finetuned_far.pt"))
         self.declare_parameter("quality_model_path", os.path.join(share, "finetuned_near.pt"))
         # 0.25→0.45: 잎사귀 오탐 억제(val P 0.77→0.96, 오탐 4.5→0.5/img). 수확은 여러
@@ -86,7 +89,9 @@ class VisionNode(Node):
         self.create_subscription(Image, depth_topic, self._depth_callback, IMAGE_QOS)
         self.create_subscription(CameraInfo, info_topic, self._camera_info_callback, IMAGE_QOS)
         self._detections_pub = self.create_publisher(
-            TomatoDetectionArray, "/vision/tomato_detections", 10
+            TomatoDetectionArray,
+            str(self.get_parameter("detections_topic").value),
+            10,
         )
         self._annotated_pub = self.create_publisher(
             Image, str(self.get_parameter("annotated_topic").value), IMAGE_QOS
@@ -440,7 +445,8 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

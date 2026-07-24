@@ -123,6 +123,45 @@ def _params_with_forward_only_bt(params_file: str) -> str:
     return tmp.name
 
 
+def _bringup_without_smoothers() -> str:
+    """Humble Nav2 bringup에서 사용하지 않는 smoother 두 개를 lifecycle에서 뺀다.
+
+    이 PC의 Fast-DDS는 독립 프로세스 smoother_server의 get_state 응답이 간헐적으로
+    2초 제한을 넘겨, lifecycle manager가 controller까지 정상 구성한 뒤 전체 bringup을
+    중단한다. 수확 BT에는 SmoothPath가 없고 velocity는 watchdog가 controller 출력을
+    직접 중계하므로 두 smoother를 관리 목록에서 제외해도 경로 기능은 그대로다.
+    """
+    nav2_launch = os.path.join(
+        get_package_share_directory("nav2_bringup"), "launch")
+    navigation_path = os.path.join(nav2_launch, "navigation_launch.py")
+    bringup_path = os.path.join(nav2_launch, "bringup_launch.py")
+    with open(navigation_path, encoding="utf-8") as stream:
+        navigation = stream.read()
+    navigation = navigation.replace("                       'smoother_server',\n", "")
+    navigation = navigation.replace(
+        "                       'waypoint_follower',\n"
+        "                       'velocity_smoother']",
+        "                       'waypoint_follower']")
+    nav_tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix="_navigation.launch.py", delete=False,
+        encoding="utf-8")
+    nav_tmp.write(navigation)
+    nav_tmp.close()
+
+    with open(bringup_path, encoding="utf-8") as stream:
+        bringup = stream.read()
+    original = "os.path.join(launch_dir, 'navigation_launch.py')"
+    if original not in bringup:
+        raise RuntimeError("nav2_bringup navigation include 형식이 예상과 다릅니다")
+    bringup = bringup.replace(original, repr(nav_tmp.name))
+    bringup_tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix="_bringup.launch.py", delete=False,
+        encoding="utf-8")
+    bringup_tmp.write(bringup)
+    bringup_tmp.close()
+    return bringup_tmp.name
+
+
 def _bringup(context, *_args, **_kwargs):
     distro = os.environ.get("ROS_DISTRO", "")
     params_file = _params_for_distro(
@@ -136,16 +175,45 @@ def _bringup(context, *_args, **_kwargs):
         "use_sim_time": _pybool(context, "use_sim_time"),
         "params_file": params_file,
         "autostart": _pybool(context, "autostart"),
+        # 같은 이름의 component_container가 DDS discovery에 잠시 남아 있으면 재실행
+        # 직후 LoadComposableNodes 요청이 종료 중인 이전 컨테이너로 전달될 수 있다.
+        # 그러면 새 nav2_container는 비어 있고 bt_navigator/goal_pose 구독자가 없어
+        # 통합 수확 launch가 매번 30초 뒤 종료된다. 수확 MM은 Nav2 한 세트뿐이므로
+        # 각 서버를 독립 프로세스로 띄워 재시작 경합과 컨테이너 장애 전파를 없앤다.
+        "use_composition": "False",
     }
     # use_namespace 는 Humble 에만 있는 인자다 (Iron 에서 제거 — namespace 하나로 통합).
     # Jazzy 에 넘기면 "unknown launch argument" 로 죽는다.
     if distro == "humble":
         args["use_namespace"] = str(bool(args["namespace"]))
     actions = [IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(
-            get_package_share_directory("nav2_bringup"), "launch",
-            "bringup_launch.py")),
+        PythonLaunchDescriptionSource(_bringup_without_smoothers()),
         launch_arguments=args.items())]
+
+    # Isaac MoveIt MM의 ROS2SubscribeTwist는 마지막 값을 영구 유지한다. Nav2 목표 종료나
+    # 프로세스 이상 시 계속 흘러가지 않도록 같은 namespace에서 안전 토픽을 항상 만든다.
+    actions.append(Node(
+        package="fleet_dispatch", executable="cmd_vel_watchdog",
+        name="cmd_vel_watchdog", namespace=args["namespace"],
+        parameters=[{
+            "use_sim_time": args["use_sim_time"] == "True",
+            # DWB의 홀로노믹 vy를 직접 안전 중계한다. 기존 velocity_smoother 설정에
+            # 남아 있던 차동구동 y=0 제한이 횡이동 명령을 지우는 일을 막는다.
+            "input_topic": "cmd_vel_nav",
+            "output_topic": "cmd_vel_safe",
+            "timeout_sec": 0.35,
+            "publish_rate_hz": 20.0,
+        }],
+        output="screen"))
+
+    # 4대 동시 실행에서는 Fast-DDS lifecycle service 응답이 간헐적으로 늦어져
+    # 기본 manager가 일부 노드만 inactive로 남기고 포기한다. 실제 state를 반복 확인해
+    # map/amcl/controller/planner/bt를 끝까지 active로 만드는 복구 노드를 함께 띄운다.
+    actions.append(Node(
+        package="fleet_dispatch", executable="nav2_lifecycle_activator",
+        name="nav2_lifecycle_activator", namespace=args["namespace"],
+        parameters=[{"use_sim_time": False}],
+        output="screen"))
 
     # RViz 는 기본으로 같이 띄운다(rviz:=false 로 끌 수 있음).
     # ★ use_sim_time 을 반드시 넘겨야 한다 — Isaac 은 타임스탬프를 시뮬 시간(수백 초)으로
@@ -155,8 +223,10 @@ def _bringup(context, *_args, **_kwargs):
     if _pybool(context, "rviz") == "True":
         actions.append(Node(
             package="rviz2", executable="rviz2", name="rviz2",
+            namespace=args["namespace"],
             arguments=["-d", LaunchConfiguration("rviz_config").perform(context)],
             parameters=[{"use_sim_time": args["use_sim_time"] == "True"}],
+            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
             output="screen"))
     return actions
 
@@ -178,20 +248,24 @@ def generate_launch_description():
     default_params = os.path.join(
         get_package_share_directory("fleet_dispatch"), "config",
         "harvester_nav2.yaml")
+    default_map = os.path.join(
+        get_package_share_directory("fleet_dispatch"), "maps",
+        "farm_gen.yaml")
     return LaunchDescription([
         # 현재 MM은 전역 /tf, /scan, /odom, /cmd_vel을 쓰므로 namespace 기본값은 비운다.
         DeclareLaunchArgument("namespace", default_value=""),
         DeclareLaunchArgument("slam", default_value="false"),
         DeclareLaunchArgument("explore", default_value="false"),
-        DeclareLaunchArgument("map", default_value=""),
+        DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("use_sim_time", default_value="true"),  # Isaac /clock
         DeclareLaunchArgument("params_file", default_value=default_params),
         DeclareLaunchArgument("autostart", default_value="true"),
-        # 저장 맵은 MM HOME spawn 위치를 (0, 0, 0)으로 저장했다. 필요하면 실행 시 덮어쓴다.
+        # map=Isaac 월드 프레임. 새 Isaac 실행의 MM 스폰과 같은 베이스 자세.
+        # 주행 후 Nav2만 재시작할 때는 현재 위치를 launch 인자로 덮어쓴다.
         DeclareLaunchArgument("set_initial_pose", default_value="true"),
-        DeclareLaunchArgument("initial_pose_x", default_value="0.0"),
-        DeclareLaunchArgument("initial_pose_y", default_value="0.0"),
-        DeclareLaunchArgument("initial_pose_yaw", default_value="0.0"),
+        DeclareLaunchArgument("initial_pose_x", default_value="-3.3"),
+        DeclareLaunchArgument("initial_pose_y", default_value="-9.77"),
+        DeclareLaunchArgument("initial_pose_yaw", default_value="3.141592653589793"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=os.path.join(
             get_package_share_directory("fleet_dispatch"), "rviz",

@@ -524,6 +524,11 @@ class RobotAssetConfig:
         # finger_joint와 좌우 mimic finger가 포함된 PhysX USD다.
         "/home/rokey/cobot3_ws/isaacpjt/M0609/onrobot_rg2/urdf/onrobot_rg2/onrobot_rg2.usd",
     )
+    # FreeCAD STL에서 생성한 로컬 articulated USD (moveit_mm 스쿱 전용, 2026-07-24 격리).
+    # RG2(gripper)와 별개 필드라 공유 설정을 건드리지 않는다.
+    scoop_gripper_usd: str = os.path.join(
+        ISAAC_DIR, "robots", "quarter_basket_freecad", "generated",
+        "coaxial_quarter_scoop_gripper.usd")
     # 손끝 카메라. 실측 (2026-07-18 GPU 탐침, omni.client.list): 존재 확인.
     # RealSense D455 실물 센서 에셋이라 화각·해상도가 실제 스펙과 같다 = 출처가 된다.
     camera: tuple[str, ...] = (
@@ -684,6 +689,21 @@ class CameraBridgeConfig:
     depth_topic: str = "/harvester/depth"
     info_topic: str = "/harvester/camera_info"
     frame_id: str = "d455_color"
+    # moveit_mm(harvester_moveit) 격리용 D455 전체 스트림 필드 (2026-07-24). moveit_mm._build_camera
+    # 가 dataclasses.replace 로 node_namespace + 상대 토픽을 얹어 RMP MM 카메라와 완전히 분리한다.
+    # node_namespace 가 비면 위 절대 토픽을 그대로 쓰고, 차면 상대 토픽으로 복제된다.
+    depth_info_topic: str = "/harvester/depth/camera_info"
+    pointcloud_topic: str = "/harvester/depth/points"
+    infra1_topic: str = "/harvester/infra1/image_raw"
+    infra2_topic: str = "/harvester/infra2/image_raw"
+    infra1_info_topic: str = "/harvester/infra1/camera_info"
+    infra2_info_topic: str = "/harvester/infra2/camera_info"
+    imu_topic: str = "/harvester/imu"
+    depth_frame_id: str = "d455_depth_optical_frame"
+    infra1_frame_id: str = "d455_infra1_optical_frame"
+    infra2_frame_id: str = "d455_infra2_optical_frame"
+    imu_frame_id: str = "d455_imu_frame"
+    node_namespace: str = ""
 
 
 @dataclass

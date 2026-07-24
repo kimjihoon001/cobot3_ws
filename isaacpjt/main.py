@@ -64,6 +64,9 @@ RMPFLOW = "--rmpflow" in sys.argv
 LEGACY_IK = "--legacy-ik" in sys.argv
 if LEGACY_IK and not RMPFLOW:
     raise SystemExit("--legacy-ik는 --rmpflow와 함께 사용해야 합니다.")
+# ★제어 모드 분리(2026-07-23) — 스쿱 MM 을 MoveIt 로 구동. --moveit → moveit_mm
+#   (/World/MoveitMM). --mm 은 rmp_mm(RG2/Doosan) 그대로 → --mm --moveit 동시 스폰 가능.
+MOVEIT = "--moveit" in sys.argv
 # MM 키보드 텔레옵 (팔·베이스·RG2 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
 # MM 키보드 입력은 명시적인 전용 플래그만 사용한다. --mm와 --iw를 같이 띄워도
 # 키 입력이 iw.hub에 전달되거나 전역 teleop 상태를 공유하지 않는다.
@@ -242,6 +245,11 @@ def build_drivers(cfg, task=None) -> list:
     if "--fork" in sys.argv:
         from fork import ForkDriver
         drivers.append(ForkDriver(cfg, iw_driver=iw_driver))
+    # ★MoveIt MM(스쿱/UR10e, 2026-07-23) — 끝에 추가해 --mm/--iw 영역과 안 겹친다.
+    #   --moveit → moveit_mm(/World/MoveitMM). --mm(rmp_mm)과 동시 스폰 가능.
+    if MOVEIT:
+        from moveit_mm import MMDriver as MoveitMMDriver
+        drivers.append(MoveitMMDriver(cfg, task=task))
     return drivers
 
 

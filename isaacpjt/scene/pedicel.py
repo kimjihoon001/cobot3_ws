@@ -91,6 +91,13 @@ def _segment(stage: Usd.Stage, path: str, start: Gf.Vec3d, end: Gf.Vec3d,
     # 조인트를 끊어도 그 접촉이 과실을 받쳐 안 떨어진다 (spike 02 에서 확인). 시각 전용.
 
 
+def branch(stage: Usd.Stage, path: str,
+           start: tuple[float, float, float],
+           end: tuple[float, float, float], diameter: float) -> None:
+    """수평 가지(truss) 시각 — 원기둥 하나. ㅣㄱ 모양의 수평부(2026-07-22)."""
+    _segment(stage, path, Gf.Vec3d(*start), Gf.Vec3d(*end), diameter)
+
+
 def spawn(stage: Usd.Stage, stem_path: str, fruit_path: str,
           stem_point: tuple[float, float, float],
           fruit_point: tuple[float, float, float],

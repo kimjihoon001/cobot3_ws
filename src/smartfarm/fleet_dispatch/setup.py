@@ -16,6 +16,7 @@ setup(
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
         (os.path.join("share", package_name, "behavior_trees"),
          glob("behavior_trees/*.xml")),
+        (os.path.join("share", package_name, "maps"), glob("maps/*")),
         (os.path.join("share", package_name, "rviz"), glob("rviz/*.rviz")),
     ],
     install_requires=["setuptools"],
@@ -28,6 +29,8 @@ setup(
     entry_points={
         "console_scripts": [
             "fleet_dispatch_node = fleet_dispatch.fleet_dispatch_node:main",
+            "cmd_vel_watchdog = fleet_dispatch.cmd_vel_watchdog:main",
+            "nav2_lifecycle_activator = fleet_dispatch.nav2_lifecycle_activator:main",
         ],
     },
 )

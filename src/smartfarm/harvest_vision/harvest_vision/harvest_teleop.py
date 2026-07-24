@@ -19,13 +19,14 @@ import tty
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float64, String
 
 HELP = """
 ┌─ 수확 텔레옵 ─ (이 터미널에 포커스를 두고 키 입력) ────────────────────┐
   베이스:  w/s 전후   a/d 회전   q/e 횡이동   space 정지
   팔(TCP): i/k 앞뒤(x)  j/l 좌우(y)  u/o 위아래(z)   g 홈 복귀
   수확:    h  수확 시작(그 자리)      n  수확 중단 + 그리퍼 열기   t  잎 표시 토글
+  커터:    m  서보 절삭(35°)          b  서보 재개방(0°)
   속도:    z/x 선속 -/+   c/v 각속 -/+   ,/. 팔 스텝 -/+
   종료:    Ctrl-C
 └───────────────────────────────────────────────────────────────────────┘
@@ -39,6 +40,7 @@ class HarvestTeleop(Node):
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("enable_topic", "/harvest_test/enable")
         self.declare_parameter("isaac_command_topic", "/harvester_0/cmd")
+        self.declare_parameter("blade_command_topic", "/harvester_0/blade_command")
         self.declare_parameter("base_frame", "base_link")
         self._cmd = self.create_publisher(
             Twist, str(self.get_parameter("cmd_vel_topic").value), 10)
@@ -46,6 +48,8 @@ class HarvestTeleop(Node):
             Bool, str(self.get_parameter("enable_topic").value), 10)
         self._isaac = self.create_publisher(
             String, str(self.get_parameter("isaac_command_topic").value), 10)
+        self._blade = self.create_publisher(
+            Float64, str(self.get_parameter("blade_command_topic").value), 10)
         self._frame = str(self.get_parameter("base_frame").value)
         self.lin = 0.25    # m/s
         self.ang = 1.5     # rad/s (기존 0.5의 3배)
@@ -65,6 +69,10 @@ class HarvestTeleop(Node):
 
     def open_gripper(self) -> None:
         self._isaac.publish(String(data=json.dumps({"gripper": {"closed": False}})))
+
+    def blade(self, angle_deg: float) -> None:
+        self._blade.publish(Float64(data=float(angle_deg)))
+        print(f"[커터] 서보 목표 {angle_deg:.0f}°")
 
     def nudge_arm(self, dx: float, dy: float, dz: float) -> None:
         self.arm[0] += dx
@@ -147,6 +155,10 @@ def main() -> None:
                 node.foliage_on = not node.foliage_on
                 node._isaac.publish(String(data=json.dumps({"foliage": node.foliage_on})))
                 print(f"[잎] {'표시' if node.foliage_on else '숨김'}")
+            elif k == "m":
+                node.blade(35.0)
+            elif k == "b":
+                node.blade(0.0)
             # 속도/스텝 조절
             elif k in ("z", "x"):
                 node.lin = max(0.05, min(1.0, node.lin + (0.05 if k == "x" else -0.05)))

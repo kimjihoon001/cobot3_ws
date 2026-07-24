@@ -55,6 +55,8 @@ T = {
     # camera_info 없음). 주면 "type is not supported" 가 매 프레임 터진다(2026-07-20 GPU 실측).
     # 전용 노드로 발행한다(Isaac 5.1 에 OgnROS2CameraInfoHelper 존재 확인).
     "CamInfoHelper": "isaacsim.ros2.bridge.ROS2CameraInfoHelper",
+    "ReadImu": "isaacsim.sensors.physics.IsaacReadIMU",
+    "PubImu": "isaacsim.ros2.bridge.ROS2PublishImu",
 }
 
 
@@ -100,14 +102,20 @@ def build_clock(graph_path: str = "/World/RosClock",
 
 def build_joint_bridge(stage, graph_path: str, ns: str, art_path: str,
                        domain_id: int = DOMAIN_ID, log=print,
-                       apply_commands: bool = True) -> tuple[str, str]:
+                       apply_commands: bool = True,
+                       states_topic: str = None) -> tuple[str, str]:
     """로봇 1대의 JointState 명령/상태 브리지. 반환: (명령 토픽, 상태 토픽).
 
     art_path: 아티큘레이션 루트 prim 경로. targetPrim 은 relationship 이라
     og 값 세팅이 아니라 USD 로 건다 (2026-07-19 실측).
+    states_topic: Isaac 이 발행할 상태 토픽. None 이면 /{ns}/joint_states.
+      ★MoveIt 격리 시엔 JSB(joint_state_broadcaster)가 네임스페이스 /{ns}/joint_states 로
+      arm 6축만 발행하므로, Isaac 전체관절(dummy_base 포함) 발행과 겹치면 move_group 이
+      "dummy_base_* not found" 에러. 그래서 HW 채널은 /{ns}/hw_joint_states 로 분리한다.
     """
     cmd_topic = f"/{ns}/joint_command"
-    states_topic = f"/{ns}/joint_states"
+    if states_topic is None:
+        states_topic = f"/{ns}/joint_states"
     nodes = [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
              ("SimTime", T["SimTime"]), ("Sub", T["SubJS"]),
              ("Pub", T["PubJS"])]
@@ -194,6 +202,40 @@ def build_string_pub(graph_path: str, topic: str,
            ("Pub.inputs:messageName", "String"),
            ("Pub.inputs:topicName", topic)])
     log(f"[RosBridge] String 발행: {topic} ({graph_path}/Pub)")
+    return f"{graph_path}/Pub"
+
+
+def build_float64_sub(graph_path: str, topic: str,
+                      domain_id: int = DOMAIN_ID, log=print) -> str:
+    """제네릭 ``std_msgs/Float64`` 구독 그래프. 블레이드 목표각 등에 사용한다."""
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("Sub", T["SubStr"])],
+          [("OnTick.outputs:tick", "Sub.inputs:execIn"),
+           ("Ctx.outputs:context", "Sub.inputs:context")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Sub.inputs:messagePackage", "std_msgs"),
+           ("Sub.inputs:messageSubfolder", "msg"),
+           ("Sub.inputs:messageName", "Float64"),
+           ("Sub.inputs:topicName", topic)])
+    log(f"[RosBridge] Float64 구독: {topic} ({graph_path}/Sub)")
+    return f"{graph_path}/Sub"
+
+
+def build_float64_pub(graph_path: str, topic: str,
+                      domain_id: int = DOMAIN_ID, log=print) -> str:
+    """제네릭 ``std_msgs/Float64`` 발행 그래프. 실제 액추에이터 상태용이다."""
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("Pub", T["PubStr"])],
+          [("OnTick.outputs:tick", "Pub.inputs:execIn"),
+           ("Ctx.outputs:context", "Pub.inputs:context")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Pub.inputs:messagePackage", "std_msgs"),
+           ("Pub.inputs:messageSubfolder", "msg"),
+           ("Pub.inputs:messageName", "Float64"),
+           ("Pub.inputs:topicName", topic)])
+    log(f"[RosBridge] Float64 발행: {topic} ({graph_path}/Pub)")
     return f"{graph_path}/Pub"
 
 
@@ -396,23 +438,145 @@ def build_camera(stage, graph_path: str, camera_prim: str, cam,
            ("RP.inputs:width", cam.width),
            ("RP.inputs:height", cam.height),
            ("Rgb.inputs:type", "rgb"),
+           ("Rgb.inputs:nodeNamespace", cam.node_namespace),
            ("Rgb.inputs:topicName", cam.rgb_topic),
            ("Rgb.inputs:frameId", cam.frame_id),
            ("Depth.inputs:type", "depth"),
+           ("Depth.inputs:nodeNamespace", cam.node_namespace),
            ("Depth.inputs:topicName", cam.depth_topic),
            ("Depth.inputs:frameId", cam.frame_id),
            # Info = ROS2CameraInfoHelper (type 입력 없음 — 렌더프로덕트에서 내부파라미터 읽음)
+           ("Info.inputs:nodeNamespace", cam.node_namespace),
            ("Info.inputs:topicName", cam.info_topic),
            ("Info.inputs:frameId", cam.frame_id)])
     _set_target(stage, f"{graph_path}/RP", "inputs:cameraPrim", camera_prim)
-    log(f"[Camera] {cam.rgb_topic} + {cam.depth_topic} + {cam.info_topic} "
+    prefix = f"/{cam.node_namespace}/" if cam.node_namespace else ""
+    log(f"[Camera] {prefix}{cam.rgb_topic} + {prefix}{cam.depth_topic} + "
+        f"{prefix}{cam.info_topic} "
         f"({cam.width}x{cam.height}, {camera_prim})")
     return cam.rgb_topic, cam.depth_topic
 
 
+def build_d455(stage, graph_path: str, sensor_paths: dict[str, str], cam,
+               domain_id: int = DOMAIN_ID, log=print) -> None:
+    """D455 전체 스트림을 서로 다른 원본 센서 extrinsic으로 발행한다.
+
+    Color, pseudo-depth, 좌/우 stereo camera는 각각 별도 render product를 사용한다.
+    Depth point cloud는 depth render product에서 만들고 IMU는 원본 IsaacImuSensor를
+    읽는다. 모든 ROS 노드는 ``cam.node_namespace`` 아래에 생성된다.
+    """
+    required = ("color", "depth", "infra1", "infra2")
+    missing = [name for name in required if name not in sensor_paths]
+    if missing:
+        raise RuntimeError(f"D455 센서 prim 누락: {', '.join(missing)}")
+
+    nodes = [
+        ("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
+        ("ColorRP", T["RenderProduct"]), ("DepthRP", T["RenderProduct"]),
+        ("Infra1RP", T["RenderProduct"]), ("Infra2RP", T["RenderProduct"]),
+        ("Rgb", T["CamHelper"]), ("Depth", T["CamHelper"]),
+        ("PointCloud", T["CamHelper"]),
+        ("ColorInfo", T["CamInfoHelper"]), ("DepthInfo", T["CamInfoHelper"]),
+        ("Infra1", T["CamHelper"]), ("Infra1Info", T["CamInfoHelper"]),
+        ("Infra2", T["CamHelper"]), ("Infra2Info", T["CamInfoHelper"]),
+    ]
+    connects = []
+    for rp in ("ColorRP", "DepthRP", "Infra1RP", "Infra2RP"):
+        connects.append(("OnTick.outputs:tick", f"{rp}.inputs:execIn"))
+    for rp, helpers in (
+        ("ColorRP", ("Rgb", "ColorInfo")),
+        ("DepthRP", ("Depth", "PointCloud", "DepthInfo")),
+        ("Infra1RP", ("Infra1", "Infra1Info")),
+        ("Infra2RP", ("Infra2", "Infra2Info")),
+    ):
+        for helper in helpers:
+            connects.extend([
+                (f"{rp}.outputs:execOut", f"{helper}.inputs:execIn"),
+                (f"{rp}.outputs:renderProductPath",
+                 f"{helper}.inputs:renderProductPath"),
+                ("Ctx.outputs:context", f"{helper}.inputs:context"),
+            ])
+
+    values = [
+        ("Ctx.inputs:domain_id", domain_id),
+        ("Ctx.inputs:useDomainIDEnvVar", False),
+    ]
+    for rp in ("ColorRP", "DepthRP", "Infra1RP", "Infra2RP"):
+        values.extend([
+            (f"{rp}.inputs:width", cam.width),
+            (f"{rp}.inputs:height", cam.height),
+        ])
+    for helper in ("Rgb", "Depth", "PointCloud", "ColorInfo", "DepthInfo",
+                   "Infra1", "Infra1Info", "Infra2", "Infra2Info"):
+        values.append((f"{helper}.inputs:nodeNamespace", cam.node_namespace))
+    values.extend([
+        ("Rgb.inputs:type", "rgb"),
+        ("Rgb.inputs:topicName", cam.rgb_topic),
+        ("Rgb.inputs:frameId", cam.frame_id),
+        ("ColorInfo.inputs:topicName", cam.info_topic),
+        ("ColorInfo.inputs:frameId", cam.frame_id),
+        ("Depth.inputs:type", "depth"),
+        ("Depth.inputs:topicName", cam.depth_topic),
+        ("Depth.inputs:frameId", cam.depth_frame_id),
+        ("PointCloud.inputs:type", "depth_pcl"),
+        ("PointCloud.inputs:topicName", cam.pointcloud_topic),
+        ("PointCloud.inputs:frameId", cam.depth_frame_id),
+        ("DepthInfo.inputs:topicName", cam.depth_info_topic),
+        ("DepthInfo.inputs:frameId", cam.depth_frame_id),
+        # Isaac CameraHelper에는 mono8 토큰이 없다. 좌/우 센서 렌더를 rgb Image로
+        # 발행하되 D455 관례의 infra1/infra2 토픽과 optical frame을 유지한다.
+        ("Infra1.inputs:type", "rgb"),
+        ("Infra1.inputs:topicName", cam.infra1_topic),
+        ("Infra1.inputs:frameId", cam.infra1_frame_id),
+        ("Infra1Info.inputs:topicName", cam.infra1_info_topic),
+        ("Infra1Info.inputs:frameId", cam.infra1_frame_id),
+        ("Infra2.inputs:type", "rgb"),
+        ("Infra2.inputs:topicName", cam.infra2_topic),
+        ("Infra2.inputs:frameId", cam.infra2_frame_id),
+        ("Infra2Info.inputs:topicName", cam.infra2_info_topic),
+        ("Infra2Info.inputs:frameId", cam.infra2_frame_id),
+    ])
+    _edit(graph_path, nodes, connects, values)
+
+    for node, key in (("ColorRP", "color"), ("DepthRP", "depth"),
+                      ("Infra1RP", "infra1"), ("Infra2RP", "infra2")):
+        _set_target(stage, f"{graph_path}/{node}", "inputs:cameraPrim",
+                    sensor_paths[key])
+
+    if "imu" in sensor_paths:
+        imu_graph = f"{graph_path}_Imu"
+        _edit(
+            imu_graph,
+            [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
+             ("Read", T["ReadImu"]), ("Pub", T["PubImu"])],
+            [("OnTick.outputs:tick", "Read.inputs:execIn"),
+             ("Read.outputs:execOut", "Pub.inputs:execIn"),
+             ("Ctx.outputs:context", "Pub.inputs:context"),
+             ("Read.outputs:angVel", "Pub.inputs:angularVelocity"),
+             ("Read.outputs:linAcc", "Pub.inputs:linearAcceleration"),
+             ("Read.outputs:orientation", "Pub.inputs:orientation"),
+             ("Read.outputs:sensorTime", "Pub.inputs:timeStamp")],
+            [("Ctx.inputs:domain_id", domain_id),
+             ("Ctx.inputs:useDomainIDEnvVar", False),
+             ("Read.inputs:readGravity", True),
+             ("Read.inputs:useLatestData", True),
+             ("Pub.inputs:nodeNamespace", cam.node_namespace),
+             ("Pub.inputs:topicName", cam.imu_topic),
+             ("Pub.inputs:frameId", cam.imu_frame_id)])
+        _set_target(stage, f"{imu_graph}/Read", "inputs:imuPrim",
+                    sensor_paths["imu"])
+
+    prefix = f"/{cam.node_namespace}/" if cam.node_namespace else ""
+    log("[D455] 전체 스트림: "
+        f"{prefix}{cam.rgb_topic}, {prefix}{cam.depth_topic}, "
+        f"{prefix}{cam.pointcloud_topic}, {prefix}{cam.infra1_topic}, "
+        f"{prefix}{cam.infra2_topic}, {prefix}{cam.imu_topic}")
+
+
 def build_camera_optical_tf(stage, graph_path: str, base_prim: str,
                             camera_prim: str, frame_id: str,
-                            domain_id: int = DOMAIN_ID, log=print) -> None:
+                            domain_id: int = DOMAIN_ID, log=print,
+                            tf_topic: str = "/tf") -> None:
     """손끝 USD Camera의 ROS optical frame을 네이티브 동적 TF로 발행한다.
 
     USD Camera(+X 오른쪽,+Y 위,-Z 전방) 아래에 X축 180° 회전한 프림을 두면
@@ -434,11 +598,37 @@ def build_camera_optical_tf(stage, graph_path: str, base_prim: str,
            ("SimTime.outputs:simulationTime", "Tf.inputs:timeStamp")],
           [("Ctx.inputs:domain_id", domain_id),
            ("Ctx.inputs:useDomainIDEnvVar", False),
-           ("Tf.inputs:topicName", "/tf"),
+           ("Tf.inputs:topicName", tf_topic),   # 격리 시 /{ns}/tf (기본 전역 /tf)
            ("Tf.inputs:staticPublisher", False)])
     _set_target(stage, f"{graph_path}/Tf", "inputs:parentPrim", base_prim)
     _set_target(stage, f"{graph_path}/Tf", "inputs:targetPrims", optical_path)
     log(f"[Camera] 동적 TF: {stage.GetPrimAtPath(base_prim).GetName()}→{frame_id}")
+
+
+def build_sensor_tf(stage, graph_path: str, base_prim: str,
+                    sensor_prim: str, frame_id: str,
+                    domain_id: int = DOMAIN_ID, log=print,
+                    tf_topic: str = "/tf") -> None:
+    """카메라가 아닌 센서(IMU 등)의 로컬 축을 그대로 ROS TF로 발행한다."""
+    from pxr import Gf, UsdGeom
+
+    frame_path = f"{sensor_prim}/{frame_id}"
+    frame = UsdGeom.Xform.Define(stage, frame_path)
+    frame.ClearXformOpOrder()
+    frame.AddTranslateOp().Set(Gf.Vec3d(0.0))
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]),
+           ("SimTime", T["SimTime"]), ("Tf", T["PubTf"])],
+          [("OnTick.outputs:tick", "Tf.inputs:execIn"),
+           ("Ctx.outputs:context", "Tf.inputs:context"),
+           ("SimTime.outputs:simulationTime", "Tf.inputs:timeStamp")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("Tf.inputs:topicName", tf_topic),
+           ("Tf.inputs:staticPublisher", False)])
+    _set_target(stage, f"{graph_path}/Tf", "inputs:parentPrim", base_prim)
+    _set_target(stage, f"{graph_path}/Tf", "inputs:targetPrims", frame_path)
+    log(f"[Sensor] 동적 TF: {stage.GetPrimAtPath(base_prim).GetName()}→{frame_id}")
 
 
 class TwistPoller:
@@ -509,6 +699,47 @@ class StringPublisher:
             except Exception:
                 return False
         og.Controller.set(self._attr, value)
+        return True
+
+
+class Float64Poller:
+    """제네릭 Float64 Subscriber의 현재 ``data`` 값을 읽는다."""
+
+    def __init__(self, node_path: str):
+        self._path = node_path
+        self._attr = None
+        self._last = None
+
+    def poll(self) -> float | None:
+        if self._attr is None:
+            try:
+                self._attr = og.Controller.attribute("outputs:data", self._path)
+            except Exception:
+                return None
+        raw = og.Controller.get(self._attr)
+        if raw is None:
+            return None
+        value = float(raw)
+        if self._last is not None and value == self._last:
+            return None
+        self._last = value
+        return value
+
+
+class Float64Publisher:
+    """제네릭 Float64 Publisher의 ``data`` 입력을 Python에서 갱신한다."""
+
+    def __init__(self, node_path: str):
+        self._path = node_path
+        self._attr = None
+
+    def publish(self, value: float) -> bool:
+        if self._attr is None:
+            try:
+                self._attr = og.Controller.attribute("inputs:data", self._path)
+            except Exception:
+                return False
+        og.Controller.set(self._attr, float(value))
         return True
 
 

@@ -180,3 +180,19 @@ def add_sphere_collider(stage: Usd.Stage, path: str, radius: float) -> None:
     sph.CreateRadiusAttr(float(radius))
     UsdGeom.Imageable(sph.GetPrim()).MakeInvisible()   # 충돌 전용, 시각 숨김
     UsdPhysics.CollisionAPI.Apply(sph.GetPrim())
+
+
+def set_material_friction(stage: Usd.Stage, mat_path: str, mu: float) -> bool:
+    """기존 물리 머티리얼의 마찰(static=dynamic=mu)을 실시간 변경 + combineMode='min'.
+    스파이크 마찰 스윕용(2026-07-22): 과실/줄기 머티리얼만 바꿔도 combineMode=min 이라
+    유효 마찰 = min(mu, 그리퍼 0.9) = mu (mu≤0.9). 케이스마다 Isaac 재시작 없이 μ 변경."""
+    mat = stage.GetPrimAtPath(mat_path)
+    if not mat.IsValid():
+        return False
+    api = UsdPhysics.MaterialAPI.Apply(mat)
+    api.CreateStaticFrictionAttr(float(mu))
+    api.CreateDynamicFrictionAttr(float(mu))
+    # 두 접촉면 마찰 결합을 'min' 으로 → 과실 μ 하나가 유효 마찰을 지배(깨끗한 스윕변수).
+    px = PhysxSchema.PhysxMaterialAPI.Apply(mat)
+    px.CreateFrictionCombineModeAttr().Set("min")
+    return True

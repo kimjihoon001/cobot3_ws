@@ -816,14 +816,26 @@ class HarvestMM:
         base_link 로컬로 변환해 월드 자리를 보존. 빈 Xform(/D455) 밑 자산 자식(/D455/asset)
         구조라 상속 op 충돌(§8)이 없다.
         """
-        from isaacsim.core.utils.stage import add_reference_to_stage
         path = f"{self._grip_base}/D455"
         mount = UsdGeom.Xform.Define(stage, path)          # 빈 프레임(상속 op 없음)
         url = assets.resolve(self._cfg.assets.camera, "카메라(RealSense D455)")
-        add_reference_to_stage(url, path + "/asset")        # 자산은 자식으로
-        # 물리 잔재를 전부 벗긴다 (강체·PhysX·콜라이더·아티큘레이션루트·내부 조인트).
-        # ⚠ "RSD455 rigid body 못 찾음" 로그는 이걸로도 안 사라진다(2026-07-19 확인) —
-        #   텐서 뷰 쪽 원인 미상, 기능 영향 없음(카메라 시각·물리 정상). 무해로 문서화.
+        # 전체 /Root/RSD455를 참조하면 내장 Imu_Sensor가 참조 직후 자체 rigid-body
+        # tensor view를 등록한다. MoveIt D455가 함께 있을 때 두 센서가 (2, 6) view로
+        # 묶여 getVelocities expected 6 / received 12 오류를 매 프레임 낸다. RMP
+        # 로봇은 RGB/depth만 사용하므로 물리가 전혀 없는 안전한 하위 prim만 가져온다.
+        asset = UsdGeom.Xform.Define(stage, path + "/asset").GetPrim()
+        safe_refs = {
+            "Visual": "/Root/RSD455/Visual",
+            "Color": "/Root/RSD455/Camera_OmniVision_OV9782_Color",
+            "Depth": "/Root/RSD455/Camera_Pseudo_Depth",
+            "Infra1": "/Root/RSD455/Camera_OmniVision_OV9782_Left",
+            "Infra2": "/Root/RSD455/Camera_OmniVision_OV9782_Right",
+        }
+        for name, source in safe_refs.items():
+            prim = stage.DefinePrim(f"{asset.GetPath()}/{name}")
+            prim.GetReferences().AddReference(url, source)
+
+        # 안전 하위 prim에도 향후 에셋 변경으로 물리 API가 들어올 가능성을 차단한다.
         for prim in Usd.PrimRange(stage.GetPrimAtPath(path + "/asset")):
             if prim.IsA(UsdPhysics.Joint):                  # 에셋 내부 조인트 비활성
                 prim.SetActive(False)
@@ -855,11 +867,25 @@ class HarvestMM:
         강체·콜라이더 API 는 제거 — base_link(강체) 밑에 중첩 강체가 있으면
         PhysX 가 xformstack reset 에러를 낸다 (disable 로는 안 조용해짐).
         """
-        from isaacsim.core.utils.stage import add_reference_to_stage
-
         url = assets.resolve(self._cfg.assets.camera, "카메라(RealSense D455)")
         container = UsdGeom.Xform.Define(stage, path).GetPrim()
-        add_reference_to_stage(url, path + "/asset")
+        # 전체 RSD455 루트에는 RigidBodyAPI와 IMU용 tensor view가 들어 있다.
+        # 같은 Stage에 MoveIt 수확 로봇의 D455도 있으면 두 view가 하나의
+        # (2, 6) 배치로 묶여, 단일 센서용 getVelocities(6) 호출이 매 프레임
+        # expected 6 / received 12 오류를 낸다. 시각·카메라 하위 prim만
+        # 개별 참조해 센서 캘리브레이션은 유지하고 물리 루트는 가져오지 않는다.
+        asset = UsdGeom.Xform.Define(stage, path + "/asset").GetPrim()
+        safe_refs = {
+            "Visual": "/Root/RSD455/Visual",
+            "Color": "/Root/RSD455/Camera_OmniVision_OV9782_Color",
+            "Depth": "/Root/RSD455/Camera_Pseudo_Depth",
+            "Infra1": "/Root/RSD455/Camera_OmniVision_OV9782_Left",
+            "Infra2": "/Root/RSD455/Camera_OmniVision_OV9782_Right",
+        }
+        for name, source in safe_refs.items():
+            prim = stage.DefinePrim(f"{asset.GetPath()}/{name}")
+            prim.GetReferences().AddReference(url, source)
+
         for prim in Usd.PrimRange(stage.GetPrimAtPath(path + "/asset")):
             if prim.IsA(UsdPhysics.Joint):
                 prim.SetActive(False)

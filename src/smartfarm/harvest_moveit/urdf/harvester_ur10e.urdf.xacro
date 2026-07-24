@@ -1,0 +1,95 @@
+<?xml version="1.0"?>
+<!-- 수확 MM 의 UR10e — MoveIt 계획 대상은 팔 6축만.
+     Isaac 쪽 관절 이름(shoulder_pan_joint …)과 동일한 표준 UR 이름을 쓴다(tf_prefix 없음).
+     그리퍼(2F-85)·베이스는 MoveIt 밖: 그리퍼는 /harvester_moveit/cmd JSON, 베이스는 텔레옵/Nav2. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur">
+
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+
+  <link name="world"/>
+
+  <!-- generate_ros2_control_tag=false — UR 실기 드라이버 하드웨어 태그를 끄고
+       아래 topic_based(토픽 하드웨어)를 직접 단다. -->
+  <xacro:ur_robot
+      name="ur"
+      tf_prefix=""
+      parent="world"
+      generate_ros2_control_tag="false"
+      joint_limits_parameters_file="$(find ur_description)/config/ur10e/joint_limits.yaml"
+      kinematics_parameters_file="$(find ur_description)/config/ur10e/default_kinematics.yaml"
+      physical_parameters_file="$(find ur_description)/config/ur10e/physical_parameters.yaml"
+      visual_parameters_file="$(find ur_description)/config/ur10e/visual_parameters.yaml">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:ur_robot>
+
+  <!-- Isaac 토픽 하드웨어 — robot_bridge.py 의 조인트 브리지 쌍과 정확히 일치:
+         write() → /harvester_moveit/joint_command (Isaac ArticulationController 가 적용)
+         read()  ← /harvester_moveit/joint_states  (Isaac 이 매 틱 발행)
+       Isaac 의 joint_states 에 베이스/그리퍼 관절이 섞여 와도 이름 매칭으로 6축만 읽는다.
+       발행하는 명령도 아래 6축뿐이라 그리퍼/베이스는 안 건드린다. -->
+  <!-- initial_value = Isaac 시작자세(HOME_POSE_DEG). 없으면 명령 버퍼가 0으로 시작해
+       컨트롤러 activate 전 기동 창(수 초)에 0 명령이 발행돼 팔을 홈에서 끌어낸다
+       (2026-07-22 헤드리스 실측: 팔이 (0,2.85,0,2.27,0)으로 끌려가 JTC 가 그 자세를 hold). -->
+  <ros2_control name="IsaacTopicBased" type="system">
+    <hardware>
+      <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
+      <param name="joint_commands_topic">/harvester_moveit/joint_command</param>
+      <param name="joint_states_topic">/harvester_moveit/joint_states</param>
+    </hardware>
+    <joint name="shoulder_pan_joint">
+      <command_interface name="position">
+        <param name="initial_value">0.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="shoulder_lift_joint">
+      <command_interface name="position">
+        <param name="initial_value">4.7123890</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">4.7123890</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="elbow_joint">
+      <command_interface name="position">
+        <param name="initial_value">1.5707963</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">1.5707963</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_1_joint">
+      <command_interface name="position">
+        <param name="initial_value">3.1415927</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">3.1415927</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_2_joint">
+      <command_interface name="position">
+        <param name="initial_value">-1.5707963</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">-1.5707963</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_3_joint">
+      <command_interface name="position">
+        <param name="initial_value">0.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+</robot>
