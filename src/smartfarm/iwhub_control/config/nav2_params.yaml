@@ -78,46 +78,42 @@ controller_server:
       yaw_goal_tolerance: 0.25
       stateful: true
     FollowPath:
-      # DWB는 로컬 costmap의 장애물을 반영해 여러 전진/회전 속도 궤적을 비교한다.
-      # 충돌 시 정지만 하던 RPP와 달리 유효한 좌우 원호를 선택해 능동 회피한다.
-      plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: false
-      min_vel_x: -0.25
-      max_vel_x: 0.50
-      max_vel_theta: 0.80
-      min_speed_xy: 0.0
-      max_speed_xy: 0.50
-      min_speed_theta: 0.0
-      acc_lim_x: 1.2
-      acc_lim_theta: 1.6
-      decel_lim_x: -1.5
-      decel_lim_theta: -2.0
-      vx_samples: 25
-      vtheta_samples: 35
-      sim_time: 2.0
-      linear_granularity: 0.05
-      angular_granularity: 0.025
+      # RPP(Regulated Pure Pursuit, 2026-07-24) — DWB 교체. DWB는 초기 heading(iw −X)에서
+      # 레인 경로(+Y)로 못 돌아 복구루프(backup)에 빠져 "돌기만" 했다. RPP는
+      # use_rotate_to_heading로 큰 각도를 제자리 회전 후 전진 추종하고, 곡률/비용 기반
+      # 감속으로 원호를 매끄럽게 돈다.
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.45
+      lookahead_dist: 0.8
+      min_lookahead_dist: 0.4
+      max_lookahead_dist: 1.2
+      lookahead_time: 1.5
+      use_velocity_scaled_lookahead_dist: true
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.25
-      trans_stopped_velocity: 0.05
-      short_circuit_trajectory_evaluation: true
-      stateful: true
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "ObstacleFootprint",
-                "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      # 장애물 회피(2026-07-24, codex 검토 반영). BaseObstacle=중심셀 비용 그라디언트(원형 가정).
-      BaseObstacle.scale: 0.5
-      # ★ObstacleFootprint = 실제 긴 IW footprint(1.43×0.75)를 코스트맵에 대고 검사 →
-      #   뒤꽁무니가 배드를 클립하는 궤적까지 무효화. 충돌 궤적은 scale 무관하게 배제됨.
-      ObstacleFootprint.scale: 1.0
-      PathAlign.scale: 24.0
-      PathAlign.forward_point_distance: 0.35
-      GoalAlign.scale: 18.0
-      GoalAlign.forward_point_distance: 0.35
-      PathDist.scale: 32.0
-      GoalDist.scale: 24.0
-      RotateToGoal.scale: 20.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
+      use_interpolation: true
+      # 초기/큰 heading 오차는 제자리 회전 후 전진 — iw −X 시작 문제 해결(복구루프 제거).
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.6
+      rotate_to_heading_angular_vel: 0.8
+      max_angular_accel: 2.0
+      # 곡률 큰 코너에서 감속 → 원호 매끄럽게.
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.15
+      # 배드(고비용) 근처 감속 — local inflation cost_scaling(6.0)과 맞춤.
+      use_cost_regulated_linear_velocity_scaling: true
+      inflation_cost_scaling_factor: 6.0
+      cost_scaling_dist: 0.4
+      cost_scaling_gain: 1.0
+      # 전방 경로 충돌 감지 → 감속/정지 (RPP 내장 안전).
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.5
+      # 목표 근처 감속.
+      min_approach_linear_velocity: 0.05
+      approach_velocity_scaling_dist: 0.6
+      # 전진 전용(후진 경로 안 만듦). iw는 좁은 아일서 후진 불가.
+      allow_reversing: false
+      max_robot_pose_search_dist: 10.0
 
 local_costmap:
   local_costmap:
@@ -170,10 +166,10 @@ local_costmap:
           raytrace_max_range: 25.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 로컬 안전 여유 띠(2026-07-24: 1cm→20cm). 그라디언트라 조기정지 아님 —
-        # 컨트롤러가 배드 가장자리를 피하도록 유도하되 통로 통과는 막지 않는다.
+        # 로컬 안전 여유 띠. inscribed_radius(local footprint 0.376) 이상이어야 유효 —
+        # 0.55로. 그라디언트라 조기정지 아님(레인 중심선은 배드서 1.24m라 무비용).
         cost_scaling_factor: 6.0
-        inflation_radius: 0.20
+        inflation_radius: 0.55
 
 global_costmap:
   global_costmap:
@@ -216,10 +212,12 @@ global_costmap:
           raytrace_max_range: 25.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 배드 주변 비용 그라디언트로 계획 경로를 통로 중앙으로 민다(2026-07-24, 안정성).
-        # 2.9m 통로에 0.45m → 자유회랑 2.0m, iw 0.75m 여유충분. 배드 충돌 회피의 핵심.
+        # inflation_radius는 반드시 inscribed_radius(global footprint 0.436) 이상이어야 충돌모델이
+        # 유효하다(Nav2 경고). 배드 회피는 레인 경로(lanes.py, 1.24m 클리어)가 담당하므로 여유는
+        # 크게 두지 않되, 로봇 반경보단 크게 0.55로. (이전 0.12는 라이다 self-return 오판 근거였음 —
+        # 실제 -1.0은 Isaac no-hit 센티넬로 costmap이 버림. 정지 원인은 BT 프레임 버그였고 수정됨.)
         cost_scaling_factor: 3.0
-        inflation_radius: 0.45
+        inflation_radius: 0.55
 
 planner_server:
   ros__parameters:
@@ -264,7 +262,8 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
     max_velocity: [0.50, 0.0, 0.80]
-    min_velocity: [-0.25, 0.0, -0.80]
+    # 전진 전용(RPP allow_reversing:false와 일치) — 후진 속도 0. 좁은 아일서 후진 불가.
+    min_velocity: [0.0, 0.0, -0.80]
     max_accel: [1.2, 0.0, 1.6]
     max_decel: [-1.5, 0.0, -2.0]
     odom_topic: "odom"

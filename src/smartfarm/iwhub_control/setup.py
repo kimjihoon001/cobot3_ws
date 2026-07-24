@@ -20,6 +20,8 @@ setup(
         (os.path.join("share", package_name, "maps"),
          glob("maps/*.pgm") + glob("maps/*.yaml")),
         (os.path.join("share", package_name, "urdf"), glob("urdf/*.urdf")),
+        (os.path.join("share", package_name, "behavior_trees"),
+         glob("behavior_trees/*.xml")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

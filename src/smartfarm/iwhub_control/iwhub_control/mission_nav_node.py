@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 
 import rclpy
 from action_msgs.msg import GoalStatus
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import ManageLifecycleNodes
@@ -306,10 +308,14 @@ class MissionNavNode(Node):
 
     def _send_dock_route(self) -> None:
         """현재 위치→지게차 도크까지 통로 레인 경로를 NavigateThroughPoses로 보낸다."""
-        iw_x, iw_y, _ = self._iw_pose
-        route = lanes.dock_route(iw_x, iw_y)
+        iw_x, iw_y, iw_yaw = self._iw_pose
+        route = lanes.dock_route(iw_x, iw_y, iw_yaw)
         goal = NavigateThroughPoses.Goal()
         goal.poses = [self._make_pose(x, y, yaw) for (x, y, yaw) in route]
+        # 전진 전용 BT — 기본 BT의 Spin/BackUp 복구를 배제(회전이 AMCL/라이다 정합을 흔듦).
+        goal.behavior_tree = os.path.join(
+            get_package_share_directory("iwhub_control"),
+            "behavior_trees", "forward_only_through_poses.xml")
         self._request_pending = True
         self._goal_gen += 1
         gen = self._goal_gen

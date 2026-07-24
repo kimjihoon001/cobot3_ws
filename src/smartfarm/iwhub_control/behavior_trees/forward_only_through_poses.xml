@@ -1,0 +1,39 @@
+<!--
+  전진 전용 NavigateThroughPoses BT (iw 도크 인계용).
+  기본 BT의 복구(Spin→Wait→BackUp)를 제거한다. iw는 후진 불가(velocity_smoother min_x=0)
+  이고, Spin 회전은 주행 실패 시 로봇을 제자리 회전시켜 AMCL/라이다 정합을 흔들어
+  "라이다가 틀어진" 착시를 만들며 복구루프에 가둔다(2026-07-24 GPU 실측).
+  → 복구는 costmap을 지우고 잠깐 대기 후 재계획만. 로봇을 절대 회전/후진시키지 않는다.
+  정상 heading 정렬은 RPP(use_rotate_to_heading)가 주행 중 담당한다.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
+            <ReactiveSequence>
+              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.7"
+                                 global_frame="iwhub_0/map" robot_base_frame="iwhub_0/base_link"/>
+              <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+            </ReactiveSequence>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <!-- 전진 전용 복구: Spin/BackUp 없음. costmap clear + 짧은 대기 후 재계획만. -->
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <Sequence name="ClearingActions">
+          <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+          <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Wait wait_duration="2.0"/>
+        </Sequence>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

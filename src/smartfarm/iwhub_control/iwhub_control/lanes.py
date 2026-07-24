@@ -6,10 +6,11 @@
 지오메트리에서 유도한다.
 
   이랑 X = (-4.35, -1.45, 1.45, 4.35)   구간 Y = (-9.8..-5.6, -2.1..2.1, 5.6..9.8)
-  온실 Y[-13,13]   창고 도어(중앙 4.8m) Y=13   지게차 인계 도크 (0, 10.85, +Y)
+  온실 Y[-13,13]   창고 도어(중앙 4.8m) Y=13   지게차 인계 도크 (0, 10.85, yaw=−X)
 
-레인 = 배드 사이·둘레 통로의 중심선. 코너는 원호(pivot 아님). 지게차 인계는 도크에 +Y로
-접근해 창고 쪽을 향해 정차해야 하므로, 도크 진입은 항상 X=0 레인을 아래→위(+Y)로 탄다.
+레인 = 배드 사이·둘레 통로의 중심선. 코너는 원호(pivot 아님). 도크 진입은 항상 X=0 레인을
+아래→위(+Y)로 타되, 최종 정차 자세는 −X(iw 스폰 orientation=canonical 도킹 자세). 즉
++Y로 접근해 도크에서 −X로 90° 정렬(포크가 도크 위 +Y에서 인계).
 """
 from __future__ import annotations
 
@@ -20,7 +21,9 @@ import math
 VLANES = (-6.0, -2.9, 0.0, 2.9, 6.0)
 # 가로 레인 Y: 재배 구간 사이 중점(-3.85, 3.85) + 하단(-11.5)/상단(11.5, 도어 앞).
 HLANES = (-11.5, -3.85, 3.85, 11.5)
-DOCK = (0.0, 10.85, math.pi / 2.0)   # 지게차 인계 정위치 (yaw=+Y = 창고 향함)
+# 지게차 인계 정위치. yaw=π(−X 향함) = iw 스폰 orientation(SPAWN_YAW_DEG=180°) = iw_dock.py
+# canonical 도킹 자세. 포크는 도크 바로 위(0,14.5)에서 인계하므로 iw는 −X로 정차한다.
+DOCK = (0.0, 10.85, math.pi)
 # 도크 직전 X=0 레인에서 이 Y부터 위로 곧게 +Y 접근한다(구간3 위 통로).
 DOCK_APPROACH_Y = 3.85
 
@@ -85,37 +88,29 @@ def _straight(x0, y0, x1, y1, step: float = 0.5):
             for i in range(1, n + 1)]
 
 
-def dock_route(sx: float, sy: float, arc_r: float = 0.8, step: float = 0.5):
-    """iw 현재 (sx,sy) → 지게차 도크까지 통로 레인 경로(원호 코너, 전진 전용).
+def dock_route(sx: float, sy: float, syaw: float, arc_r: float = 0.8,
+               step: float = 0.5):
+    """iw (sx,sy,syaw) → 지게차 도크(0,10.85,+Y). 전진 전용, 시작 자세에서 연속 연결.
 
-    전략(전진 전용·도크 +Y 접근 보장):
-      1) 현재 세로 레인을 위로 올라가 X-전환 가로 레인(DOCK_APPROACH_Y)까지.
-      2) 원호 코너로 가로 레인 진입 → 중앙(X=0)까지.
-      3) 원호 코너로 X=0 레인 진입 → +Y로 곧게 도크(0,10.85)까지.
-    현재 레인이 이미 X=0이면 1·2 생략하고 바로 +Y 접근한다.
+    도크는 중앙 레인(X=0) 위에 있고 +Y로 접근해야 하므로:
+      1) 현재 위치에서 X=0 레인에 합류(수평 전진 → 원호로 +Y 전환).
+      2) X=0 레인을 +Y로 곧게 도크까지. X=0은 이랑 사이 중앙 통로라 아래→위 배드-클리어.
+    첫 웨이포인트=현재 자세(측면 점프 제거). 원호는 직선과 접점에서 연속(코너 뒤점프 없음:
+    직선이 코너가 아니라 접점 tangent_x/±arc_r 에서 끝난다).
+    ⚠ 수평 합류가 현재 Y(sy)에서 일어나므로 sy가 배드 구간 Y 안이면 별도 교차통로 경유 필요
+      (현재는 배드-프리 시작구역 가정). 전체 footprint 안전은 sweep 검증이 담당(별도).
     반환 = [(x,y,yaw), ...] (map 프레임).
     """
-    lane_x = _nearest(sx, VLANES)
     dock_x, dock_y, dock_yaw = DOCK
-    wps: list[tuple[float, float, float]] = []
-
-    if abs(lane_x - dock_x) < 0.15:
-        # 이미 중앙 레인 — 곧장 +Y 도크 접근
-        wps += _straight(dock_x, sy, dock_x, dock_y, step)
-        wps.append((dock_x, dock_y, dock_yaw))
-        return wps
-
-    ty = DOCK_APPROACH_Y
-    # 1) 현재 레인 위로 전환 가로 레인까지 (+Y)
-    wps += _straight(lane_x, sy, lane_x, ty, step)
-    # 2) 코너: +Y로 들어와 도크쪽 수평으로
-    hdir = (1.0, 0.0) if dock_x > lane_x else (-1.0, 0.0)
-    wps += _corner_arc(lane_x, ty, (0.0, 1.0), hdir, arc_r)
-    wps += _straight(lane_x + hdir[0] * arc_r, ty, dock_x - hdir[0] * arc_r, ty, step)
-    # 3) 코너: 수평으로 들어와 +Y(도크)로
-    wps += _corner_arc(dock_x, ty, hdir, (0.0, 1.0), arc_r)
-    # 4) X=0 레인 +Y로 곧게 도크까지
-    wps += _straight(dock_x, ty + arc_r, dock_x, dock_y, step)
+    wps: list[tuple[float, float, float]] = [(sx, sy, syaw)]   # 현재 자세에서 출발
+    if abs(sx - dock_x) <= 0.15:
+        wps += _straight(dock_x, sy, dock_x, dock_y, step)     # 이미 X=0 — 곧장 +Y
+    else:
+        hdir = -1.0 if sx > dock_x else 1.0                    # 도크X(0) 쪽 수평 방향
+        tangent_x = dock_x - hdir * arc_r                      # 원호 진입 접점(직선 끝)
+        wps += _straight(sx, sy, tangent_x, sy, step)          # 수평 전진(접점까지)
+        wps += _corner_arc(dock_x, sy, (hdir, 0.0), (0.0, 1.0), arc_r)  # 원호 → +Y
+        wps += _straight(dock_x, sy + arc_r, dock_x, dock_y, step)      # +Y로 도크까지
     wps.append((dock_x, dock_y, dock_yaw))
     return wps
 
@@ -126,12 +121,16 @@ def follow_lane_x(mm_x: float) -> float:
 
 
 if __name__ == "__main__":   # self-test (ROS 불필요)
-    for (sx, sy) in [(-2.9, -8.0), (0.0, -8.0), (2.9, 5.0), (-6.0, -11.5)]:
-        r = dock_route(sx, sy)
-        print(f"\nstart=({sx},{sy})  waypoints={len(r)}")
-        for x, y, yaw in r:
-            print(f"   ({x:6.2f}, {y:6.2f})  yaw={math.degrees(yaw):6.1f}")
-        # 실제 배드 사각형 기준 최소 클리어런스 (경로 보장 검사)
+    # (x, y, yaw) — 실제 iw 시작(1.6955,-12,180°) 포함
+    for (sx, sy, syaw) in [(1.6955, -12.0, math.pi), (-2.9, -12.0, math.pi),
+                           (0.0, -11.5, math.pi / 2), (2.9, -12.0, 0.0)]:
+        r = dock_route(sx, sy, syaw)
+        print(f"\nstart=({sx},{sy},{math.degrees(syaw):.0f}°)  waypoints={len(r)}")
+        # 연속성 검사: 인접 웨이포인트 간 최대 점프(원호 뒤점프 버그 재발 방지)
+        jumps = [math.hypot(r[i+1][0]-r[i][0], r[i+1][1]-r[i][1])
+                 for i in range(len(r)-1)]
         clr = min(clearance(x, y) for x, y, _ in r)
-        ok = clr > 0.45   # iw 반폭 0.376 + 여유. 넘으면 중심경로가 배드에서 안전.
-        print(f"   배드 최소거리 = {clr:.2f}m  {'✅ 안전' if ok else '⚠ 근접'}")
+        print(f"   최대 점프 = {max(jumps):.2f}m (step 0.5 근처여야 연속) | "
+              f"배드 최소거리(중심) = {clr:.2f}m "
+              f"{'✅' if max(jumps) < 0.9 and clr > 0.45 else '⚠'} "
+              f"(clr은 참고용 — 전체 footprint sweep 아님)")
