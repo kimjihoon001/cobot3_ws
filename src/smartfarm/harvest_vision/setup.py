@@ -35,6 +35,7 @@ setup(
             "target_approach_node = harvest_vision.target_approach_node:main",
             "manipulator_target_node = harvest_vision.manipulator_target_node:main",
             "nav_harvest_test_node = harvest_vision.nav_harvest_test_node:main",
+            "fixed_harvest_moveit_node = harvest_vision.fixed_harvest_moveit_node:main",
             "harvest_teleop = harvest_vision.harvest_teleop:main",
         ],
     },

@@ -42,8 +42,9 @@ Visualization Manager:
         Goal State Color: 250; 128; 0
         Interactive Marker Size: 0.15
         Joint Violation Color: 255; 0; 255
-        Planning Group: ur_manipulator
-        Query Goal State: true
+        Planning Group: mm_manipulator
+        # 실제 Scene Robot만 표시하고 저장된 Query Goal ghost는 숨긴다.
+        Query Goal State: false
         Query Start State: false
         Show Workspace: false
         Start State Alpha: 0.5
@@ -72,12 +73,14 @@ Visualization Manager:
       Class: rviz_default_plugins/Orbit
       Distance: 2.5
       Focal Point:
-        X: 0.3
+        X: -0.25
         Y: 0
-        Z: 0.6
+        Z: 0.8
       Name: Current View
-      Pitch: 0.35
-      Yaw: 5.5
+      # m0617 홈 접힘은 X-Z 평면이다. Y축 정측면에서 봐야 '>' 형상이
+      # 깊이 방향으로 눌려 일자로 보이지 않는다.
+      Pitch: 0.15
+      Yaw: 1.5708
 Window Geometry:
   Height: 900
   Width: 1400

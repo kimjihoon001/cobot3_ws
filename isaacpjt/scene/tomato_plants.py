@@ -274,6 +274,12 @@ class TomatoPlants:
         set_pose(stage.GetPrimAtPath(path), (x, y, c.foliage_z),
                  Gf.Quatd(q.GetReal(), q.GetImaginary()))
         set_scale(stage.GetPrimAtPath(path), c.foliage_scale * height_scale)
+        # 참조 메시가 아직 비동기 로딩 중이어도 루트 상속 재질의 fallback이 초록이므로
+        # 회색 프레임이 나타나지 않는다. 로딩된 메시에는 아래에서 한 번 더 직접 바인딩한다.
+        ripeness.bind_matte_material(
+            stage, path,
+            mat_path="/World/Looks/MatteFoliage",
+            fallback_color=FOLIAGE_COLOR)
         # 변환된 USD 메시엔 흰색 기본 재질이 바인딩돼 있어 루트 무광재질을 덮는다.
         # reference 180개가 재구성될 때 루트의 상속 바인딩이 간헐적으로 회색 fallback으로
         # 남으므로, 각 mesh에 초록 primvar와 무광 재질을 직접 바인딩한다.
@@ -283,7 +289,10 @@ class TomatoPlants:
         ripeness.apply_flat_color(stage, path, FOLIAGE_COLOR)
         for prim in Usd.PrimRange(stage.GetPrimAtPath(path)):
             if prim.IsA(UsdGeom.Mesh):
-                ripeness.bind_matte_material(stage, str(prim.GetPath()))
+                ripeness.bind_matte_material(
+                    stage, str(prim.GetPath()),
+                    mat_path="/World/Looks/MatteFoliage",
+                    fallback_color=FOLIAGE_COLOR)
 
     def _spawn_fruit(self, stage: Usd.Stage, plant_path: str, path: str,
                      stem_x: float, stem_y: float,
@@ -291,9 +300,10 @@ class TomatoPlants:
                      fi: int, nf: int, sector: int = 0) -> None:
         c = self._cfg
         rng = self._rng
-        names = list(c.class_weights)
-        class_name = rng.choices(names, weights=[c.class_weights[n] for n in names])[0]
-        body_usd, calyx_usd = rng.choice(variants[class_name])
+        # 현재 통합 수확시험은 품질 분류를 하지 않는다. 모든 과실을 수확 대상
+        # ripe 형상/라벨/빨간색으로 고정해 회색 fallback과 숙도별 색 차이를 없앤다.
+        class_name = "ripe"
+        body_usd, calyx_usd = rng.choice(variants["ripe"])
 
         # 화방: 줄기에서 옆으로 조금(pedicel_h_offset) + 아래로 매단다 (인장).
         # spike 02: 수평 캔틸레버는 굽힘모멘트가 break_torque(0.067N·m)를 넘겨 바로 끊긴다.
@@ -319,10 +329,18 @@ class TomatoPlants:
         xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
 
         add_reference_to_stage(body_usd, path + "/Body")
-        ripeness.apply_ripeness_color(stage, path + "/Body", class_name, rng)
+        ripeness.apply_flat_color(stage, path + "/Body", ripeness.RED)
+        ripeness.bind_matte_material(
+            stage, path + "/Body",
+            mat_path="/World/Looks/MatteFruitRipe",
+            fallback_color=ripeness.RED)
         if calyx_usd:
             add_reference_to_stage(calyx_usd, path + "/Calyx")
             ripeness.apply_flat_color(stage, path + "/Calyx", ripeness.GREEN)
+            ripeness.bind_matte_material(
+                stage, path + "/Calyx",
+                mat_path="/World/Looks/MatteCalyx",
+                fallback_color=ripeness.GREEN)
 
         # 물리: 몸통 메시에만 콜라이더 (꼭지는 장식이라 제외 = 비용 절감).
         # 과실은 처음부터 dynamic이고 꽃자루 FixedJoint가 매단다. 예전 kinematic 방식은

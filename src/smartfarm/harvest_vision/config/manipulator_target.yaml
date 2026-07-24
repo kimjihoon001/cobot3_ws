@@ -8,7 +8,17 @@ manipulator_target_node:
     state_topic: /harvester_0/manipulator/target_state
     rmp_status_topic: /harvester_0/rmpflow/status
     basket_pose_topic: /iw/basket/empty_slot_pose
-    harvest_enable_topic: /harvest_test/enable
+    basket_pose_max_age_sec: 2.0
+    use_iw_tf_basket_fallback: true
+    iw_base_frame: iwhub_0/base_link
+    iw_empty_basket_offsets: [
+      -0.465, 0.125, 0.52,
+      -0.155, -0.125, 0.52,
+      0.155, -0.125, 0.52,
+      0.155, 0.125, 0.52,
+      0.465, 0.125, 0.52
+    ]
+    harvest_enable_topic: harvest_test/enable
     external_harvest_gate_enabled: false
     mobility_ready_topic: /harvester_0/manipulator/mobility_ready
     # fleet_dispatch/harvester_nav2.launch.py 기본 namespace가 비어 있으므로 TF도 base_link다.
@@ -21,12 +31,36 @@ manipulator_target_node:
     max_jump_m: 0.5
     auto_grasp_enabled: true
     pregrasp_clearance_m: 0.15
-    grasp_z_offset_m: -0.02   # 파지점이 살짝 위로 잡혀서 목표 Z 를 내림(음수=아래, 2026-07-22)
-    tool_grasp_reach_m: 0.115
+    # 선택 시점 경로: 최종보다 5cm 위 PREGRASP에서 시작해
+    # 2.5cm 위 보조점을 거쳐 CIRC로 최종점까지 내려간다.
+    circ_entry_back_m: 0.17
+    circ_entry_radius_scale: 0.0
+    circ_entry_radius_lift_scale: -1.0
+    circ_entry_min_back_m: 0.06
+    circ_entry_drop_m: 0.10
+    circ_vertical_descent_m: 0.05
+    lin_approach_m: 0.10
+    scoop_outer_radius_m: 0.057
+    circ_clearance_margin_m: 0.019
+    approach_vertical_offset_m: 0.025
+    # 최종 CIRC에서 harvest_tcp XYZ를 토마토 기하 중심과 정확히 일치시킨다.
+    grasp_vertical_offset_m: 0.0
+    grasp_half_fruit_height_scale: 0.0
+    sim_fruit_height_fallback_m: 0.068
+    sim_fruit_radius_fallback_m: 0.034
+    reacquire_max_m: 0.12
+    capture_abort_m: 0.07
+    capture_deadband_m: 0.008
+    capture_trim_max_m: 0.035
+    tool_grasp_reach_m: 0.132
     motion_timeout_sec: 10.0
-    # 닫기 후 양쪽 손가락이 같은 토마토에 접촉하면 Isaac에서 30N 예압으로
-    # 전환하고 0.5초 연속 유지한 뒤에만 꽃자루 FixedJoint를 해제한다.
-    gripper_close_settle_sec: 1.0
+    # 수용부 닫힘과 TCP 근접을 확인한 다음 외측 칼날이 50°에 도달해야 꽃자루를 해제한다.
+    gripper_close_settle_sec: 1.5
+    blade_cut_deg: 50.0
+    blade_cut_complete_deg: 40.0
+    blade_motion_timeout_sec: 8.0
+    blade_open_deg: 0.0
+    blade_angle_tolerance_deg: 1.0
     grasp_tcp_max_distance_m: 0.09
     grasp_verify_retract_m: 0.03
     grasp_follow_max_delta_m: 0.015
@@ -35,6 +69,7 @@ manipulator_target_node:
     grasp_one_side_max_retries: 1
     # IW(바스켓) 없으면 파지한 채 홈으로 복귀(그리퍼 안 엶). True 라 RETRACT→_send_home.
     home_after_attempt: true
+    retry_after_failure: false
     basket_approach_height_m: 0.15
     basket_workspace_min: [-0.80, -0.80, 0.15]
     basket_workspace_max: [1.35, 0.80, 1.80]

@@ -97,31 +97,35 @@ controller_server:
       xy_goal_tolerance: 0.15
       yaw_goal_tolerance: 0.35
 
-    # 수확 탐색은 이랑과 평행한 y축으로만 주행한다. x는 식물과의 작업거리이므로
-    # 고정하고, GoalAlign의 완만한 yaw 회전만 허용해 카메라/팔이 식물을 향하게 한다.
+    # 기존 MM 주행 규약: x 전진/후진 + z 제자리 회전만 사용한다.
+    # y 횡이동 후보는 만들지 않는다.
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: false
-      # DWB trajectory generator는 x 속도/가속도를 완전 0으로 두면 lifecycle
-      # activate 단계에서 정상 샘플 집합을 만들지 못할 수 있다. 내부 계획에는 아주
-      # 작은 x 후보만 남기고, 실제 Isaac moveit_mm에서 max_vx=0으로 하드 차단한다.
-      min_vel_x: -0.05
-      min_vel_y: -0.4
-      max_vel_x: 0.05
-      max_vel_y: 0.4
-      max_vel_theta: 0.35
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "dwb_core::DWBLocalPlanner"
+      angular_dist_threshold: 0.523
+      forward_sampling_distance: 0.5
+      rotate_to_heading_angular_vel: 8.0
+      max_angular_accel: 6.0
+      simulate_ahead_time: 1.0
+      rotate_to_goal_heading: true
+      debug_trajectory_details: true
+      min_vel_x: -0.3
+      min_vel_y: 0.0
+      max_vel_x: 0.8
+      max_vel_y: 0.0
+      max_vel_theta: 8.0
       min_speed_xy: 0.0
-      max_speed_xy: 0.4
+      max_speed_xy: 0.8
       min_speed_theta: 0.0
-      acc_lim_x: 0.5
+      acc_lim_x: 0.8
       acc_lim_y: 1.0
-      acc_lim_theta: 0.7
-      decel_lim_x: -0.5
+      acc_lim_theta: 6.0
+      decel_lim_x: -1.5
       decel_lim_y: -1.0
-      decel_lim_theta: -0.7
-      vx_samples: 3
-      vy_samples: 15
-      vtheta_samples: 9
+      decel_lim_theta: -6.0
+      vx_samples: 20
+      vy_samples: 5
+      vtheta_samples: 20
       sim_time: 1.7
       linear_granularity: 0.05
       angular_granularity: 0.025
@@ -130,12 +134,18 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["Oscillation", "BaseObstacle", "GoalAlign", "PathDist", "GoalDist"]
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
+                "PathAlign", "PathDist", "GoalDist"]
       BaseObstacle.scale: 0.02
-      GoalAlign.scale: 16.0
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
       GoalAlign.forward_point_distance: 0.1
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -295,9 +305,9 @@ behavior_server:
     wait:
       plugin: "nav2_behaviors/Wait"
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
+    max_rotational_vel: 8.0
     min_rotational_vel: 0.4
-    rotational_acc_lim: 2.0
+    rotational_acc_lim: 6.0
 
 waypoint_follower:
   ros__parameters:
@@ -311,11 +321,11 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    # DWB 내부의 작은 x 후보는 통과시키되, 실제 Isaac 적용부가 x를 0으로 차단한다.
-    max_velocity: [0.05, 0.4, 0.35]
-    min_velocity: [-0.05, -0.4, -0.35]
-    max_accel: [0.5, 1.0, 0.7]
-    max_decel: [-0.5, -1.0, -0.7]
+    # 배열 순서는 [x, y, theta]. y는 0으로 고정해 횡이동을 차단한다.
+    max_velocity: [0.8, 0.0, 8.0]
+    min_velocity: [-0.3, 0.0, -8.0]
+    max_accel: [0.8, 1.0, 6.0]
+    max_decel: [-1.5, -1.0, -6.0]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

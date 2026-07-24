@@ -162,24 +162,27 @@
   <ros2_control name="IsaacTopicBased" type="system">
     <hardware>
       <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
-      <!-- ros2_control_node의 namespace를 따르는 상대 토픽. launch의 ns 인자를
-           바꿔도 하드웨어 채널이 같은 namespace 안에서 함께 이동한다. -->
-      <param name="joint_commands_topic">joint_command</param>
-      <param name="joint_states_topic">hw_joint_states</param>
+      <!-- TopicBasedSystem은 controller_manager와 별도의 내부 노드를 만들기 때문에
+           상대 토픽이 controller_manager의 namespace를 상속하지 않는다. 상대 이름을
+           쓰면 /joint_command·/hw_joint_states를 열어 Isaac의 실제 상태를 못 받고
+           JSB/MoveIt이 0 rad(일자 자세)를 계속 발행한다. Isaac 브리지와 같은 절대
+           하드웨어 채널을 사용한다. -->
+      <param name="joint_commands_topic">/harvester_0/joint_command</param>
+      <param name="joint_states_topic">/harvester_0/hw_joint_states</param>
     </hardware>
     <joint name="joint_1">
-      <command_interface name="position"><param name="initial_value">0.0</param></command_interface>
-      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <command_interface name="position"><param name="initial_value">3.1415927</param></command_interface>
+      <state_interface name="position"><param name="initial_value">3.1415927</param></state_interface>
       <state_interface name="velocity"/>
     </joint>
     <joint name="joint_2">
-      <command_interface name="position"><param name="initial_value">0.0</param></command_interface>
-      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <command_interface name="position"><param name="initial_value">1.0471976</param></command_interface>
+      <state_interface name="position"><param name="initial_value">1.0471976</param></state_interface>
       <state_interface name="velocity"/>
     </joint>
     <joint name="joint_3">
-      <command_interface name="position"><param name="initial_value">1.0471976</param></command_interface>
-      <state_interface name="position"><param name="initial_value">1.0471976</param></state_interface>
+      <command_interface name="position"><param name="initial_value">-2.0943951</param></command_interface>
+      <state_interface name="position"><param name="initial_value">-2.0943951</param></state_interface>
       <state_interface name="velocity"/>
     </joint>
     <joint name="joint_4">
@@ -188,13 +191,13 @@
       <state_interface name="velocity"/>
     </joint>
     <joint name="joint_5">
-      <command_interface name="position"><param name="initial_value">1.3089969</param></command_interface>
-      <state_interface name="position"><param name="initial_value">1.3089969</param></state_interface>
+      <command_interface name="position"><param name="initial_value">-0.5235988</param></command_interface>
+      <state_interface name="position"><param name="initial_value">-0.5235988</param></state_interface>
       <state_interface name="velocity"/>
     </joint>
     <joint name="joint_6">
-      <command_interface name="position"><param name="initial_value">-1.5707963</param></command_interface>
-      <state_interface name="position"><param name="initial_value">-1.5707963</param></state_interface>
+      <command_interface name="position"><param name="initial_value">1.5707963</param></command_interface>
+      <state_interface name="position"><param name="initial_value">1.5707963</param></state_interface>
       <state_interface name="velocity"/>
     </joint>
     <joint name="scoop_quarter_1_joint">

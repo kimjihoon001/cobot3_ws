@@ -14,8 +14,36 @@ manipulator_target_node:
     # Nav 정차 위치에서 PREGRASP까지 약 1m인 경우도 있다. 마지막 15cm 저속 직선
     # 접근까지 정상 완료되도록 충분한 시간을 주고, 발산은 Isaac의 별도 감시가 즉시 막는다.
     motion_timeout_sec: 120.0
-    # 파지 성공 = 양손 접촉 + Isaac의 30N 예압 0.5초 연속 유지 + TCP 거리.
-    # 성공 확정 뒤 FixedJoint를 해제하고 3cm 후퇴하여 상대거리 유지까지 검증한다.
+    # 선택 시점 경로: 안전점 → 최종보다 5cm 위 PREGRASP →
+    # 2.5cm 위 보조점을 거쳐 CIRC로 최종점까지 내려간다.
+    circ_entry_back_m: 0.17
+    circ_entry_radius_scale: 0.0
+    circ_entry_radius_lift_scale: -1.0
+    circ_entry_min_back_m: 0.06
+    circ_entry_drop_m: 0.10
+    circ_vertical_descent_m: 0.05
+    lin_approach_m: 0.10
+    scoop_outer_radius_m: 0.057
+    circ_clearance_margin_m: 0.019
+    approach_vertical_offset_m: 0.025
+    grasp_vertical_offset_m: 0.08
+    grasp_half_fruit_height_scale: 1.0
+    sim_fruit_height_fallback_m: 0.068
+    sim_fruit_radius_fallback_m: 0.034
+    reacquire_max_m: 0.12
+    capture_abort_m: 0.07
+    capture_deadband_m: 0.008
+    capture_trim_max_m: 0.035
+    gripper_close_settle_sec: 1.5
+    # 수용부가 과실을 고정한 뒤 외측 커터를 50°까지 실제 구동하고 절단한다.
+    blade_cut_deg: 50.0
+    # 셸 접촉으로 명령 50°의 실각은 약 41°에 멈추므로 원본처럼 40°에서 절단한다.
+    blade_cut_complete_deg: 40.0
+    blade_motion_timeout_sec: 8.0
+    blade_open_deg: 0.0
+    blade_angle_tolerance_deg: 1.0
+    # 수용 성공 = 스쿱 닫힘 + TCP 거리. 이후 외측 칼날 50° 도달을 확인해야 꽃자루를
+    # 해제하고, 칼날을 연 뒤 같은 접근 경로로 후퇴한다.
     grasp_tcp_max_distance_m: 0.09
     grasp_verify_retract_m: 0.03
     grasp_follow_max_delta_m: 0.015
@@ -31,13 +59,14 @@ manipulator_target_node:
 nav_harvest_test_node:
   ros__parameters:
     nav_status_topic: /navigate_to_pose/_action/status
-    harvest_enable_topic: /harvest_test/enable
+    harvest_enable_topic: harvest_test/enable
     manipulator_state_topic: /harvester_0/manipulator/target_state
     mobility_ready_topic: /harvester_0/manipulator/mobility_ready
     basket_pose_topic: /iw/basket/empty_slot_pose
     basket_frame: base_link
     # IW가 없을 때만 쓰는 tool0 release pose [x,y,z] in basket_frame.
     mock_basket_release_xyz: [1.32, -0.20, 0.45]
+    use_mock_basket: false
     # 디버깅 중 confidence/모델을 조절해도 게이트가 먼저 닫히지 않게 충분히 둔다.
     search_timeout_sec: 300.0
     # 통합시험 노드를 로봇 도착 후 켜도 마지막 SUCCEEDED 목표에서 수확을 이어간다.
@@ -47,11 +76,23 @@ nav_harvest_test_node:
     # Nav2 도착 직후 주행 관성으로 흐트러진 팔을 실제 홈 오차 0.03rad 안으로
     # 다시 수렴시킨 뒤에만 비전/수확 게이트를 연다.
     home_after_nav: true
+    post_nav_settle_sec: 0.5
     home_settle_timeout_sec: 30.0
     home_command_retry_sec: 1.0
     reposition_request_topic: /harvester_0/nav/reposition_request
     navigate_to_pose_action: /navigate_to_pose
     map_frame: map
     base_frame: base_link
+    map_topic: map
+    # Nav2 SUCCEEDED 뒤 도착 자세 기준으로 지도 점유 셀을 비교해 가까운 베드를 향한다.
+    # 기존 RMP 단독 launch에서는 끄고, mm_moveit 통합 launch가 true로 덮어쓴다.
+    orient_arm_to_nearest_bed: false
+    map_occupied_threshold: 65
+    bed_search_min_lateral_m: 0.55
+    bed_search_max_lateral_m: 3.0
+    bed_search_half_length_m: 1.5
+    bed_view_left_joint_1_deg: 270.0
+    bed_view_right_joint_1_deg: 90.0
+    bed_view_fallback_side: left
     reposition_max_translation_m: 0.60
     reposition_tf_timeout_sec: 0.5

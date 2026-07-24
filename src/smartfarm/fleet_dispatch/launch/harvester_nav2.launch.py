@@ -40,7 +40,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
-                            OpaqueFunction)
+                            OpaqueFunction, TimerAction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -221,13 +221,20 @@ def _bringup(context, *_args, **_kwargs):
     #   화면에 아무것도 안 나온다(2026-07-20 실사용 확인). 이건 실행 중 못 바꾸는 값이라
     #   손으로 띄우면 매번 --ros-args -p use_sim_time:=true 를 붙여야 했다.
     if _pybool(context, "rviz") == "True":
-        actions.append(Node(
-            package="rviz2", executable="rviz2", name="rviz2",
+        tf_prefix = f"/{args['namespace']}" if args["namespace"] else ""
+        # map_server/AMCL이 map→odom을 만들기 전에 RViz부터 뜨면 Fixed Frame
+        # [map] 오류가 먼저 표시되고, 정상 TF가 들어온 뒤에도 사용자에게 고장처럼
+        # 보인다. Nav2 기동 여유를 준 뒤 RViz를 시작한다.
+        actions.append(TimerAction(period=5.0, actions=[Node(
+            package="rviz2", executable="rviz2", name="nav_rviz",
             namespace=args["namespace"],
             arguments=["-d", LaunchConfiguration("rviz_config").perform(context)],
             parameters=[{"use_sim_time": args["use_sim_time"] == "True"}],
-            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
-            output="screen"))
+            remappings=[
+                ("/tf", f"{tf_prefix}/tf"),
+                ("/tf_static", f"{tf_prefix}/tf_static"),
+            ],
+            output="screen")]))
     return actions
 
 

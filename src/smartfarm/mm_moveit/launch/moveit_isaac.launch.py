@@ -20,8 +20,11 @@ import xacro
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument, GroupAction, RegisterEventHandler, TimerAction,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.parameter_descriptions import ParameterValue
@@ -44,7 +47,19 @@ _ADAPTERS = " ".join([
 # ★멀티로봇 TF 격리(2026-07-23): tf2_ros 는 /tf·/tf_static 을 **절대경로**로 pub/sub 하므로
 #   PushRosNamespace 로 안 밀린다. 절대→상대 remap 을 넣어야 네임스페이스 안에서 /harvester_0/tf
 #   가 된다(TF 쓰는 모든 노드에 적용 — rsp·move_group·rviz). (Codex 지적, 실행 전 필수.)
-_TF_REMAP = [("/tf", "tf"), ("/tf_static", "tf_static")]
+# RViz/MoveIt 플러그인 중 일부는 별도 내부 노드를 만들어 상대 remap 대상 `tf`를
+# 실행 namespace로 올리지 않는다. Isaac이 실제 발행하는 절대 토픽을 직접 지정한다.
+_TF_REMAP = [
+    ("/tf", "/harvester_0/tf"),
+    ("/tf_static", "/harvester_0/tf_static"),
+]
+_ROBOT_STATE_REMAP = [
+    *_TF_REMAP,
+    # event handler에서 시작되는 move_group/RViz 내부 노드는 PushRosNamespace를
+    # 상속하지 않는 경우가 있다. 그러면 /joint_states를 기다리며 0 rad 일자 자세를
+    # 그리므로 실제 JSB 출력으로 절대 remap한다.
+    ("/joint_states", "/harvester_0/joint_states"),
+]
 
 
 def generate_launch_description():
@@ -145,35 +160,39 @@ def generate_launch_description():
                     sim],
         output="screen",
     )
-    # 스포너는 하나만 사용한다. Isaac/MoveIt 동시 기동 때 plugin load가 서비스의 기본
-    # 대기시간보다 늦어 각 스포너가 "already loaded → configure failed"로 끝나던 레이스를
-    # 막기 위해 세 컨트롤러를 한 요청 흐름으로 처리하고 대기시간을 넉넉히 준다.
     _ns = LaunchConfiguration("ns")
-    spawner_controllers = Node(
+    def _spawner(controller: str) -> Node:
+        return Node(
         package="controller_manager", executable="spawner", namespace=_ns,
         arguments=[
-            "joint_state_broadcaster", "arm_controller", "gripper_controller",
+            controller,
             "--controller-manager", "controller_manager",
             "--controller-manager-timeout", "60",
             "--service-call-timeout", "60",
             "--switch-timeout", "60",
-            "--activate-as-group",
         ],
         output="screen",
     )
+    # controller_manager가 첫 load 응답을 늦게 보내도 단일 spawner는 "already loaded"를
+    # 복구할 수 있다. 세 개를 한 프로세스에 넣으면 첫 중복에서 나머지 둘까지 전부
+    # 건너뛰므로, JSB→arm→gripper 순으로 종료 이벤트를 연결한다.
+    spawner_jsb = _spawner("joint_state_broadcaster")
+    spawner_arm = _spawner("arm_controller")
+    spawner_gripper = _spawner("gripper_controller")
     rsp = Node(
         package="robot_state_publisher", executable="robot_state_publisher",
         parameters=[robot_description, sim],
-        remappings=_TF_REMAP,
+        remappings=_ROBOT_STATE_REMAP,
         output="screen",
     )
     move_group = Node(
         package="moveit_ros_move_group", executable="move_group",
+        namespace=["/", _ns],
         parameters=[robot_description, robot_description_semantic,
                     kinematics, joint_limits, planning_pipelines,
                     moveit_controllers, trajectory_execution,
                     planning_scene_monitor, sim],
-        remappings=_TF_REMAP,
+        remappings=_ROBOT_STATE_REMAP,
         output="screen",
     )
     # Servo는 평소 정지 상태이며 수확 오케스트레이터가 start/stop 서비스를 호출한
@@ -182,18 +201,21 @@ def generate_launch_description():
         package="moveit_servo",
         executable="servo_node_main",
         name="servo_node",
+        namespace=["/", _ns],
         parameters=[servo_params, robot_description,
                     robot_description_semantic, kinematics, sim],
-        remappings=_TF_REMAP,
+        remappings=_ROBOT_STATE_REMAP,
         output="screen",
     )
     rviz = Node(
         package="rviz2", executable="rviz2",
+        name="moveit_rviz",
+        namespace=["/", _ns],
         condition=IfCondition(LaunchConfiguration("rviz")),
         arguments=["-d", os.path.join(share, "config", "moveit.rviz")],
         parameters=[robot_description, robot_description_semantic,
                     kinematics, planning_pipelines, joint_limits, sim],
-        remappings=_TF_REMAP,
+        remappings=_ROBOT_STATE_REMAP,
         output="screen",
     )
 
@@ -201,11 +223,21 @@ def generate_launch_description():
     #   /harvester_0/* 로(예: move_action, controller_manager, joint_states).
     #   팀원 RMPflow(harvester_0)와 안 겹친다. tf 프레임(base_link)은 그대로(Option A —
     #   frame_prefix 걸면 MoveIt 이 URDF 무접두 프레임을 못 찾아 깨진다; 완전 tf 격리는 후속).
+    # MoveIt/RViz를 JSB보다 먼저 띄우면 실제 joint_states가 없는 약 5초 동안
+    # RViz가 임시(기본) 관절 상태를 그린다. 실행 시점에 따라 홈 자세가 다르게
+    # 보이는 기동 경쟁을 없애기 위해 arm_controller까지 활성화된 뒤 시작한다.
+    start_moveit_after_arm = RegisterEventHandler(OnProcessExit(
+        target_action=spawner_arm,
+        on_exit=[spawner_gripper, move_group, servo, rviz],
+    ))
+
     isolated = GroupAction([
         PushRosNamespace(LaunchConfiguration("ns")),
-        control_node, rsp, move_group, servo, rviz,
-        # 서비스가 뜬 뒤 한 번에 로드·설정·활성화한다.
-        TimerAction(period=4.0, actions=[spawner_controllers]),
+        control_node, rsp,
+        TimerAction(period=4.0, actions=[spawner_jsb]),
+        RegisterEventHandler(OnProcessExit(
+            target_action=spawner_jsb, on_exit=[spawner_arm])),
+        start_moveit_after_arm,
     ])
 
     return LaunchDescription([

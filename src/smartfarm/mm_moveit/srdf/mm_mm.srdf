@@ -20,12 +20,12 @@
 
   <!-- isaacpjt/robots/harvester_mm.py HOME_POSE_DEG 와 같은 자세(도→라디안). -->
   <group_state name="home" group="mm_manipulator">
-    <joint name="joint_1" value="0"/>
-    <joint name="joint_2" value="0"/>
-    <joint name="joint_3" value="1.0471976"/>
+    <joint name="joint_1" value="3.1415927"/>
+    <joint name="joint_2" value="1.0471976"/>
+    <joint name="joint_3" value="-2.0943951"/>
     <joint name="joint_4" value="0"/>
-    <joint name="joint_5" value="1.3089969"/>
-    <joint name="joint_6" value="-1.5707963"/>
+    <joint name="joint_5" value="-0.5235988"/>
+    <joint name="joint_6" value="1.5707963"/>
   </group_state>
 
   <end_effector name="harvest_end_effector"

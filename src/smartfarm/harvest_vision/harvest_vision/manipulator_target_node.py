@@ -11,6 +11,7 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from std_msgs.msg import Bool, String
 
 # PoseStamped 변환 등록을 위한 side effect import. Buffer.transform API를 사용하면
@@ -19,8 +20,13 @@ import tf2_geometry_msgs  # noqa: F401
 from tf2_ros import Buffer, TransformException, TransformListener
 
 ACTIVE_SEQUENCE_STATES = {
-    "PREGRASP", "GRASP", "GRASP_YAW_CORRECT", "GRIPPER_CLOSING", "GRASP_VERIFY",
-    "VERIFY_RETRACT", "GRASP_FOLLOW_CHECK", "RETRACT", "PRE_PLACE",
+    "APPROACH", "PREGRASP", "GRASP",
+    "CAPTURE_TRIM", "GRASP_YAW_CORRECT",
+    "GRIPPER_CLOSING", "GRASP_VERIFY",
+    "CUTTING", "CUT_VERIFY", "BLADE_OPENING",
+    "VERIFY_RETRACT", "GRASP_FOLLOW_CHECK",
+    "RETRACT_CIRC", "RETRACT_LIN",
+    "RETRACT", "PRE_PLACE",
     "WAIT_BASKET", "BASKET_APPROACH", "BASKET_PLACE", "PLACE_RELEASING",
     "GO_HOME",
     "NAV_REPOSITION_REQUIRED",
@@ -51,11 +57,30 @@ class ManipulatorTargetNode(Node):
             "rmp_status_topic", "/harvester_0/rmpflow/status"
         )
         self.declare_parameter("basket_pose_topic", "/iw/basket/empty_slot_pose")
-        self.declare_parameter("harvest_enable_topic", "/harvest_test/enable")
+        # IW 슬롯 선택기가 최근에 발행한 실제 좌표만 사용한다. 오래된 좌표를 들고
+        # 이미 떠난 IW를 향해 팔이 다시 움직이지 않도록 유효시간을 둔다.
+        self.declare_parameter("basket_pose_max_age_sec", 2.0)
+        self.declare_parameter("use_iw_tf_basket_fallback", True)
+        self.declare_parameter("iw_base_frame", "iwhub_0/base_link")
+        # IwHub cargo의 실제 4×2 KLT 격자 중 초기 적재가 없는 슬롯.
+        # [x,y,z]는 IW base_link 기준 release pose이며 z=KLT 윗면+약 5 cm다.
+        self.declare_parameter("iw_empty_basket_offsets", [
+            -0.465, 0.125, 0.52,
+            -0.155, -0.125, 0.52,
+            0.155, -0.125, 0.52,
+            0.155, 0.125, 0.52,
+            0.465, 0.125, 0.52,
+        ])
+        # 상대 이름이어야 namespace=harvester_0에서 코디네이터가 발행하는
+        # /harvester_0/harvest_test/enable과 동일한 토픽으로 해석된다.
+        self.declare_parameter("harvest_enable_topic", "harvest_test/enable")
         self.declare_parameter("external_harvest_gate_enabled", False)
         self.declare_parameter("use_sim_ground_truth", False)
         self.declare_parameter("sim_tomato_topic", "/harvester_0/sim/tomato")
         self.declare_parameter("sim_match_radius_m", 0.35)
+        # 시뮬 통합시험에서는 검출 광선 매칭이 일시적으로 실패해도, 검출점과 가장
+        # 가까운 fresh GT 과실을 선택해 수확을 계속한다.
+        self.declare_parameter("direct_sim_grasp", False)
         self.declare_parameter(
             "mobility_ready_topic", "/harvester_0/manipulator/mobility_ready"
         )
@@ -66,6 +91,10 @@ class ManipulatorTargetNode(Node):
         # workspace_max까지 억지로 뻗지 않고 마지막 15 cm 직선 접근 여유를 남긴다.
         self.declare_parameter("reposition_target_x_m", 0.90)
         self.declare_parameter("reposition_target_abs_y_m", 0.45)
+        self.declare_parameter("nav_reposition_enabled", True)
+        # 비전→GT 매칭의 mm 단위 흔들림 때문에 경계 바로 바깥의 실제 도달 가능
+        # 목표를 재정차로 넘기지 않도록 최종 workspace 검사에만 작은 여유를 둔다.
+        self.declare_parameter("workspace_boundary_tolerance_m", 0.02)
         # x/y 개별 상한만으로는 대각선 목표가 통과한다. 예: (1.15, -0.63)은
         # 각 축 범위 안이지만 수평 반경 1.31m라 최종 GRASP에서 팔이 완전히 펴진다.
         self.declare_parameter("workspace_max_xy_radius_m", 1.50)
@@ -76,6 +105,46 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("max_jump_m", 0.15)
         self.declare_parameter("auto_grasp_enabled", True)
         self.declare_parameter("pregrasp_clearance_m", 0.15)
+        # 선택 시점의 원호 하강 경로 기본값.
+        self.declare_parameter("circ_entry_back_m", 0.17)
+        # 수평 시작점은 과실 중심에서 17cm 뒤에 둬 충분한 CIRC 원호를
+        # 확보한다. radius_scale=0이면 반지름만큼 앞으로 당기지 않는다.
+        self.declare_parameter("circ_entry_radius_scale", 0.0)
+        # 수평 진입점 계산용 레거시 값. 최종 Z는 아래에서 명시적으로 덮어쓴다.
+        self.declare_parameter("circ_entry_radius_lift_scale", -1.0)
+        self.declare_parameter("circ_entry_min_back_m", 0.06)
+        self.declare_parameter("circ_entry_drop_m", 0.10)
+        # PREGRASP는 최종점보다 5cm 위, CIRC 보조점은 정확히 중간인 2.5cm 위.
+        self.declare_parameter("circ_vertical_descent_m", 0.05)
+        self.declare_parameter("lin_approach_m", 0.10)
+        # CIRC 중 TCP가 안전해도 스쿱 외곽이 과실에 박히지 않도록 실제 CAD 외경과
+        # 물리 과실 반경을 합친 swept envelope 바깥에 보조점을 둔다.
+        self.declare_parameter("scoop_outer_radius_m", 0.057)
+        self.declare_parameter("circ_clearance_margin_m", 0.019)
+        # 최종 스쿱 높이를 올려도 안전점까지 같이 올라가면 link_2가 베이스를 가로지르는
+        # PTP 경로가 생긴다. 접근점은 현장에서 성공한 +2.5cm 높이를 별도로 유지한다.
+        self.declare_parameter("approach_vertical_offset_m", 0.025)
+        # 실제 스쿱 수용 중심이 HarvestTCP 표시점보다 위에 있어, 최종 CIRC 목표를
+        # 과실 기하 중심보다 8cm 올린다(현장 수용 결과 2026-07-24).
+        self.declare_parameter("grasp_vertical_offset_m", 0.08)
+        # 고정 8cm에 실제 토마토 높이의 절반을 더해 스쿱 안쪽까지 퍼 올린다.
+        self.declare_parameter("grasp_half_fruit_height_scale", 1.0)
+        self.declare_parameter("sim_fruit_height_fallback_m", 0.068)
+        self.declare_parameter("sim_fruit_radius_fallback_m", 0.034)
+        # ── 스쿱 축방향 삽입(2026-07-24 재설계) ──
+        # harvest_tcp(=컵 회전중심)를 과실 중심에 오프셋 0으로 포갠다. 닫힘=오른쪽-아래,
+        # 개구=왼쪽-위이므로 삽입축 = up(+Z) 가중 + left(정면 기준 왼쪽) 가중의 단위벡터.
+        # RViz에서 실제 스쿱 개구 방향과 안 맞으면 두 가중치를 조정(left<0 = 오른쪽).
+        self.declare_parameter("scoop_open_up_weight", 1.0)
+        self.declare_parameter("scoop_open_left_weight", 0.5)
+        # 스쿱 컵 내경(메시 ~47~52mm). 삽입 시작 여유 = cup + 과실반경 + margin.
+        self.declare_parameter("scoop_cup_radius_m", 0.050)
+        self.declare_parameter("scoop_insertion_margin_m", 0.010)
+        self.declare_parameter("scoop_safe_back_m", 0.100)
+        self.declare_parameter("reacquire_max_m", 0.12)
+        self.declare_parameter("capture_abort_m", 0.07)
+        self.declare_parameter("capture_deadband_m", 0.008)
+        self.declare_parameter("capture_trim_max_m", 0.035)
         # RMPflow가 고정된 과실 중심을 관통하려 하면 collider 표면에서 3~4cm 오차로
         # 정체된다. 열린 그리퍼는 과실 표면까지 보내고 그 위치에서 닫는다.
         self.declare_parameter("grasp_surface_standoff_m", 0.034)
@@ -83,7 +152,14 @@ class ManipulatorTargetNode(Node):
         # 이 파라미터를 참조해도 서로 다른 오프셋을 사용하지 않도록 동기화한다.
         self.declare_parameter("tool_grasp_reach_m", 0.132)
         self.declare_parameter("motion_timeout_sec", 10.0)
-        self.declare_parameter("gripper_close_settle_sec", 1.0)
+        self.declare_parameter("gripper_close_settle_sec", 1.5)
+        self.declare_parameter("blade_cut_deg", 50.0)
+        # +50° 명령은 셸 접촉 때문에 실각 약 41°에 안정된다. 기존 로직과 같이
+        # 40° 도달을 절삭 위치로 판정한다.
+        self.declare_parameter("blade_cut_complete_deg", 40.0)
+        self.declare_parameter("blade_motion_timeout_sec", 8.0)
+        self.declare_parameter("blade_open_deg", 0.0)
+        self.declare_parameter("blade_angle_tolerance_deg", 1.0)
         self.declare_parameter("grasp_tcp_max_distance_m", 0.06)
         self.declare_parameter("grasp_verify_retract_m", 0.03)
         self.declare_parameter("grasp_follow_max_delta_m", 0.015)
@@ -99,6 +175,8 @@ class ManipulatorTargetNode(Node):
         # h 원샷: 한 사이클(인식→수확→홈) 끝나면 게이트를 스스로 끈다. 계속 재인식·재시작
         # 하지 않고 h 를 다시 눌러야 다음 과실을 잡는다.
         self.declare_parameter("single_shot_harvest", True)
+        # 실패 후에도 명시적 요청 없이 새 과실을 자동으로 쫓지 않는다.
+        self.declare_parameter("retry_after_failure", False)
 
         self._buffer = Buffer()
         self._listener = TransformListener(self._buffer, self)
@@ -110,18 +188,28 @@ class ManipulatorTargetNode(Node):
         self._deadline_ns = 0
         self._best_motion_distance = float("inf")
         self._grasp_target = np.zeros(3, dtype=float)
+        self._circ_target = np.zeros(3, dtype=float)
+        self._insertion_axis = np.array([0.0, 0.0, 1.0])
         self._fruit_target = np.zeros(3, dtype=float)
         self._grasp_fruit_id: int | None = None
         self._reposition_fruit_id: int | None = None
         self._reposition_requested_ns = 0
         self._pregrasp_target = np.zeros(3, dtype=float)
+        self._approach_target = np.zeros(3, dtype=float)
+        self._circ_interim = np.zeros(3, dtype=float)
+        self._harvest_orientation: list[float] | None = None
         self._gripper_command_at_ns = 0
         self._grasp_check_id = 0
         self._grasp_check_sent = False
+        self._cut_check_id = 0
+        self._cut_check_sent = False
         self._grasp_yaw_retry_count = 0
         self._follow_check_id = 0
         self._basket_place: np.ndarray | None = None
+        self._basket_received_ns = 0
         self._sim_fruits: dict[int, tuple[np.ndarray, int]] = {}
+        self._sim_fruit_heights: dict[int, float] = {}
+        self._sim_fruit_radii: dict[int, float] = {}
         self._retry_after_home = False
 
         input_topic = str(self.get_parameter("input_topic").value)
@@ -167,9 +255,13 @@ class ManipulatorTargetNode(Node):
         self._state_pub.publish(String(data=self._state))
 
         enabled = bool(self.get_parameter("command_enabled").value)
+        gated = bool(
+            self.get_parameter("external_harvest_gate_enabled").value)
         self.get_logger().info(
             f"비전→매니퓰레이터 좌표 브리지 시작: {input_topic} -> "
-            f"{self.get_parameter('base_frame').value} (command_enabled={enabled})"
+            f"{self.get_parameter('base_frame').value} "
+            f"(command_enabled={enabled}, external_gate={gated}, "
+            f"enable_topic={enable_topic})"
         )
 
     def _target_callback(self, msg: PoseStamped) -> None:
@@ -278,10 +370,14 @@ class ManipulatorTargetNode(Node):
             # 움직이며 YOLO가 잠깐 quality_check/빈 프레임을 내도 수확을 중단하지 않는다.
             if bool(self.get_parameter("use_sim_ground_truth").value):
                 return
-            if self._state in {"PREGRASP", "GRASP", "GRIPPER_CLOSING"} and not target_class:
+            if self._state in {
+                    "PREGRASP", "GRASP", "GRIPPER_CLOSING"
+            } and not target_class:
                 self._deadline_ns = 0
                 self._transition("ABORT_TARGET_LOST", stop=True)
-            elif self._state in {"PREGRASP", "GRASP", "GRIPPER_CLOSING"} and target_class == "spoiled":
+            elif self._state in {
+                    "PREGRASP", "GRASP", "GRIPPER_CLOSING"
+            } and target_class == "spoiled":
                 self._deadline_ns = 0
                 self._transition("ABORT_SPOILED", stop=True)
             return
@@ -292,6 +388,12 @@ class ManipulatorTargetNode(Node):
         if not target_class:
             self._transition("NO_TARGET", stop=True)
         elif target_class in ("tomato", "ripe"):
+            # GT를 기다리는 동안 class 토픽이 고주기로 들어와도 상태를
+            # RIPE_READY↔WAIT_SIM_MATCH로 계속 뒤집지 않는다. 새 GT가 들어오는
+            # _sim_tomato_callback이 즉시 수확 시퀀스를 다시 시작한다.
+            if (self._state == "WAIT_SIM_MATCH"
+                    and bool(self.get_parameter("use_sim_ground_truth").value)):
+                return
             # 데모(A): 원거리 "tomato" 검출로 **바로 파지**. near(ripe 판정) 모델이 시뮬 크롭에서
             # 검출을 못 해 APPROACH 에서 멈추던 문제 우회(2026-07-22). 익음구분은 생략한다.
             changed = self._transition("RIPE_READY", stop=True)
@@ -331,6 +433,9 @@ class ManipulatorTargetNode(Node):
         if not bool(self.get_parameter("external_harvest_gate_enabled").value):
             return
         self._harvest_enabled = bool(msg.data)
+        self.get_logger().info(
+            "외부 수확 게이트 수신: "
+            + ("OPEN" if self._harvest_enabled else "CLOSED"))
         if not self._harvest_enabled:
             self._deadline_ns = 0
             self._transition("WAIT_NAV", stop=True)
@@ -358,6 +463,12 @@ class ManipulatorTargetNode(Node):
             elif locked_id is None:
                 sim_match = self._match_sim_tomato(target, np.asarray(
                     self._latest_camera, dtype=float))
+                if (sim_match is None
+                        and bool(self.get_parameter("direct_sim_grasp").value)):
+                    sim_match = self._nearest_sim_tomato(target)
+                    if sim_match is not None:
+                        self.get_logger().info(
+                            "광선 매칭 대신 검출점 최근접 시뮬 토마토를 선택")
             if sim_match is None:
                 # 후보가 round-robin 토픽으로 더 들어오거나 다음 검출 프레임에서
                 # 광선이 안정되면 자동 재시도한다. 일시 실패로 수확 게이트를 닫지 않는다.
@@ -376,8 +487,13 @@ class ManipulatorTargetNode(Node):
         xy_radius = float(np.linalg.norm(target[:2]))
         max_xy_radius = float(
             self.get_parameter("workspace_max_xy_radius_m").value)
+        boundary_tolerance = max(
+            0.0, float(self.get_parameter(
+                "workspace_boundary_tolerance_m").value))
         if (not np.all(np.isfinite(target))
-                or not np.all((lower <= target) & (target <= upper))
+                or not np.all(
+                    (lower - boundary_tolerance <= target)
+                    & (target <= upper + boundary_tolerance))
                 or xy_radius > max_xy_radius):
             # 비전 좌표는 앞에서 검사되지만 sim GT로 치환한 좌표도 반드시 다시
             # 검사해야 한다. 도달 불가능한 좌표를 IK에 넣으면 관절 한계에서 팔이
@@ -389,6 +505,14 @@ class ManipulatorTargetNode(Node):
             desired_y = float(np.clip(target[1], -desired_abs_y, desired_abs_y))
             lateral = float(target[1]) - desired_y
             self._deadline_ns = 0
+            if not bool(
+                    self.get_parameter("nav_reposition_enabled").value):
+                self._transition("ERROR_TARGET_OUT_OF_REACH", stop=True)
+                self.get_logger().error(
+                    "고정 수확 모드라 Nav2 재접근을 금지함: "
+                    f"target=({target[0]:.3f}, {target[1]:.3f}, "
+                    f"{target[2]:.3f}), xy_radius={xy_radius:.3f}m")
+                return
             self._reposition_fruit_id = self._grasp_fruit_id
             self._reposition_requested_ns = self.get_clock().now().nanoseconds
             self._mobility_pub.publish(Bool(data=True))
@@ -409,30 +533,43 @@ class ManipulatorTargetNode(Node):
         self._reposition_fruit_id = None
         self._reposition_requested_ns = 0
         self._mobility_pub.publish(Bool(data=False))
-        camera = np.asarray(self._latest_camera, dtype=float)
-        ray = target - camera
-        length = float(np.linalg.norm(ray))
-        if length < 1e-6:
-            self._transition("ERROR_BAD_RAY", stop=True)
-            return
-        ray /= length
-        clearance = float(self.get_parameter("pregrasp_clearance_m").value)
-        # position은 이제 UR 플랜지가 아니라 실제 HarvestTCP 목표다.
-        pregrasp = target - ray * clearance
-        surface_standoff = float(
-            self.get_parameter("grasp_surface_standoff_m").value)
-        # 목표 과실 collider 반지름만큼 카메라 쪽에 멈춘다. 여기서 TCP 오차를
-        # 20mm 이내로 수렴시킨 뒤 손가락을 닫아 과실을 패드 사이로 감싼다.
-        grasp = target - ray * surface_standoff
+        # 스쿱 축방향 삽입: harvest_tcp(=컵 회전중심)를 과실 중심에 오프셋 0으로 포갠다.
+        # 닫힌 쪽(오른쪽-아래)에서 개구축(왼쪽-위)을 따라 대각선 직선으로 밀어 넣는다.
+        self._harvest_orientation = self._current_tool_orientation()
+        fruit_radius = self._grasp_fruit_radius()
+        n = self._scoop_insertion_axis(target)
+        self._insertion_axis = n
+        standoff = (
+            float(self.get_parameter("scoop_cup_radius_m").value)
+            + fruit_radius
+            + float(self.get_parameter("scoop_insertion_margin_m").value))
+        safe_back = float(self.get_parameter("scoop_safe_back_m").value)
+        grasp = target.copy()                       # 컵 중심 = 과실 중심 (오프셋 0)
+        circ_target = grasp.copy()                  # 후퇴 경로 호환(직선 역주행)
+        pregrasp = target - n * standoff            # 개구 바깥 삽입 시작점
+        approach = target - n * (standoff + safe_back)   # OMPL 안전점
+        interim = 0.5 * (pregrasp + grasp)          # CIRC 미사용, 필드 자리채움
+        self._approach_target = approach
         self._pregrasp_target = pregrasp
         self._grasp_target = grasp
+        self._circ_target = circ_target
+        self._circ_interim = interim
         self._fruit_target = target.copy()
         self._grasp_yaw_retry_count = 0
-        # 파지 전 그리퍼를 연다 — 닫힌 채로 다가가면 손가락이 과실을 못 감싼다("잡는 느낌이
-        # 아니다", 2026-07-22). 직전 사이클에서 닫혀 있어도 여기서 확실히 벌린다.
+        # 파지 전 그리퍼를 연다 — 닫힌 채로 다가가면 손가락이 과실을 못 감싼다.
         self._isaac_command_pub.publish(
-            String(data=json.dumps({"gripper": {"closed": False}})))
-        self._send_rmp_goal(pregrasp, "PREGRASP")
+            String(data=json.dumps({
+                "gripper": {"closed": False},
+                "blade": float(self.get_parameter("blade_open_deg").value),
+            })))
+        self.get_logger().info(
+            "스쿱 축삽입 접근: "
+            f"safe={tuple(round(float(v), 3) for v in approach)} → "
+            f"pre={tuple(round(float(v), 3) for v in pregrasp)} → "
+            f"seat=T{tuple(round(float(v), 3) for v in grasp)}, "
+            f"standoff={standoff:.3f}m, r={fruit_radius:.3f}m, "
+            f"axis=({n[0]:.2f},{n[1]:.2f},{n[2]:.2f})")
+        self._send_rmp_goal(approach, "APPROACH")
 
     def _sim_tomato_callback(self, msg: String) -> None:
         try:
@@ -441,15 +578,129 @@ class ManipulatorTargetNode(Node):
                 return
             fruit_id = int(item["id"])
             position = np.asarray(item["position"], dtype=float)
+            fruit_height = float(item.get(
+                "height",
+                self.get_parameter("sim_fruit_height_fallback_m").value))
+            fruit_radius = float(item.get(
+                "radius",
+                self.get_parameter("sim_fruit_radius_fallback_m").value))
         except (KeyError, TypeError, ValueError):
             return
-        if item.get("class") != "ripe" or position.shape != (3,):
+        if (item.get("class") != "ripe" or position.shape != (3,)
+                or not math.isfinite(fruit_height)
+                or fruit_height <= 0.0
+                or not math.isfinite(fruit_radius)
+                or fruit_radius <= 0.0):
             return
         now = self.get_clock().now().nanoseconds
         self._sim_fruits[fruit_id] = (position, now)
+        self._sim_fruit_heights[fruit_id] = fruit_height
+        self._sim_fruit_radii[fruit_id] = fruit_radius
         self._sim_fruits = {
             key: entry for key, entry in self._sim_fruits.items()
             if now - entry[1] <= int(30.0e9)}
+        self._sim_fruit_heights = {
+            key: height for key, height in self._sim_fruit_heights.items()
+            if key in self._sim_fruits}
+        self._sim_fruit_radii = {
+            key: radius for key, radius in self._sim_fruit_radii.items()
+            if key in self._sim_fruits}
+        # class 콜백에서 GT가 아직 없어서 WAIT_SIM_MATCH로 들어간 경우, 다음 영상
+        # 프레임을 기다리지 말고 GT 수신 자체를 재시도 트리거로 사용한다.
+        if (self._state == "WAIT_SIM_MATCH"
+                and self._harvest_enabled
+                and self._target_class in ("tomato", "ripe")
+                and self._latest_target is not None
+                and self._latest_camera is not None):
+            self._start_grasp_sequence()
+
+    def _grasp_vertical_lift(self) -> float:
+        """기존 고정 상승량 + 현재 과실 실제 높이의 절반."""
+        fixed = float(self.get_parameter("grasp_vertical_offset_m").value)
+        if not bool(self.get_parameter("use_sim_ground_truth").value):
+            return fixed
+        height = self._sim_fruit_heights.get(
+            self._grasp_fruit_id,
+            float(self.get_parameter("sim_fruit_height_fallback_m").value))
+        scale = max(
+            0.0, float(self.get_parameter(
+                "grasp_half_fruit_height_scale").value))
+        return fixed + 0.5 * height * scale
+
+    def _grasp_fruit_radius(self) -> float:
+        """현재 과실의 실제 수평 bbox 반지름."""
+        return self._sim_fruit_radii.get(
+            self._grasp_fruit_id,
+            float(self.get_parameter("sim_fruit_radius_fallback_m").value))
+
+    def _outward_circ_interim(
+        self,
+        start: np.ndarray,
+        end: np.ndarray,
+        fruit_center: np.ndarray,
+    ) -> np.ndarray:
+        """P1→P2→P3 전체가 한 원호가 되도록 CIRC 보조점을 계산한다."""
+        start_ray = start - fruit_center
+        end_ray = end - fruit_center
+        start_norm = float(np.linalg.norm(start_ray))
+        end_norm = float(np.linalg.norm(end_ray))
+        if start_norm < 1e-8:
+            return 0.5 * (start + end)
+        if end_norm < 1e-8:
+            # 최종 HarvestTCP가 과실 중심 자체인 현재 규약. 단순 중점을 쓰면
+            # P1/P2/P3가 공선이 되어 CIRC가 퇴화한다. P1에서 과실 쪽 수평 접선으로
+            # 출발하는 원을 구성하고 그 원의 중간각 점을 P2로 사용한다.
+            horizontal = fruit_center - start
+            horizontal[2] = 0.0
+            chord_xy = float(np.linalg.norm(horizontal))
+            start_z = float(start[2] - fruit_center[2])
+            if chord_xy < 1e-8 or abs(start_z) < 1e-8:
+                interim = 0.5 * (start + end)
+                interim[2] -= self._grasp_fruit_radius()
+                return interim
+            # 원 중심은 P1의 수직선 위에 있고 P1/P3에서 같은 거리에 있다.
+            center_z = (
+                start_z * start_z - chord_xy * chord_xy
+            ) / (2.0 * start_z)
+            center = start.copy()
+            center[2] = fruit_center[2] + center_z
+            start_unit = start - center
+            end_unit = end - center
+            radius = float(np.linalg.norm(start_unit))
+            start_unit /= radius
+            end_unit /= float(np.linalg.norm(end_unit))
+            bisector = start_unit + end_unit
+            bisector_norm = float(np.linalg.norm(bisector))
+            if bisector_norm < 1e-8:
+                interim = 0.5 * (start + end)
+                interim[2] -= self._grasp_fruit_radius()
+                return interim
+            return center + radius * bisector / bisector_norm
+        direction = start_ray / start_norm + end_ray / end_norm
+        direction_norm = float(np.linalg.norm(direction))
+        if direction_norm < 1e-8:
+            return 0.5 * (start + end)
+        waypoint_radius = (
+            self._grasp_fruit_radius()
+            + float(self.get_parameter("scoop_outer_radius_m").value)
+            + float(self.get_parameter("circ_clearance_margin_m").value)
+        )
+        return fruit_center + direction / direction_norm * waypoint_radius
+
+    def _nearest_sim_tomato(
+        self, vision_target: np.ndarray
+    ) -> tuple[np.ndarray, int] | None:
+        """fresh GT 중 검출된 3D 점에 가장 가까운 과실을 선택한다."""
+        now = self.get_clock().now().nanoseconds
+        fresh = [
+            (float(np.linalg.norm(position - vision_target)), fruit_id, position)
+            for fruit_id, (position, stamp) in self._sim_fruits.items()
+            if now - stamp <= int(30.0e9)
+        ]
+        if not fresh:
+            return None
+        _, fruit_id, position = min(fresh, key=lambda item: item[0])
+        return position.copy(), fruit_id
 
     def _match_sim_tomato(
         self, vision_target: np.ndarray, camera: np.ndarray
@@ -500,11 +751,162 @@ class ManipulatorTargetNode(Node):
                 "position": [float(value) for value in position],
             }
         }
+        if phase == "APPROACH":
+            # 베드뷰 방향을 유지한 채 충돌회피한다. motion bridge가 현재 joint_1
+            # 주변으로 OMPL 경로를 제한해 제자리에서 크게 도는 IK 해를 차단한다.
+            command["rmp_target"]["motion"] = "OMPL"
+        elif phase in {"GRASP", "RETRACT_CIRC"}:
+            # 축방향 직선 삽입/후퇴 — CIRC 원호를 쓰지 않는다.
+            command["rmp_target"]["motion"] = "LIN"
+            if phase == "GRASP":
+                command["rmp_target"]["velocity_scale"] = 0.05
+        elif phase in {
+            "PREGRASP", "CAPTURE_TRIM", "RETRACT_LIN",
+        }:
+            command["rmp_target"]["motion"] = "LIN"
+            if phase == "PREGRASP":
+                # 직선 진입 중에도 베드뷰의 1축 가지를 유지한다. 같은 TCP 자세의
+                # 반대쪽 등가 IK를 골라 프리그랩에서 크게 도는 현상을 막는다.
+                command["rmp_target"]["lock_joint_1"] = True
+            if phase == "CAPTURE_TRIM":
+                command["rmp_target"]["velocity_scale"] = 0.035
+        else:
+            command["rmp_target"]["motion"] = "PTP"
+        # PREGRASP마다 카메라 광선으로 새 TCP 자세를 만들면 ±360° 범위의 두산 손목이
+        # 먼 등가 IK 해를 골라 제자리에서 여러 번 회전할 수 있다. Nav 도착 뒤 이미
+        # 베드를 향한 현재 스쿱 자세를 그대로 잠그고 위치만 목표로 이동한다.
+        if phase in {
+            "APPROACH", "PREGRASP", "GRASP",
+            "CAPTURE_TRIM", "VERIFY_RETRACT",
+            "RETRACT_CIRC", "RETRACT_LIN", "RETRACT",
+            "BASKET_APPROACH", "BASKET_PLACE",
+        }:
+            orientation = self._harvest_orientation
+            if orientation is None:
+                orientation = self._current_tool_orientation()
+            if orientation is not None:
+                command["rmp_target"]["tool_orientation"] = orientation
         self.get_logger().info(
-            f"RMPflow 명령 id={self._pending_id} phase={phase} "
+            f"매니퓰레이터 명령 id={self._pending_id} phase={phase} "
             f"target=({position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f})"
         )
         self._isaac_command_pub.publish(String(data=json.dumps(command)))
+
+    def _fresh_locked_sim_target(self) -> np.ndarray | None:
+        """접근 중에도 갱신되는 동일 fruit_id의 최신 GT 중심만 반환한다."""
+        if self._grasp_fruit_id is None:
+            return None
+        entry = self._sim_fruits.get(self._grasp_fruit_id)
+        if entry is None:
+            return None
+        position, stamp = entry
+        if self.get_clock().now().nanoseconds - stamp > int(2.0e9):
+            return None
+        return position.copy()
+
+    def _scoop_insertion_axis(self, target: np.ndarray) -> np.ndarray:
+        """스쿱 개구가 향하는 삽입축(단위, base). 닫힘=오른쪽아래→개구=왼쪽위.
+
+        harvest_tcp는 이 축을 따라 아래-뒤(닫힌 쪽)에서 과실 중심으로 밀려 들어간다.
+        """
+        yaw = math.atan2(float(target[1]), float(target[0]))
+        up = np.array([0.0, 0.0, 1.0])
+        # 과실을 정면으로 볼 때의 왼쪽 수평 방향(=direction을 +90° 회전).
+        left = np.array([-math.sin(yaw), math.cos(yaw), 0.0])
+        n = (float(self.get_parameter("scoop_open_up_weight").value) * up
+             + float(self.get_parameter("scoop_open_left_weight").value) * left)
+        norm = float(np.linalg.norm(n))
+        return up if norm < 1e-6 else n / norm
+
+    def _refresh_entry_geometry(self) -> bool:
+        """원본처럼 안전점 도착 뒤 같은 과실의 최신 중심으로 LIN/CIRC를 갱신한다."""
+        live = self._fresh_locked_sim_target()
+        if live is None:
+            return True
+        delta = live - self._fruit_target
+        error = float(np.linalg.norm(delta))
+        limit = float(self.get_parameter("reacquire_max_m").value)
+        if error > limit:
+            self._deadline_ns = 0
+            self._abort_to_home(
+                f"reacquire_shift={error:.3f}m > {limit:.3f}m")
+            return False
+        if error <= 0.003:
+            return True
+        n = self._scoop_insertion_axis(live)
+        self._insertion_axis = n
+        standoff = (
+            float(self.get_parameter("scoop_cup_radius_m").value)
+            + self._grasp_fruit_radius()
+            + float(self.get_parameter("scoop_insertion_margin_m").value))
+        grasp = live.copy()                     # 컵 중심 = 과실 중심 (오프셋 0)
+        circ_target = grasp.copy()
+        pregrasp = live - n * standoff
+        interim = 0.5 * (pregrasp + grasp)
+        self._pregrasp_target = pregrasp
+        self._grasp_target = grasp
+        self._circ_target = circ_target
+        self._circ_interim = interim
+        self._fruit_target = live.copy()
+        self.get_logger().info(
+            "안전점 도착 후 동일 과실 중심 갱신: "
+            f"delta={tuple(round(float(v) * 1000.0) for v in delta)}mm")
+        return True
+
+    def _capture_trim_or_close(self, allow_trim: bool = True) -> None:
+        """CIRC 중 움직인 과실만 원본 범위 안에서 짧게 LIN 보정하고 스쿱을 닫는다."""
+        live = self._fresh_locked_sim_target()
+        if live is not None:
+            desired = live.copy()               # 컵 중심 = 과실 중심 (오프셋 0)
+            delta = desired - self._grasp_target
+            error = float(np.linalg.norm(delta))
+            abort = float(self.get_parameter("capture_abort_m").value)
+            deadband = float(self.get_parameter("capture_deadband_m").value)
+            trim_max = float(self.get_parameter("capture_trim_max_m").value)
+            if error > abort:
+                self._deadline_ns = 0
+                self._abort_to_home(
+                    f"capture_shift={error:.3f}m > {abort:.3f}m")
+                return
+            if allow_trim and error > deadband:
+                shift = delta * min(1.0, trim_max / error)
+                trim_goal = self._grasp_target + shift
+                self._grasp_target = trim_goal
+                self._pregrasp_target = self._pregrasp_target + shift
+                self._circ_interim = self._circ_interim + shift
+                self._fruit_target = live.copy()
+                self.get_logger().info(
+                    "수용 직전 저속 LIN 보정: "
+                    f"delta={tuple(round(float(v) * 1000.0) for v in shift)}mm")
+                self._send_rmp_goal(trim_goal, "CAPTURE_TRIM")
+                return
+        self._transition("GRIPPER_CLOSING", stop=True)
+        self._gripper_command_at_ns = self.get_clock().now().nanoseconds
+        self._grasp_check_sent = False
+        self._deadline_ns = (
+            self.get_clock().now().nanoseconds
+            + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+        )
+        self._isaac_command_pub.publish(
+            String(data=json.dumps({"gripper": {"closed": True}})))
+
+    def _current_tool_orientation(self) -> list[float] | None:
+        """현재 harvest_tcp 자세. 한 수확 사이클 동안 같은 자세로 LIN/CIRC를 잇는다."""
+        base_frame = str(self.get_parameter("base_frame").value)
+        try:
+            transform = self._buffer.lookup_transform(
+                base_frame, "harvest_tcp", Time(),
+                timeout=Duration(seconds=float(
+                    self.get_parameter("tf_timeout_sec").value)),
+            )
+        except TransformException as exc:
+            self.get_logger().warning(
+                f"현재 TCP 자세 조회 실패: {exc}",
+                throttle_duration_sec=2.0,
+            )
+            return None
+        q = transform.transform.rotation
+        return [float(q.x), float(q.y), float(q.z), float(q.w)]
 
     def _status_callback(self, msg: String) -> None:
         try:
@@ -513,19 +915,74 @@ class ManipulatorTargetNode(Node):
             return
         if not isinstance(status, dict):
             return
+        if self._state == "CUTTING" and not self._cut_check_sent:
+            try:
+                blade = float(status.get("blade", float("nan")))
+            except (TypeError, ValueError):
+                blade = float("nan")
+            target = float(
+                self.get_parameter("blade_cut_complete_deg").value)
+            tolerance = float(
+                self.get_parameter("blade_angle_tolerance_deg").value)
+            if math.isfinite(blade) and blade >= target - tolerance:
+                self._cut_check_sent = True
+                self._sequence_id += 1
+                self._cut_check_id = self._sequence_id
+                self._transition("CUT_VERIFY", stop=True)
+                self._isaac_command_pub.publish(String(data=json.dumps({
+                    "cut_fruit": {
+                        "id": self._cut_check_id,
+                        "fruit_id": (-1 if self._grasp_fruit_id is None
+                                     else self._grasp_fruit_id),
+                        "position": [float(v) for v in self._fruit_target],
+                        "max_distance": float(self.get_parameter(
+                            "grasp_tcp_max_distance_m").value),
+                    }
+                })))
+            return
+        if "cut_id" in status:
+            if (self._state != "CUT_VERIFY"
+                    or int(status.get("cut_id", -1)) != self._cut_check_id):
+                return
+            if not bool(status.get("cut_success", False)):
+                self._deadline_ns = 0
+                self._abort_to_home(
+                    f"cut_failed blade={status.get('blade')} "
+                    f"distance={status.get('d')}")
+                return
+            self.get_logger().info(
+                f"칼날 절단 확인: blade={float(status.get('blade', 0.0)):.1f}°")
+            self._transition("BLADE_OPENING", stop=True)
+            self._deadline_ns = (
+                self.get_clock().now().nanoseconds
+                + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+            )
+            self._isaac_command_pub.publish(String(data=json.dumps({
+                "blade": float(self.get_parameter("blade_open_deg").value),
+            })))
+            return
+        if self._state == "BLADE_OPENING":
+            try:
+                blade = float(status.get("blade", float("nan")))
+            except (TypeError, ValueError):
+                blade = float("nan")
+            target = float(self.get_parameter("blade_open_deg").value)
+            tolerance = float(
+                self.get_parameter("blade_angle_tolerance_deg").value)
+            if math.isfinite(blade) and abs(blade - target) <= tolerance:
+                self._deadline_ns = 0
+                self._send_rmp_goal(
+                    self._pregrasp_target, "RETRACT_CIRC")
+            return
         if "grasp_id" in status:
             if (self._state != "GRASP_VERIFY"
                     or int(status.get("grasp_id", -1)) != self._grasp_check_id):
                 return
             if bool(status.get("ok", False)):
                 self.get_logger().info(
-                    "GRASP TCP 근접 + 흡착; pedicel FixedJoint 해제 "
-                    f"{float(status.get('d', 999.0)):.3f}m — 흡착 웰드라 파지검증 생략, "
-                    "바로 PRE_PLACE")
-                # 흡착은 웰드로 결정적으로 붙어있어 후퇴-동반이동 검증(verify_retract+
-                # follow_check)이 불필요하다. 그 카트지안 후퇴는 폐루프 보정이 없어 도달
-                # 판정에 못 들어가 멈춘다 → 파지 직후 바로 들기(PRE_PLACE)로 간다.
-                self._begin_preplace()
+                    "GRASP TCP 근접 + 수용 확인 "
+                    f"{float(status.get('d', 999.0)):.3f}m — 칼날 절단 시작")
+                self._begin_cut()
             else:
                 self._deadline_ns = 0
                 self._abort_to_home(
@@ -576,7 +1033,8 @@ class ManipulatorTargetNode(Node):
             distance = float(status.get("distance", float("inf")))
         except (TypeError, ValueError):
             distance = float("inf")
-        if (phase in {"PREGRASP", "GRASP"}
+        if (phase in {"APPROACH", "PREGRASP", "GRASP", "CAPTURE_TRIM",
+                      "RETRACT_CIRC", "RETRACT_LIN"}
                 and math.isfinite(distance)
                 and distance < self._best_motion_distance - 0.005):
             self._best_motion_distance = distance
@@ -595,19 +1053,16 @@ class ManipulatorTargetNode(Node):
             )
             self._isaac_command_pub.publish(
                 String(data=json.dumps({"gripper": {"closed": True}})))
+        elif self._state == "APPROACH":
+            if self._refresh_entry_geometry():
+                self._send_rmp_goal(self._pregrasp_target, "PREGRASP")
         elif self._state == "PREGRASP":
-            self._send_rmp_goal(self._grasp_target, "GRASP")
+            self._send_rmp_goal(self._circ_target, "GRASP")
         elif self._state == "GRASP":
-            self._transition("GRIPPER_CLOSING", stop=True)
-            self._gripper_command_at_ns = self.get_clock().now().nanoseconds
-            self._grasp_check_sent = False
-            self._deadline_ns = (
-                self.get_clock().now().nanoseconds
-                + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
-            )
-            self._isaac_command_pub.publish(
-                String(data=json.dumps({"gripper": {"closed": True}}))
-            )
+            self._capture_trim_or_close()
+        elif self._state == "CAPTURE_TRIM":
+            # 원본과 동일하게 최대 35 mm 보정은 한 번만 하고 즉시 닫는다.
+            self._capture_trim_or_close(allow_trim=False)
         elif self._state == "VERIFY_RETRACT":
             self._sequence_id += 1
             self._follow_check_id = self._sequence_id
@@ -623,15 +1078,21 @@ class ManipulatorTargetNode(Node):
                         "grasp_follow_max_delta_m").value),
                 }
             })))
-        elif self._state in ("RETRACT", "PRE_PLACE"):
-            if self._basket_place is not None:
+        elif self._state == "RETRACT_CIRC":
+            self._send_rmp_goal(self._approach_target, "RETRACT_LIN")
+        elif self._state in ("RETRACT_LIN", "RETRACT", "PRE_PLACE"):
+            if (not self._basket_available()
+                    and bool(self.get_parameter(
+                        "use_iw_tf_basket_fallback").value)):
+                self._acquire_nearby_iw_basket()
+            if self._basket_available():
                 self._start_place()
-            elif bool(self.get_parameter("home_after_attempt").value):
+            else:
+                # 실제 IW 좌표가 없거나 오래됐으면 다른 자세를 만들지 않고 홈으로 간다.
+                self._basket_place = None
+                self._basket_received_ns = 0
                 self._deadline_ns = 0
                 self._send_home()
-            else:
-                self._deadline_ns = 0
-                self._transition("WAIT_BASKET", stop=True)
         elif self._state == "BASKET_APPROACH":
             self._send_rmp_goal(self._basket_place, "BASKET_PLACE")
         elif self._state == "BASKET_PLACE":
@@ -686,12 +1147,73 @@ class ManipulatorTargetNode(Node):
             self.get_logger().warning("작업영역 밖 바스켓 목표를 무시합니다")
             return
         self._basket_place = values
+        self._basket_received_ns = self.get_clock().now().nanoseconds
+        self.get_logger().info(
+            "실제 IW 바스켓 좌표 수신: "
+            f"base=({values[0]:.3f}, {values[1]:.3f}, {values[2]:.3f})",
+            throttle_duration_sec=2.0,
+        )
         if self._state == "WAIT_BASKET":
             self._start_place()
 
+    def _basket_available(self) -> bool:
+        if self._basket_place is None or not self._basket_received_ns:
+            return False
+        max_age = max(
+            0.0, float(self.get_parameter("basket_pose_max_age_sec").value))
+        age = self.get_clock().now().nanoseconds - self._basket_received_ns
+        return age <= int(max_age * 1e9)
+
+    def _acquire_nearby_iw_basket(self) -> bool:
+        """IW TF와 실제 KLT 격자로 도달 가능한 가장 가까운 빈 바스켓을 선택한다."""
+        raw = list(self.get_parameter("iw_empty_basket_offsets").value)
+        if not raw or len(raw) % 3:
+            self.get_logger().warning("iw_empty_basket_offsets 형식 오류")
+            return False
+        iw_frame = str(self.get_parameter("iw_base_frame").value)
+        base_frame = str(self.get_parameter("base_frame").value)
+        lower = np.asarray(self.get_parameter("basket_workspace_min").value)
+        upper = np.asarray(self.get_parameter("basket_workspace_max").value)
+        candidates: list[np.ndarray] = []
+        for index in range(0, len(raw), 3):
+            source = PoseStamped()
+            source.header.frame_id = iw_frame
+            source.header.stamp = Time().to_msg()
+            source.pose.position.x = float(raw[index])
+            source.pose.position.y = float(raw[index + 1])
+            source.pose.position.z = float(raw[index + 2])
+            source.pose.orientation.w = 1.0
+            try:
+                target = self._buffer.transform(
+                    source, base_frame,
+                    timeout=Duration(seconds=float(
+                        self.get_parameter("tf_timeout_sec").value)))
+            except TransformException:
+                # IW가 실행되지 않았거나 공통 map TF에 연결되지 않았으면 정상적으로
+                # "근처 IW 없음" 처리한다. 후보마다 같은 경고를 반복하지 않는다.
+                return False
+            p = target.pose.position
+            values = np.array([p.x, p.y, p.z], dtype=float)
+            if (np.all(np.isfinite(values))
+                    and np.all((lower <= values) & (values <= upper))):
+                candidates.append(values)
+        if not candidates:
+            return False
+        # 팔 기준 수평거리가 가장 짧은 KLT를 택해 불필요한 관절 회전을 줄인다.
+        selected = min(candidates, key=lambda value: float(
+            np.linalg.norm(value[:2])))
+        self._basket_place = selected.copy()
+        self._basket_received_ns = self.get_clock().now().nanoseconds
+        self.get_logger().info(
+            "근처 IW 빈 바스켓 선택: "
+            f"base=({selected[0]:.3f}, {selected[1]:.3f}, {selected[2]:.3f})")
+        return True
+
     def _start_place(self) -> None:
-        if self._basket_place is None:
-            self._transition("WAIT_BASKET", stop=True)
+        if not self._basket_available():
+            self._basket_place = None
+            self._basket_received_ns = 0
+            self._send_home()
             return
         approach = self._basket_place.copy()
         approach[2] += float(
@@ -699,20 +1221,25 @@ class ManipulatorTargetNode(Node):
         self._send_rmp_goal(approach, "BASKET_APPROACH")
 
     def _begin_preplace(self) -> None:
-        """파지(흡착) 후 플레이스 전 자세 — Isaac 이 joint_3·5 로 파지물을 살짝 든다."""
-        self._sequence_id += 1
-        self._pending_id = self._sequence_id
-        self._transition("PRE_PLACE")
+        """레거시 진입점. 큰 HOME 왕복 대신 접근 경로를 그대로 되짚어 후퇴한다."""
+        self._send_rmp_goal(self._pregrasp_target, "RETRACT")
+
+    def _begin_cut(self) -> None:
+        """수용부가 과실을 고정한 뒤 외측 칼날만 닫고 실제 각도 도달을 기다린다."""
+        self._cut_check_sent = False
+        self._transition("CUTTING", stop=True)
         self._deadline_ns = (
             self.get_clock().now().nanoseconds
-            + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+            + int(float(
+                self.get_parameter("blade_motion_timeout_sec").value) * 1e9)
         )
         self._isaac_command_pub.publish(String(data=json.dumps({
-            "rmp_preplace": {"id": self._pending_id},
+            "blade": float(self.get_parameter("blade_cut_deg").value),
         })))
 
     def _send_home(self, retry_after_home: bool = False) -> None:
         self._basket_place = None
+        self._basket_received_ns = 0
         self._retry_after_home = bool(retry_after_home)
         self._sequence_id += 1
         self._pending_id = self._sequence_id
@@ -730,22 +1257,28 @@ class ManipulatorTargetNode(Node):
         계속 켜두면 이동 중 재인식으로 시퀀스가 흔들리는 걸 막는다."""
         if bool(self.get_parameter("single_shot_harvest").value):
             self._harvest_enabled = False
-            self.get_logger().info("원샷 수확 완료 — h 다시 눌러야 다음 과실")
+            self.get_logger().info("원샷 수확 종료 — h 다시 눌러야 다음 과실")
 
     def _abort_to_home(self, reason: str) -> None:
         """실패해도 팔을 홈으로 돌려 다음 과실을 계속 시도하게 한다(데모 연속 사이클).
         이미 홈 복귀 중(GO_HOME)에 또 실패하면 무한루프 방지로 멈추기만 한다."""
         self.get_logger().warning(f"수확 실패({reason}) — 홈 복귀 후 다음 시도")
+        was_going_home = self._state == "GO_HOME"
+        # 홈 복귀 자체의 성공을 수확 사이클 성공으로 오인하지 않도록 상위 시험
+        # 노드에 실패를 먼저 명시한다. 이어지는 GO_HOME은 안전 복귀 동작일 뿐이다.
+        self._transition("HARVEST_FAILED")
         self._isaac_command_pub.publish(String(data=json.dumps({
             "gripper": {"closed": False},
+            "blade": float(self.get_parameter("blade_open_deg").value),
         })))
-        if self._state == "GO_HOME":
+        if was_going_home:
             self._deadline_ns = 0
             self._transition("HOME_READY", stop=True)
             self._mobility_pub.publish(Bool(data=True))
             self._maybe_single_shot_off()
             return
-        self._send_home(retry_after_home=True)
+        self._send_home(retry_after_home=bool(
+            self.get_parameter("retry_after_failure").value))
 
     def _begin_verify_retract(self) -> None:
         self._gripper_command_at_ns = 0

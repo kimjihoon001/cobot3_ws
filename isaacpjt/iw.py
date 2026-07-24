@@ -27,8 +27,10 @@ class IwDriver(Driver):
         super().__init__()
         self._cfg = cfg
         self._iw = IwHub(cfg.robots)
+        self._stage = None
         self._warehouse_dock = None
         self._deck_geometry_pub = None
+        self._basket_pose_pub = None
         self._last_deck_geometry = None
         self._deck_geometry_error_logged = False
 
@@ -36,6 +38,7 @@ class IwDriver(Driver):
         self._iw.spawn(stage, self.root, POSE, yaw_deg=SPAWN_YAW_DEG)
 
     def finalize(self, world, stage, opts):
+        self._stage = stage
         self._iw.load_cargo(
             stage, self._cfg.tomato_assets, self._cfg.physics)
         self._warehouse_dock = WarehouseDockController(
@@ -54,6 +57,11 @@ class IwDriver(Driver):
                 "/iwhub_0/deck_geometry",
             )
             self._deck_geometry_pub = RB.StringPublisher(geometry_node)
+            basket_node = RB.build_pose_publisher(
+                "/World/RosIwEmptyBasketPose",
+                "/iw/basket/empty_slot_pose",
+            )
+            self._basket_pose_pub = RB.PosePublisher(basket_node)
         except Exception:
             ros_fail("iw.hub 조인트 브리지")
 
@@ -79,10 +87,36 @@ class IwDriver(Driver):
                     self._last_deck_geometry = payload
                     print(f"[IW Deck Measure] ROS 발행 시작: {payload}")
             self._deck_geometry_error_logged = False
+            self._publish_empty_basket_pose()
         except Exception as exc:
             if not self._deck_geometry_error_logged:
                 print(f"[IW Deck Measure] ROS 발행 실패: {exc}")
                 self._deck_geometry_error_logged = True
+
+    def _publish_empty_basket_pose(self) -> None:
+        """IW의 실제 빈 KLT prim에서 map 기준 tool release pose를 발행한다."""
+        if self._basket_pose_pub is None or self._stage is None:
+            return
+        stage = self._stage
+        # load_cargo()의 초기 적재 슬롯 (00,11,30)은 제외한다.
+        for slot in ("KLT_01", "KLT_10", "KLT_20", "KLT_21", "KLT_31"):
+            prim = stage.GetPrimAtPath(f"/World/IwHubCargo/Load/{slot}")
+            if not prim.IsValid():
+                continue
+            from pxr import Gf, Usd, UsdGeom
+            world = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default())
+            # KLT 높이 0.146m × scale 0.85의 윗면보다 5cm 위에서 놓는다.
+            release = world.Transform(Gf.Vec3d(0.0, 0.0, 0.11205))
+            quat = world.ExtractRotationQuat().GetNormalized()
+            imaginary = quat.GetImaginary()
+            self._basket_pose_pub.publish(
+                (float(release[0]), float(release[1]), float(release[2])),
+                (float(imaginary[0]), float(imaginary[1]),
+                 float(imaginary[2]), float(quat.GetReal())),
+                frame_id="map",
+            )
+            return
 
     def set_warehouse_dock_locked(self, locked: bool) -> bool:
         return bool(

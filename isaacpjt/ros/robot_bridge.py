@@ -355,12 +355,12 @@ def build_tf_sensor(stage, graph_path: str, parent_prim: str, sensor_prim: str,
     m_s = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(sensor_prim))
     rel = m_s * m_p.GetInverse()
     t = rel.ExtractTranslation()
-    # 회전은 기본값(단위)으로 둔다 — attach_lidar 가 단위 쿼터니언으로 붙이므로.
-    # 기울여 달면 여기서 rotation 도 넣어야 한다(입력 포맷 미실측 — 그때 probe 할 것).
+    # 회전은 기본값(단위)으로 둔다 — attach_lidar가 무회전으로 붙인 센서이며,
+    # 지도 방향 요청에 따른 별도 yaw 보정은 적용하지 않는다.
     q = rel.ExtractRotationQuat()
     if abs(q.GetReal()) < 0.999:
         log(f"[Nav] ⚠ 라이다가 기울어 장착됨(w={q.GetReal():.3f}) — "
-            "TF 회전은 단위로 나간다. 스캔이 틀어지면 rotation 입력을 채울 것.")
+            "TF 회전은 단위로 나간다.")
     _edit(graph_path,
           [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("SimTime", T["SimTime"]),
            ("Tf", T["PubRawTf"])],
@@ -816,11 +816,11 @@ class PosePublisher:
             return False
         return True
 
-    def publish(self, position, orientation_xyzw) -> bool:
+    def publish(self, position, orientation_xyzw, frame_id: str = "world") -> bool:
         if not self._resolve():
             return False
         values = {
-            "header:frame_id": "world",
+            "header:frame_id": str(frame_id),
             "pose:position:x": float(position[0]),
             "pose:position:y": float(position[1]),
             "pose:position:z": float(position[2]),

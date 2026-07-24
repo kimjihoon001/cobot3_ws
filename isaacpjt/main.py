@@ -57,6 +57,7 @@ QUIET = "--quiet" in sys.argv
 NAV_DRIVE = "--nav-drive" in sys.argv or "--nav" in sys.argv
 NAV_ODOM = "--nav-odom" in sys.argv or "--nav" in sys.argv
 NAV_SCAN = "--nav-scan" in sys.argv or "--nav" in sys.argv
+
 # 손끝 D455 → ROS2 rgb/depth 발행 (YOLO 파인튜닝용). 기본 켜짐(ROS 켤 때 자동). --no-camera 로 끔.
 # ⚠ 노드명 probe 미확정 — 실패해도 씬은 그대로(main 이 예외 잡음).
 CAMERA = "--no-camera" not in sys.argv
@@ -64,9 +65,11 @@ RMPFLOW = "--rmpflow" in sys.argv
 LEGACY_IK = "--legacy-ik" in sys.argv
 if LEGACY_IK and not RMPFLOW:
     raise SystemExit("--legacy-ik는 --rmpflow와 함께 사용해야 합니다.")
+
 # ★제어 모드 분리(2026-07-23) — 스쿱 MM 을 MoveIt 로 구동. --moveit → moveit_mm
 #   (/World/MoveitMM). --mm 은 mm(m0617/스쿱, MoveIt) → --mm --moveit 동시 스폰 가능.
 MOVEIT = "--moveit" in sys.argv
+
 # MM 키보드 텔레옵 (팔·베이스·RG2 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
 # MM 키보드 입력은 명시적인 전용 플래그만 사용한다. --mm와 --iw를 같이 띄워도
 # 키 입력이 iw.hub에 전달되거나 전역 teleop 상태를 공유하지 않는다.
@@ -77,6 +80,7 @@ if MM_TELEOP and "--mm" not in sys.argv:
     raise SystemExit("--mm-teleop은 --mm과 함께 사용해야 합니다.")
 if MM_TELEOP and NAV_DRIVE:
     raise SystemExit("MM 텔레옵과 Nav2는 동시에 베이스를 제어할 수 없습니다.")
+
 # 지게차+운반 AMR만 선택하면 창고 자동화 단독 시험으로 본다. 이 모드에서는
 # iw.py가 AMR을 창고 도킹 위치에 빈 상태로 놓아 첫 팔레트 상차를 바로 시험한다.
 WAREHOUSE_TEST = (

@@ -94,7 +94,8 @@ def apply_flat_color(stage, prim_path, color):
 
 
 def bind_matte_material(stage, prim_path,
-                        mat_path="/World/Looks/MatteDisplayColor"):
+                        mat_path="/World/Looks/MatteDisplayColor",
+                        fallback_color=Gf.Vec3f(0.5, 0.5, 0.5)):
     """displayColor 를 그대로 읽는 무광 머티리얼을 만들어 바인딩.
 
     머티리얼이 없으면 RTX 기본 재질(광택)로 렌더돼 과실이 유리구슬처럼 보인다
@@ -115,7 +116,7 @@ def bind_matte_material(stage, prim_path,
         # (token 으로 넣으면 못 찾고 fallback 회색으로 렌더 — 2026-07-18 확인)
         reader.CreateInput("varname", Sdf.ValueTypeNames.String).Set("displayColor")
         reader.CreateInput("fallback", Sdf.ValueTypeNames.Float3).Set(
-            Gf.Vec3f(0.5, 0.5, 0.5))
+            fallback_color)
         surf.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(
             reader.CreateOutput("result", Sdf.ValueTypeNames.Float3))
         mat.CreateSurfaceOutput().ConnectToSource(
