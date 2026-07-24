@@ -1,0 +1,10 @@
+# mm IK — harvest_moveit 은 ur_moveit_config 의 kinematics.yaml 을 빌려 썼지만
+# mm 는 MM 별 MoveIt 완전 분리(2026-07-24 사용자) 원칙에 따라 자체 파일을 갖는다.
+# KDL = MoveIt 기본 수치해석 IK. m0617 은 손목이 구형(spherical)이라 해석해도 가능하지만
+# 전용 IK 플러그인(dsr_moveit)이 이 워크스페이스에 없어 KDL 로 간다. [4] 임의 — 수렴이
+# 느리면 trac_ik 또는 Doosan 해석 IK 로 교체할 것.
+mm_manipulator:
+  kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+  kinematics_solver_search_resolution: 0.005
+  kinematics_solver_timeout: 0.05
+  kinematics_solver_attempts: 3

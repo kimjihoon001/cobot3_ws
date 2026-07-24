@@ -685,20 +685,20 @@ class CameraBridgeConfig:
     """
     width: int = 640         # px  [4] 임의 — D455 컬러 관행 해상도. YOLO 입력에 맞게 조정.
     height: int = 480        # px  [4]
-    rgb_topic: str = "/harvester/rgb"
-    depth_topic: str = "/harvester/depth"
-    info_topic: str = "/harvester/camera_info"
+    rgb_topic: str = "/harvester_0/rgb"
+    depth_topic: str = "/harvester_0/depth"
+    info_topic: str = "/harvester_0/camera_info"
     frame_id: str = "d455_color"
     # moveit_mm(harvester_moveit) 격리용 D455 전체 스트림 필드 (2026-07-24). moveit_mm._build_camera
     # 가 dataclasses.replace 로 node_namespace + 상대 토픽을 얹어 RMP MM 카메라와 완전히 분리한다.
     # node_namespace 가 비면 위 절대 토픽을 그대로 쓰고, 차면 상대 토픽으로 복제된다.
-    depth_info_topic: str = "/harvester/depth/camera_info"
-    pointcloud_topic: str = "/harvester/depth/points"
-    infra1_topic: str = "/harvester/infra1/image_raw"
-    infra2_topic: str = "/harvester/infra2/image_raw"
-    infra1_info_topic: str = "/harvester/infra1/camera_info"
-    infra2_info_topic: str = "/harvester/infra2/camera_info"
-    imu_topic: str = "/harvester/imu"
+    depth_info_topic: str = "/harvester_0/depth/camera_info"
+    pointcloud_topic: str = "/harvester_0/depth/points"
+    infra1_topic: str = "/harvester_0/infra1/image_raw"
+    infra2_topic: str = "/harvester_0/infra2/image_raw"
+    infra1_info_topic: str = "/harvester_0/infra1/camera_info"
+    infra2_info_topic: str = "/harvester_0/infra2/camera_info"
+    imu_topic: str = "/harvester_0/imu"
     depth_frame_id: str = "d455_depth_optical_frame"
     infra1_frame_id: str = "d455_infra1_optical_frame"
     infra2_frame_id: str = "d455_infra2_optical_frame"

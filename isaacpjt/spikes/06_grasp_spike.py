@@ -82,7 +82,7 @@ from isaacsim.core.api import World                                  # noqa: E40
 from pxr import Gf, Usd, UsdGeom, UsdLux                             # noqa: E402
 
 from pjt_config.settings import SceneConfig                          # noqa: E402
-from rmp_mm import RmpMMDriver                                              # noqa: E402
+from mm import MMDriver                                              # noqa: E402
 
 
 class Opts:
@@ -187,7 +187,7 @@ def main() -> None:
     _add_light(stage)
 
     # ── MM 조립 lifecycle (main._assemble_robots 와 동일 순서) ──
-    d = RmpMMDriver(cfg, task=None)
+    d = MMDriver(cfg, task=None)
     d.spawn(stage)
     d.register(world, stage)
     world.reset()

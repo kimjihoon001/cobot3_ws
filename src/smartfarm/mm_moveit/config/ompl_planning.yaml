@@ -1,0 +1,22 @@
+# mm OMPL 설정 — MoveIt Setup Assistant 기본 planner_configs 와 같은 구성.
+# harvest_moveit 은 ur_moveit_config 것을 빌려 썼지만 mm 는 자체 파일을 갖는다(MM 별 분리).
+planner_configs:
+  RRTConnectkConfigDefault:
+    type: geometric::RRTConnect
+    range: 0.0
+  RRTstarkConfigDefault:
+    type: geometric::RRTstar
+    range: 0.0
+    goal_bias: 0.05
+    delay_collision_checking: 1
+  PRMkConfigDefault:
+    type: geometric::PRM
+    max_nearest_neighbors: 10
+
+mm_manipulator:
+  planner_configs:
+    - RRTConnectkConfigDefault
+    - RRTstarkConfigDefault
+    - PRMkConfigDefault
+  projection_evaluator: joints(joint_1,joint_2)
+  longest_valid_segment_fraction: 0.005

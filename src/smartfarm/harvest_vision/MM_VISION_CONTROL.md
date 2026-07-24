@@ -99,9 +99,9 @@ yolo_training/runs/tomato_detector_20260721_120648/weights/best.pt
 
 | 토픽 | 타입 | 설명 |
 |---|---|---|
-| `/harvester/rgb` | `sensor_msgs/Image` | D455 RGB |
-| `/harvester/depth` | `sensor_msgs/Image` | D455 depth |
-| `/harvester/camera_info` | `sensor_msgs/CameraInfo` | 카메라 내부 파라미터 |
+| `/harvester_0/rgb` | `sensor_msgs/Image` | D455 RGB |
+| `/harvester_0/depth` | `sensor_msgs/Image` | D455 depth |
+| `/harvester_0/camera_info` | `sensor_msgs/CameraInfo` | 카메라 내부 파라미터 |
 | `/harvester_0/joint_states` | `sensor_msgs/JointState` | MM 관절 상태 |
 
 ### 비전 출력

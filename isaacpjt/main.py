@@ -65,7 +65,7 @@ LEGACY_IK = "--legacy-ik" in sys.argv
 if LEGACY_IK and not RMPFLOW:
     raise SystemExit("--legacy-ik는 --rmpflow와 함께 사용해야 합니다.")
 # ★제어 모드 분리(2026-07-23) — 스쿱 MM 을 MoveIt 로 구동. --moveit → moveit_mm
-#   (/World/MoveitMM). --mm 은 rmp_mm(RG2/Doosan) 그대로 → --mm --moveit 동시 스폰 가능.
+#   (/World/MoveitMM). --mm 은 mm(m0617/스쿱, MoveIt) → --mm --moveit 동시 스폰 가능.
 MOVEIT = "--moveit" in sys.argv
 # MM 키보드 텔레옵 (팔·베이스·RG2 직접 조작). ROS2 대신 키로 움직여 뷰 확보용.
 # MM 키보드 입력은 명시적인 전용 플래그만 사용한다. --mm와 --iw를 같이 띄워도
@@ -202,7 +202,6 @@ if not NO_ROS:
     for _ in range(20):
         simulation_app.update()
 
-import numpy as np
 import omni.usd
 from isaacsim.core.api import World
 from isaacsim.core.api.robots import Robot
@@ -231,8 +230,8 @@ def build_drivers(cfg, task=None) -> list:
     아예 불러오지 않는다(팀원이 그 파일을 깨뜨려도 내 로봇은 돌아간다)."""
     drivers = []
     if "--mm" in sys.argv:
-        from rmp_mm import RmpMMDriver
-        drivers.append(RmpMMDriver(cfg, task=task))
+        from mm import MMDriver
+        drivers.append(MMDriver(cfg, task=task))
     iw_driver = None
     if "--iw" in sys.argv:
         if WAREHOUSE_TEST:                       # --iw --fork (--mm 없음) → 창고 상차 단독 시험
@@ -246,7 +245,7 @@ def build_drivers(cfg, task=None) -> list:
         from fork import ForkDriver
         drivers.append(ForkDriver(cfg, iw_driver=iw_driver))
     # ★MoveIt MM(스쿱/UR10e, 2026-07-23) — 끝에 추가해 --mm/--iw 영역과 안 겹친다.
-    #   --moveit → moveit_mm(/World/MoveitMM). --mm(rmp_mm)과 동시 스폰 가능.
+    #   --moveit → moveit_mm(/World/MoveitMM). --mm(mm)과 동시 스폰 가능.
     if MOVEIT:
         from moveit_mm import MMDriver as MoveitMMDriver
         drivers.append(MoveitMMDriver(cfg, task=task))
@@ -296,10 +295,12 @@ def _assemble_robots(world, stage, drivers: list) -> None:
 def run_loaded(path: str) -> None:
     """기존 USD 를 열어 그대로 실행(씬 재조립 없음) + MM 텔레옵(--mm 일 때).
 
-    ★ 수확자세 재설정이 필요한 이유: 아티큘레이션 '조인트 각도 상태'는 USD 에 안 실린다.
-      로드 시 wrist_1 이 0 으로 초기화돼 플레이하면 그리퍼가 0 자세로 떨어진다(사용자 지적
-      2026-07-20). build 경로와 똑같이 wrist_1 +180° 를 default_state 로 다시 잡아 고정한다.
-      (이 USD 가 이미 수확자세 상태를 담고 있었다면 이 +180° 는 빼야 함 — GPU 에서 확인.)
+    ★ 로드 시 수확자세 재설정은 하지 않는다(2026-07-24 제거). UR10e 시절엔 조인트 각도가
+      USD 에 안 실려 wrist_1 +180° 를 default_state 로 되잡아야 했지만, 지금 MM(mm)의
+      로봇 모델은 _preset_pose 가 HOME 자세를 **USD 링크 트랜스폼과 조인트 드라이브
+      타깃에 구워 넣는다** — export 된 USD 가 이미 수확자세를 담고 있다. 그 상태에서
+      +180° 를 또 더하면 이중 적용이고, m0617 엔 wrist_1_joint 라는 이름 자체가 없어
+      ValueError 로 죽었다.
     """
     from isaacsim.core.utils.stage import open_stage
 
@@ -325,15 +326,11 @@ def run_loaded(path: str) -> None:
 
     teleop = None
     if mm_robot is not None:
-        q0 = np.asarray(mm_robot.get_joint_positions(), dtype=float)
-        q0[list(mm_robot.dof_names).index("wrist_1_joint")] += np.pi   # 수확자세 복원
-        mm_robot.set_joints_default_state(positions=q0)
-        world.reset()
         for _ in range(15):
             world.step(render=False)
         if MM_TELEOP:
-            from rmp_mm import build_teleop, find_blade_setter
-            teleop = build_teleop(mm_robot, find_blade_setter(stage), GUI)
+            from mm import build_teleop
+            teleop = build_teleop(mm_robot, GUI)
     else:
         print("[Load] Harvester 아티큘레이션을 못 찾음 — 텔레옵 불가.")
 

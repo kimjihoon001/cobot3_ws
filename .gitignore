@@ -21,6 +21,11 @@ log/
 *.usd
 *.usda
 *.usdc
+# MM2 런타임 필수 네이티브 에셋. 생성물 일반 규칙보다 구체적인 예외를 둬
+# 새 checkout에서도 m0617 + 동축 스쿱 조립이 즉시 가능하게 한다.
+!isaacpjt/robots/m0617/m0617_isaac/*.usd
+!isaacpjt/robots/m0617/m0617_isaac/configuration/*.usd
+!isaacpjt/robots/quarter_basket_freecad/generated/coaxial_quarter_scoop_gripper.usd
 isaacpjt/tomatest/tomato_assets_usd/
 
 isaacpjt/M0609/

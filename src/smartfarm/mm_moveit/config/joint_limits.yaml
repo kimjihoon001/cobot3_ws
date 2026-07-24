@@ -1,0 +1,37 @@
+# mm 계획용 관절 한계.
+# [1] 출처 — max_velocity 는 m0617 URDF(isaacpjt/robots/m0617/m0617_full.urdf, 공식
+#     dsr_description2 유래) 의 <limit velocity=...> 값 그대로.
+# [4] 임의 — max_acceleration 은 URDF 에 없다. 근위축(1·2)은 관성이 커 낮게, 손목(4~6)은
+#     높게 잡은 값. 궤적이 급하면 여기서 낮출 것. 스쿱 3축은 MoveIt 밖(gripper_controller)
+#     이라 넣지 않는다.
+joint_limits:
+  joint_1:
+    has_velocity_limits: true
+    max_velocity: 1.7453
+    has_acceleration_limits: true
+    max_acceleration: 2.0
+  joint_2:
+    has_velocity_limits: true
+    max_velocity: 1.7453
+    has_acceleration_limits: true
+    max_acceleration: 2.0
+  joint_3:
+    has_velocity_limits: true
+    max_velocity: 2.618
+    has_acceleration_limits: true
+    max_acceleration: 3.0
+  joint_4:
+    has_velocity_limits: true
+    max_velocity: 3.927
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  joint_5:
+    has_velocity_limits: true
+    max_velocity: 3.927
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  joint_6:
+    has_velocity_limits: true
+    max_velocity: 3.927
+    has_acceleration_limits: true
+    max_acceleration: 5.0

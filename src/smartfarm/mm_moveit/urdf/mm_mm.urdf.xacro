@@ -1,0 +1,217 @@
+<?xml version="1.0"?>
+<!-- mm 수확 MM: Ridgeback + Doosan m0617 + 동축 3축 1/4구 스쿱.
+     harvest_moveit/urdf/harvester_mm.urdf.xacro 에서 **팔만 갈아끼운 것**(2026-07-24 사용자).
+     베이스·스쿱·D455·TCP 배선은 그대로다. 달라진 곳은 두 군데뿐:
+       1) ur_macro(UR10e) → m0617_macro(Doosan m0617)
+       2) 스쿱 어댑터의 부모 tool0 → link_6  (m0617 엔 tool0/ee_joint 가 없다.
+          플랜지가 link_6 이고 접근축이 그 +Z — Isaac 측 robots/harvester_mm.py 와 동일 근거)
+     CAD/Isaac/MoveIt 공통 축: 플랜지 +Z = 접근·회전축, +Y = 줄기 방향. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="mm_mm">
+
+  <xacro:include filename="$(find mm_moveit)/urdf/m0617_macro.xacro"/>
+
+  <link name="mm_base">
+    <visual>
+      <origin xyz="0 0 0.15"/>
+      <geometry><box size="0.96 0.79 0.30"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.15 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.15"/>
+      <geometry><box size="0.96 0.79 0.30"/></geometry>
+    </collision>
+  </link>
+
+  <!-- arm_mount_z = Ridgeback 높이 0.30m (Isaac cfg.arm_mount_z 와 같은 값). -->
+  <xacro:m0617_arm parent="mm_base">
+    <origin xyz="0 0 0.30" rpy="0 0 0"/>
+  </xacro:m0617_arm>
+
+  <!-- EN ISO 9409-1-50-4-M6 어댑터(스쿱 CAD 동봉본). 기존 2F-85·커플러·D455 지그는 안 쓴다. -->
+  <link name="scoop_adapter">
+    <inertial>
+      <origin xyz="0 0 0.029"/>
+      <mass value="0.85"/>
+      <inertia ixx="0.0010" ixy="0" ixz="0" iyy="0.0010" iyz="0" izz="0.0008"/>
+    </inertial>
+    <visual>
+      <geometry><mesh filename="package://mm_moveit/meshes/coaxial_scoop/UR10eAdapter.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="adapter_metal"><color rgba="0.42 0.44 0.47 1"/></material>
+    </visual>
+    <collision>
+      <geometry><mesh filename="package://mm_moveit/meshes/coaxial_scoop/UR10eAdapter.stl" scale="0.001 0.001 0.001"/></geometry>
+    </collision>
+  </link>
+  <joint name="link6_to_scoop_adapter" type="fixed">
+    <parent link="link_6"/>
+    <child link="scoop_adapter"/>
+    <!-- CAD 닫힘 배치(좌벽+바닥+우벽)가 월드 아래를 향하도록 tool-Z 180° 장착. -->
+    <origin xyz="0 0 0" rpy="0 0 3.141592653589793"/>
+  </joint>
+
+  <link name="scoop_quarter_1">
+    <inertial>
+      <origin xyz="0 0 0.120"/>
+      <mass value="0.16"/>
+      <inertia ixx="0.0005" ixy="0" ixz="0" iyy="0.0005" iyz="0" izz="0.0004"/>
+    </inertial>
+    <visual>
+      <geometry><mesh filename="package://mm_moveit/meshes/coaxial_scoop/ScoopQuarter1.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="scoop_inner"><color rgba="0.10 0.52 0.17 1"/></material>
+    </visual>
+    <collision>
+      <geometry><mesh filename="package://mm_moveit/meshes/coaxial_scoop/ScoopQuarter1.stl" scale="0.001 0.001 0.001"/></geometry>
+    </collision>
+  </link>
+  <joint name="scoop_quarter_1_joint" type="revolute">
+    <parent link="scoop_adapter"/>
+    <child link="scoop_quarter_1"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.5707963" upper="1.5707963" effort="40" velocity="1.5"/>
+    <dynamics damping="0.8" friction="0.15"/>
+  </joint>
+
+  <link name="scoop_quarter_2">
+    <inertial>
+      <origin xyz="0 0 0.120"/>
+      <mass value="0.18"/>
+      <inertia ixx="0.0006" ixy="0" ixz="0" iyy="0.0006" iyz="0" izz="0.0005"/>
+    </inertial>
+    <visual>
+      <geometry><mesh filename="package://mm_moveit/meshes/coaxial_scoop/ScoopQuarter2.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="scoop_middle"><color rgba="0.08 0.30 0.66 1"/></material>
+    </visual>
+    <collision>
+      <geometry><mesh filename="package://mm_moveit/meshes/coaxial_scoop/ScoopQuarter2.stl" scale="0.001 0.001 0.001"/></geometry>
+    </collision>
+  </link>
+  <joint name="scoop_quarter_2_joint" type="revolute">
+    <parent link="scoop_adapter"/>
+    <child link="scoop_quarter_2"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.5707963" upper="0" effort="40" velocity="1.5"/>
+    <dynamics damping="0.8" friction="0.15"/>
+  </joint>
+
+  <link name="cutter_quarter_3">
+    <inertial>
+      <origin xyz="0 0 0.120"/>
+      <mass value="0.20"/>
+      <inertia ixx="0.0007" ixy="0" ixz="0" iyy="0.0007" iyz="0" izz="0.0006"/>
+    </inertial>
+    <visual>
+      <geometry><mesh filename="package://mm_moveit/meshes/coaxial_scoop/CutterQuarter3.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="scoop_cutter"><color rgba="0.82 0.37 0.06 1"/></material>
+    </visual>
+    <collision>
+      <geometry><mesh filename="package://mm_moveit/meshes/coaxial_scoop/CutterQuarter3.stl" scale="0.001 0.001 0.001"/></geometry>
+    </collision>
+  </link>
+  <joint name="cutter_quarter_3_joint" type="revolute">
+    <parent link="scoop_adapter"/>
+    <child link="cutter_quarter_3"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.1415927" upper="0.8726646" effort="50" velocity="1.5"/>
+    <dynamics damping="1.0" friction="0.20"/>
+  </joint>
+
+  <!-- Eye-in-hand Intel RealSense D455 + L 브래킷.
+       Isaac의 실물 USD 외형 envelope(124×29×26mm)와 같은 보수적 박스를 사용한다.
+       센서/브래킷은 scoop_adapter의 고정 분기이므로 MoveIt이 월드 충돌을 함께 검사한다. -->
+  <link name="harvester_d455_mount">
+    <visual>
+      <origin xyz="0 0.095 -0.035" rpy="0.550 0 0"/>
+      <geometry><box size="0.124 0.029 0.026"/></geometry>
+      <material name="d455_black"><color rgba="0.025 0.028 0.032 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0.095 -0.035" rpy="0.550 0 0"/>
+      <!-- 케이블/모서리 3mm 여유를 포함한 충돌 envelope. -->
+      <geometry><box size="0.130 0.035 0.032"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0.064 -0.029"/>
+      <geometry><box size="0.090 0.060 0.006"/></geometry>
+      <material name="d455_bracket"><color rgba="0.18 0.20 0.23 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0.064 -0.029"/>
+      <geometry><box size="0.090 0.060 0.006"/></geometry>
+    </collision>
+  </link>
+  <joint name="scoop_adapter_to_harvester_d455" type="fixed">
+    <parent link="scoop_adapter"/>
+    <child link="harvester_d455_mount"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 토마토 중심. 세 1/4구의 회전 중심과 동일한 플랜지 +Z 120 mm. -->
+  <link name="harvest_tcp"/>
+  <joint name="scoop_adapter_to_harvest_tcp" type="fixed">
+    <parent link="scoop_adapter"/>
+    <child link="harvest_tcp"/>
+    <origin xyz="0 0 0.120" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ★토픽은 mm 전용 네임스페이스(harvester_0). moveit_mm(harvester_moveit)과
+       완전히 분리해 두 move_group 이 서로의 명령을 먹지 않게 한다(2026-07-24 사용자).
+       initial_value = isaacpjt/robots/harvester_mm.py HOME_POSE_DEG 를 라디안으로. -->
+  <ros2_control name="IsaacTopicBased" type="system">
+    <hardware>
+      <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
+      <!-- ros2_control_node의 namespace를 따르는 상대 토픽. launch의 ns 인자를
+           바꿔도 하드웨어 채널이 같은 namespace 안에서 함께 이동한다. -->
+      <param name="joint_commands_topic">joint_command</param>
+      <param name="joint_states_topic">hw_joint_states</param>
+    </hardware>
+    <joint name="joint_1">
+      <command_interface name="position"><param name="initial_value">0.0</param></command_interface>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="joint_2">
+      <command_interface name="position"><param name="initial_value">0.0</param></command_interface>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="joint_3">
+      <command_interface name="position"><param name="initial_value">1.0471976</param></command_interface>
+      <state_interface name="position"><param name="initial_value">1.0471976</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="joint_4">
+      <command_interface name="position"><param name="initial_value">0.0</param></command_interface>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="joint_5">
+      <command_interface name="position"><param name="initial_value">1.3089969</param></command_interface>
+      <state_interface name="position"><param name="initial_value">1.3089969</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="joint_6">
+      <command_interface name="position"><param name="initial_value">-1.5707963</param></command_interface>
+      <state_interface name="position"><param name="initial_value">-1.5707963</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="scoop_quarter_1_joint">
+      <command_interface name="position"><param name="initial_value">0.0</param></command_interface>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="scoop_quarter_2_joint">
+      <command_interface name="position"><param name="initial_value">-1.5707963</param></command_interface>
+      <state_interface name="position"><param name="initial_value">-1.5707963</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="cutter_quarter_3_joint">
+      <command_interface name="position"><param name="initial_value">-3.1415927</param></command_interface>
+      <state_interface name="position"><param name="initial_value">-3.1415927</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+</robot>

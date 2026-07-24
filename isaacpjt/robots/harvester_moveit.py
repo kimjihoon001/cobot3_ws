@@ -125,6 +125,12 @@ class HarvestMM:
     BLADE_CLOSED_DEG = 40.0
     BLADE_SPEED_DEG_S = 100.0     # 50° 절삭 스윙을 0.5초에 연출
 
+    # 팔 의존 상수 — 서브클래스가 팔만 갈아끼울 수 있게 클래스 속성으로 둔다
+    # (robots/harvester_0.py = 같은 스쿱 스택 + m0617 팔, 2026-07-24 사용자).
+    HOME_POSE = HOME_POSE_DEG
+    ARM_LINKS = _UR_LINKS
+    ARM_DISTAL_FROM = _UR_DISTAL_FROM
+
     def __init__(self, cfg: RobotConfig):
         self._cfg = cfg
         self._root: str | None = None
@@ -244,8 +250,8 @@ class HarvestMM:
                 Gf.Quatf(rel.ExtractRotationQuat()))
 
     def _preset_pose(self, stage: Usd.Stage, arm_path: str, log) -> None:
-        """시작 자세(HOME_POSE_DEG)를 근위→원위 순서로 하나씩 굽는다."""
-        for jname, deg in HOME_POSE_DEG:
+        """시작 자세(HOME_POSE)를 근위→원위 순서로 하나씩 굽는다."""
+        for jname, deg in self.HOME_POSE:
             self._preset_joint(stage, arm_path, jname, deg, log)
 
     def _preset_joint(self, stage: Usd.Stage, arm_path: str, jname: str,
@@ -267,7 +273,7 @@ class HarvestMM:
         if not joint.IsValid():
             log(f"[Harvester] ⚠ {jname} 없음 — 시작자세 프리셋 스킵(기본자세로 뜬다)")
             return
-        names = _UR_LINKS[_UR_DISTAL_FROM[jname]:]
+        names = self.ARM_LINKS[self.ARM_DISTAL_FROM[jname]:]
         distal = [stage.GetPrimAtPath(f"{arm_path}/{n}") for n in names]
         missing = [n for n, pr in zip(names, distal) if not pr.IsValid()]
         if missing:   # 일부만 돌리면 팔이 끊겨 보인다 — 통째로 스킵

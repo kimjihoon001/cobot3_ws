@@ -290,7 +290,7 @@ class MMDriver(Driver):
             from ros import robot_bridge as RB
             import dataclasses as _dc
             # MoveIt 카메라는 Isaac ROS 노드 네임스페이스·상대 토픽·frame_id까지 모두
-            # harvester_moveit 식별자를 사용한다. RMP MM(/harvester_0 또는 /harvester/*),
+            # harvester_moveit 식별자를 사용한다. 기본 MM(/harvester_0),
             # 같은 프로세스의 두 번째 D455 그래프와 이름이 겹칠 여지를 없앤다.
             cam = _dc.replace(
                 self._cfg.robots.camera,
