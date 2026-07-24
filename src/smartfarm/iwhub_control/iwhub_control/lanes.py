@@ -21,6 +21,10 @@ import math
 VLANES = (-6.0, -2.9, 0.0, 2.9, 6.0)
 # 가로 레인 Y: 재배 구간 사이 중점(-3.85, 3.85) + 하단(-11.5)/상단(11.5, 도어 앞).
 HLANES = (-11.5, -3.85, 3.85, 11.5)
+# 최상·최하단 배드 바깥은 세로 레인 사이를 직접 횡단할 수 있는 개활 통로다.
+# footprint(+5cm)가 배드 끝과 최소 40cm 이상 떨어지는 보수적인 경계만 사용한다.
+BOTTOM_FREE_Y = -10.55
+TOP_FREE_Y = 10.55
 # 지게차 인계 정위치. yaw=π(−X 향함) = iw 스폰 orientation(SPAWN_YAW_DEG=180°) = iw_dock.py
 # canonical 도킹 자세. 포크는 도크 바로 위(0,14.5)에서 인계하므로 iw는 −X로 정차한다.
 DOCK = (0.0, 10.85, math.pi)
@@ -137,31 +141,204 @@ def _straight(x0, y0, x1, y1, step: float = 0.5):
             for i in range(1, n + 1)]
 
 
+def _axis_direction(p0, p1):
+    """축정렬 선분의 단위 진행방향. 길이 0 또는 대각선은 설계 오류로 거부한다."""
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    distance = math.hypot(dx, dy)
+    if distance < 1e-6:
+        raise ValueError("길이 0인 레인 선분")
+    if abs(dx) > 1e-6 and abs(dy) > 1e-6:
+        raise ValueError(f"대각선 레인 선분은 허용하지 않음: {p0} -> {p1}")
+    return dx / distance, dy / distance
+
+
+def _dedupe_points(points):
+    """연속 중복점을 제거한다."""
+    result = []
+    for point in points:
+        point = (float(point[0]), float(point[1]))
+        if not result or math.hypot(
+            point[0] - result[-1][0], point[1] - result[-1][1]
+        ) > 1e-6:
+            result.append(point)
+    return result
+
+
+def _rounded_manhattan_route(
+    points,
+    start_yaw: float,
+    arc_r: float = 0.8,
+    step: float = 0.5,
+):
+    """축정렬 polyline을 직선+접선 연속 원호 경로로 바꾼다.
+
+    각 코너 반경은 인접 선분 길이의 45% 이하로 자동 축소한다. 따라서 짧은
+    FOLLOW 갱신에서도 원호가 선분을 역주행하거나 서로 겹치지 않는다.
+    """
+    points = _dedupe_points(points)
+    if len(points) < 2:
+        return [(points[0][0], points[0][1], float(start_yaw))]
+
+    directions = [
+        _axis_direction(points[index], points[index + 1])
+        for index in range(len(points) - 1)
+    ]
+    lengths = [
+        math.hypot(
+            points[index + 1][0] - points[index][0],
+            points[index + 1][1] - points[index][1],
+        )
+        for index in range(len(points) - 1)
+    ]
+    route = [(points[0][0], points[0][1], float(start_yaw))]
+    cursor = points[0]
+
+    for index in range(1, len(points) - 1):
+        corner = points[index]
+        din = directions[index - 1]
+        dout = directions[index]
+        dot = din[0] * dout[0] + din[1] * dout[1]
+        if dot < -0.5:
+            raise ValueError(f"레인 경로에 180도 역전 코너가 있음: {corner}")
+        if dot > 0.5:
+            # 같은 방향의 불필요한 중간점은 마지막 직선에서 자연스럽게 통과한다.
+            continue
+
+        radius = min(float(arc_r), lengths[index - 1] * 0.45,
+                     lengths[index] * 0.45)
+        tangent_in = (
+            corner[0] - radius * din[0],
+            corner[1] - radius * din[1],
+        )
+        route += _straight(
+            cursor[0], cursor[1], tangent_in[0], tangent_in[1], step)
+        route += _corner_arc(
+            corner[0], corner[1], din, dout, radius)
+        cursor = (
+            corner[0] + radius * dout[0],
+            corner[1] + radius * dout[1],
+        )
+
+    destination = points[-1]
+    if math.hypot(
+        destination[0] - cursor[0], destination[1] - cursor[1]
+    ) > 1e-6:
+        route += _straight(
+            cursor[0], cursor[1],
+            destination[0], destination[1], step)
+    return route
+
+
+def _in_horizontal_corridor(y: float) -> bool:
+    """현재 Y에서 레인 사이 횡단이 안전한가."""
+    return (
+        y <= BOTTOM_FREE_Y
+        or y >= TOP_FREE_Y
+        or min(abs(y - lane_y) for lane_y in HLANES) <= 0.35
+    )
+
+
+def follow_route(
+    sx: float,
+    sy: float,
+    syaw: float,
+    tx: float,
+    ty: float,
+    arc_r: float = 0.8,
+    step: float = 0.5,
+):
+    """현재 IW 자세에서 MM 추종점까지 배드-클리어 레인 경로를 만든다.
+
+    목표 X는 반드시 세로 레인 중심으로 스냅한다. 같은 세로 레인이면 그대로
+    종주하고, 레인을 바꿔야 하면 현재 위치에서 가장 가까운 가로 교차통로를
+    사용한다. 최상·최하단 개활부에서는 현재 Y에서 바로 횡단한다.
+
+    IW가 배드 구간 안의 레인 중심에서 크게 벗어나 있으면 임의 복구 주행을 만들지
+    않는다. 잘못된 자세에서 경로를 강행하는 것보다 정지·운영자 확인이 안전하다.
+    """
+    target_x = _nearest(float(tx), VLANES)
+    start_lane_x = _nearest(float(sx), VLANES)
+    start_lane_error = abs(float(sx) - start_lane_x)
+    target = (target_x, float(ty))
+    start = (float(sx), float(sy))
+
+    if math.hypot(target[0] - start[0], target[1] - start[1]) < 0.05:
+        return [(start[0], start[1], float(syaw))]
+
+    same_vertical_lane = abs(start[0] - target_x) <= 0.35
+    if same_vertical_lane:
+        # AMCL의 작은 횡오차는 현재 위치에서 레인 중심으로 짧게 복귀한 뒤 종주한다.
+        # 바로 target과 이으면 대각선이 되어 결정적 레인 경로가 아니게 된다.
+        points = [start, (target_x, start[1]), (target_x, target[1])]
+    else:
+        if not _in_horizontal_corridor(start[1]) and start_lane_error > 0.35:
+            raise ValueError(
+                "IW가 배드 구간에서 세로 레인 중심을 벗어남: "
+                f"x={start[0]:.2f}, nearest_lane={start_lane_x:.2f}"
+            )
+        connector_y = (
+            start[1]
+            if _in_horizontal_corridor(start[1])
+            else _nearest(start[1], HLANES)
+        )
+        points = [
+            start,
+            (start[0], connector_y),
+            (target_x, connector_y),
+            target,
+        ]
+
+    route = _rounded_manhattan_route(
+        points, start_yaw=syaw, arc_r=arc_r, step=step)
+    clear, collision_pose = footprint_clear(route)
+    if not clear:
+        raise ValueError(
+            "FOLLOW 레인 경로 footprint가 배드와 충돌: "
+            f"pose={collision_pose}"
+        )
+    return route
+
+
 def dock_route(sx: float, sy: float, syaw: float, arc_r: float = 0.8,
                step: float = 0.5):
     """iw (sx,sy,syaw) → 지게차 도크(0,10.85,+Y). 전진 전용, 시작 자세에서 연속 연결.
 
     도크는 중앙 레인(X=0) 위에 있고 +Y로 접근해야 하므로:
-      1) 현재 위치에서 X=0 레인에 합류(수평 전진 → 원호로 +Y 전환).
-      2) X=0 레인을 +Y로 곧게 도크까지. X=0은 이랑 사이 중앙 통로라 아래→위 배드-클리어.
-    첫 웨이포인트=현재 자세(측면 점프 제거). 원호는 직선과 접점에서 연속(코너 뒤점프 없음:
-    직선이 코너가 아니라 접점 tangent_x/±arc_r 에서 끝난다).
-    ⚠ 수평 합류가 현재 Y(sy)에서 일어나므로 sy가 배드 구간 Y 안이면 별도 교차통로 경유 필요
-      (현재는 배드-프리 시작구역 가정). 전체 footprint 안전은 sweep 검증이 담당(별도).
+      1) 배드 구간 안에서 출발하면 현재 세로 레인으로 가장 가까운 가로 통로까지 이동.
+      2) 그 가로 통로에서 X=0 중앙 레인에 합류.
+      3) X=0 레인을 +Y로 곧게 도크까지 이동.
+    적재 도킹 위치(-2.9,-9.4)는 배드 Y 구간 안이다. 여기서 곧바로 X축으로
+    가로지르면 배드를 통과하므로 반드시 하단 가로 통로(y=-11.5)를 경유한다.
+    직선과 코너 원호는 접점에서 연속이며 전체 footprint sweep도 여기서 검증한다.
     반환 = [(x,y,yaw), ...] (map 프레임).
     """
     dock_x, dock_y, dock_yaw = DOCK
-    wps: list[tuple[float, float, float]] = [(sx, sy, syaw)]   # 현재 자세에서 출발
+    start = (float(sx), float(sy))
     if abs(sx - dock_x) <= 0.15:
-        wps += _straight(dock_x, sy, dock_x, dock_y, step)     # 이미 X=0 — 곧장 +Y
+        points = [start, (dock_x, dock_y)]
     else:
-        hdir = -1.0 if sx > dock_x else 1.0                    # 도크X(0) 쪽 수평 방향
-        tangent_x = dock_x - hdir * arc_r                      # 원호 진입 접점(직선 끝)
-        wps += _straight(sx, sy, tangent_x, sy, step)          # 수평 전진(접점까지)
-        wps += _corner_arc(dock_x, sy, (hdir, 0.0), (0.0, 1.0), arc_r)  # 원호 → +Y
-        wps += _straight(dock_x, sy + arc_r, dock_x, dock_y, step)      # +Y로 도크까지
-    wps.append((dock_x, dock_y, dock_yaw))
-    return wps
+        connector_y = (
+            float(sy)
+            if _in_horizontal_corridor(float(sy))
+            else _nearest(float(sy), HLANES)
+        )
+        points = [
+            start,
+            (float(sx), connector_y),
+            (dock_x, connector_y),
+            (dock_x, dock_y),
+        ]
+
+    route = _rounded_manhattan_route(
+        points, start_yaw=float(syaw), arc_r=arc_r, step=step)
+    route.append((dock_x, dock_y, dock_yaw))
+    clear, collision_pose = footprint_clear(route)
+    if not clear:
+        raise ValueError(
+            "DOCK 레인 경로 footprint가 배드와 충돌: "
+            f"pose={collision_pose}"
+        )
+    return route
 
 
 def return_route(sx: float, sy: float, syaw: float, ty: float,

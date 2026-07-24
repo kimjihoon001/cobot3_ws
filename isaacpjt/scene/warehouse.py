@@ -169,7 +169,12 @@ class Warehouse:
         log(f"[Warehouse] 배경 건물: {url}  @ {origin}")
         return True
 
-    def load_crates(self, stage: Usd.Stage, log=print) -> None:
+    def load_crates(
+        self,
+        stage: Usd.Stage,
+        log=print,
+        empty_slots: set[int] | frozenset[int] = frozenset(),
+    ) -> None:
         """슬롯에 '나무 팔레트 + KLT 빈 세트'를 얹어 '적재된 창고' 모습을 만든다.
 
         물류 루프(2026-07-19): 지게차가 팔레트째(위에 MM 이 채운 KLT) 랙에 올린다.
@@ -195,7 +200,10 @@ class Warehouse:
         pmat = physics.create_physics_material(
             stage, f"{self._root}/PhysMat/pallet",
             pp.static_friction, pp.dynamic_friction)
-        for s in self._slots:                    # 활성 슬롯(뒷벽): 팔레트 + 실제 KLT 빈
+        loaded_slots = [
+            s for s in self._slots if s["index"] not in empty_slots
+        ]
+        for s in loaded_slots:                   # 활성 슬롯(뒷벽): 팔레트 + 실제 KLT 빈
             self._place_pallet(stage, add_reference_to_stage, set_pose, set_scale,
                                f"{self._root}/Pallet_{s['index']:02d}", s["local"],
                                pallet_url, klt_url, pmat, yaw=0.0)
@@ -203,8 +211,15 @@ class Warehouse:
             self._place_pallet(stage, add_reference_to_stage, set_pose, set_scale,
                                f"{self._root}/Decor_{j:02d}", (dx, dy, dz),
                                pallet_url, klt_url, pmat, yaw=dyaw)
-        log(f"[Warehouse] 팔레트 {len(self._slots) + len(self._decor)}개 + 실제 KLT 8/팔레트 "
-            f"(활성 {len(self._slots)}+장식 {len(self._decor)}, 3면 랙 — 할당은 ROS2)")
+        empty_text = (
+            ", 빈 슬롯 "
+            + ",".join(f"{index:02d}" for index in sorted(empty_slots))
+            if empty_slots
+            else ""
+        )
+        log(f"[Warehouse] 팔레트 {len(loaded_slots) + len(self._decor)}개 + 실제 KLT 8/팔레트 "
+            f"(활성 {len(loaded_slots)}+장식 {len(self._decor)}{empty_text}, "
+            "3면 랙 — 할당은 ROS2)")
 
     def _place_pallet(self, stage, add_ref, set_ps, set_sc, path, local,
                       pallet_url, klt_url, pmat, yaw: float = 0.0) -> None:

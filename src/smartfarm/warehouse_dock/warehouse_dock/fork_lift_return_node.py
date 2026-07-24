@@ -20,6 +20,7 @@ import math
 import time
 
 import rclpy
+from smartfarm_interfaces.srv import ForkliftCycle
 from std_msgs.msg import Bool, Int32
 
 from warehouse_dock.fork_lift_node import ForkLiftNode, Step, wrap_angle
@@ -46,9 +47,20 @@ class ForkLiftReturnNode(ForkLiftNode):
         )
 
         self.declare_parameter("initial_pallet", 0)
+        # 통합 IW 팔레트의 옆면 실측에서 0.124m도 포크 상면이 슬롯 윗판에
+        # 걸쳤다. 슬롯 중앙에 여유를 두도록 약 0.104m 삽입 높이로 보정한다.
+        self.declare_parameter("iw_pickup_lift_offset", -0.056)
         initial_pallet = int(self.get_parameter("initial_pallet").value)
+        self._iw_pickup_lift_offset = float(
+            self.get_parameter("iw_pickup_lift_offset").value
+        )
         if not 0 <= initial_pallet < self.PALLET_COUNT:
             raise ValueError("initial_pallet은 0부터 5 사이여야 합니다")
+        if not -0.070 <= self._iw_pickup_lift_offset <= 0.015:
+            raise ValueError(
+                "iw_pickup_lift_offset은 포크 삽입 여유를 위해 "
+                "-0.070~0.015m 사이여야 합니다"
+            )
 
         self._expected_pallet = initial_pallet
         self._next_pallet = (initial_pallet + 1) % self.PALLET_COUNT
@@ -66,11 +78,48 @@ class ForkLiftReturnNode(ForkLiftNode):
             self._on_pallet_on_iw,
             10,
         )
+        self._cycle_service = self.create_service(
+            ForkliftCycle,
+            "/forklift/start_cycle",
+            self._on_cycle_request,
+        )
 
         self._publish_status(
             f"회수 노드 준비: IW의 Pallet_{self._expected_pallet:02d} "
             "귀환 신호 대기"
         )
+
+    def _on_cycle_request(
+        self,
+        request: ForkliftCycle.Request,
+        response: ForkliftCycle.Response,
+    ) -> ForkliftCycle.Response:
+        """도크 오케스트레이터의 명시적 서비스 요청으로 교환 사이클을 시작한다."""
+        pallet = int(request.inbound_pallet)
+        response.outbound_pallet = (pallet + 1) % self.PALLET_COUNT
+        if not 0 <= pallet < self.PALLET_COUNT:
+            response.accepted = False
+            response.message = f"팔레트 번호 범위 오류: {pallet}"
+            return response
+        if self._mode != self.MODE_WAIT_INITIAL:
+            response.accepted = False
+            response.message = f"지게차가 요청을 받을 수 없는 상태입니다: {self._mode}"
+            return response
+
+        self._expected_pallet = pallet
+        self._next_pallet = response.outbound_pallet
+        self._pallet_target_command = pallet
+        self._pallet_deck_attached_command = True
+        self._iw_dock_locked_command = False
+        self._handle_amr_docked()
+        response.accepted = self._mode == self.MODE_BUSY
+        response.message = (
+            f"Pallet_{pallet:02d} 랙 복귀 후 "
+            f"Pallet_{response.outbound_pallet:02d} IW 상차 접수"
+            if response.accepted
+            else "실행 전 연결/초기 자세 검증에서 거부됐습니다"
+        )
+        return response
 
     def _on_pallet_on_iw(self, msg: Int32) -> None:
         pallet = int(msg.data)
@@ -186,7 +235,10 @@ class ForkLiftReturnNode(ForkLiftNode):
         pre_y, rack_insert_y, stage_y = self._approach_y(self._rack_front_y)
         rack_x = self.RACK_CENTER_X[pallet]
 
-        amr_lift = self._amr_lift_target()
+        amr_lift = min(
+            2.0,
+            self._amr_lift_target() + self._iw_pickup_lift_offset,
+        )
         amr_carry_lift = amr_lift + self._pickup_raise
         rack_place_lift = max(
             0.0,

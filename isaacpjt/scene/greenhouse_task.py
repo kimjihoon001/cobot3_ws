@@ -25,9 +25,15 @@ from scene.warehouse import Warehouse
 class GreenhouseTask(BaseTask):
     """온실 + 토마토 재배 라인. 로봇은 아직 없음 (별도 Task 로 추가 예정)."""
 
-    def __init__(self, name: str, cfg: SceneConfig):
+    def __init__(
+        self,
+        name: str,
+        cfg: SceneConfig,
+        warehouse_empty_slots: set[int] | frozenset[int] = frozenset(),
+    ):
         super().__init__(name=name, offset=None)
         self._cfg = cfg
+        self._warehouse_empty_slots = frozenset(warehouse_empty_slots)
         self._plants: TomatoPlants | None = None
         self._warehouse: Warehouse | None = None
         self._harvested: set[str] = set()
@@ -64,7 +70,10 @@ class GreenhouseTask(BaseTask):
         self._warehouse.spawn(stage, origin=wh_origin, room_w=g.width)
         # 방 폭·높이는 재배 공간과 동일(팀 피드백 2026-07-19), 천장 없음
         self._warehouse.spawn_building(stage, room_w=g.width, room_h=g.height)
-        self._warehouse.load_crates(stage)      # 슬롯에 표준 컨테이너(시각)
+        self._warehouse.load_crates(
+            stage,
+            empty_slots=self._warehouse_empty_slots,
+        )
 
     def get_observations(self) -> dict:
         """시뮬 정답(ground truth). GroundTruthDetector 가 이걸 그대로 쓴다.

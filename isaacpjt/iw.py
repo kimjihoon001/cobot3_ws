@@ -98,6 +98,12 @@ class IwDriver(Driver):
             and self._warehouse_dock.set_pallet_on_deck(attached, pallet_id)
         )
 
+    def has_warehouse_pallet_attached(self) -> bool:
+        return bool(
+            self._warehouse_dock
+            and self._warehouse_dock.pallet_on_deck
+        )
+
 
 def build_nav_sensors(stage, iw, art_path: str, nav, opts) -> None:
     """IW Nav2 입력만 배선한다. /cmd_vel 실행은 ROS base_node 한 곳에서 담당한다."""

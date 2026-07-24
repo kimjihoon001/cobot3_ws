@@ -26,6 +26,8 @@ IW_WORLD_JOINT = "/World/WarehouseDockIwHubFixed"
 IW_PALLET_JOINT = "/World/WarehouseDockPalletJoint"
 FORK_PALLET_JOINT = "/World/ForkliftPalletCarryJoint"
 PALLET_PATH_FORMAT = "/World/Warehouse/Pallet_{:02d}"
+INITIAL_IW_LOAD_PATH = "/World/IwHubCargo/Load"
+INITIAL_IW_DECK_JOINT = "/World/IwHubCargo/DeckJoint"
 
 
 def _rigid_body_path(stage: Usd.Stage, root_path: str) -> str | None:
@@ -108,7 +110,11 @@ class WarehouseDockController:
         self._deck_body = _rigid_body_path(stage, f"{art_path}/chassis")
         if self._deck_body is None:
             self._deck_body = _rigid_body_path(stage, art_path)
-        self._deck_pallet_id: int | None = None
+        self._deck_pallet_id: int | None = (
+            0
+            if self._stage.GetPrimAtPath(INITIAL_IW_DECK_JOINT).IsValid()
+            else None
+        )
         # Runtime 도킹은 정지/스냅/Joint 생성을 서로 다른 physics frame에
         # 수행한다. 동적 articulation을 순간이동한 직후 같은 frame에
         # FixedJoint까지 만들면 PhysX/Fabric의 native pointer가 어긋나
@@ -122,7 +128,22 @@ class WarehouseDockController:
 
     @property
     def pallet_on_deck(self) -> bool:
-        return self._stage.GetPrimAtPath(IW_PALLET_JOINT).IsValid()
+        return (
+            self._stage.GetPrimAtPath(IW_PALLET_JOINT).IsValid()
+            or self._stage.GetPrimAtPath(INITIAL_IW_DECK_JOINT).IsValid()
+        )
+
+    def _pallet_path(self, pallet_id: int) -> str:
+        """Resolve the physical body for a logical warehouse pallet ID."""
+        warehouse_path = PALLET_PATH_FORMAT.format(pallet_id)
+        if self._stage.GetPrimAtPath(warehouse_path).IsValid():
+            return warehouse_path
+        if (
+            pallet_id == 0
+            and self._stage.GetPrimAtPath(INITIAL_IW_LOAD_PATH).IsValid()
+        ):
+            return INITIAL_IW_LOAD_PATH
+        return warehouse_path
 
     def _deck_surface(self) -> tuple[Gf.Vec3d, Gf.Quatd]:
         """실제 chassis 월드 bbox의 상면 중심과 월드 방향을 반환한다."""
@@ -291,11 +312,16 @@ class WarehouseDockController:
     ) -> bool:
         """Attach a warehouse pallet to the IW at one canonical deck frame."""
         if not attached:
-            if self.pallet_on_deck:
-                self._stage.RemovePrim(IW_PALLET_JOINT)
+            removed = []
+            for joint_path in (IW_PALLET_JOINT, INITIAL_IW_DECK_JOINT):
+                if self._stage.GetPrimAtPath(joint_path).IsValid():
+                    self._stage.RemovePrim(joint_path)
+                    removed.append(joint_path)
+            if removed:
                 print(
                     "[IW Deck] 팔레트 연결 해제: "
-                    f"Pallet_{self._deck_pallet_id or 0:02d}"
+                    f"Pallet_{self._deck_pallet_id or 0:02d} "
+                    f"({', '.join(removed)})"
                 )
             self._deck_pallet_id = None
             return True
@@ -312,7 +338,7 @@ class WarehouseDockController:
             print("[IW Deck] IW chassis rigid body를 찾지 못했습니다")
             return False
 
-        pallet_path = PALLET_PATH_FORMAT.format(pallet_id)
+        pallet_path = self._pallet_path(pallet_id)
         pallet = self._stage.GetPrimAtPath(pallet_path)
         if not pallet.IsValid() or not pallet.HasAPI(UsdPhysics.RigidBodyAPI):
             print(f"[IW Deck] 팔레트 강체 없음: {pallet_path}")

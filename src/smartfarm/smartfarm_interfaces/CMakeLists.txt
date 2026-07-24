@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TransportRequest.msg"
   "msg/HandoffEvent.msg"
   "msg/SlotAssignment.msg"
+  "srv/ForkliftCycle.srv"
   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )
 

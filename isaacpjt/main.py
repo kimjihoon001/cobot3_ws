@@ -77,10 +77,13 @@ if MM_TELEOP and "--mm" not in sys.argv:
     raise SystemExit("--mm-teleop은 --mm과 함께 사용해야 합니다.")
 if MM_TELEOP and NAV_DRIVE:
     raise SystemExit("MM 텔레옵과 Nav2는 동시에 베이스를 제어할 수 없습니다.")
-# 지게차+운반 AMR만 선택하면 창고 자동화 단독 시험으로 본다. 이 모드에서는
+# 지게차+운반 AMR만 선택하고 수확 MM이 없으면 창고 자동화 단독 시험으로 본다. 이 모드에서는
 # iw.py가 AMR을 창고 도킹 위치에 빈 상태로 놓아 첫 팔레트 상차를 바로 시험한다.
 WAREHOUSE_TEST = (
-    "--iw" in sys.argv and "--fork" in sys.argv and "--mm" not in sys.argv
+    "--iw" in sys.argv
+    and "--fork" in sys.argv
+    and "--mm" not in sys.argv
+    and "--moveit" not in sys.argv
 )
 
 # Warehouse 자동화의 공통 도메인은 108이다. ~/.bashrc가 109를 기본으로 내보내므로
@@ -235,7 +238,7 @@ def build_drivers(cfg, task=None) -> list:
         drivers.append(RmpMMDriver(cfg, task=task))
     iw_driver = None
     if "--iw" in sys.argv:
-        if WAREHOUSE_TEST:                       # --iw --fork (--mm 없음) → 창고 상차 단독 시험
+        if WAREHOUSE_TEST:                       # --iw --fork (수확 MM 없음) → 창고 상차 단독 시험
             from iw_test import IwDriver
             iw_driver = IwDriver(cfg, warehouse_test=True)
         else:                                    # 일반 통합 실행 — 깃허브용 iw.py(데크 적재)
@@ -359,7 +362,17 @@ def main() -> None:
     cfg = SceneConfig()
     world = World(stage_units_in_meters=1.0)
 
-    task = GreenhouseTask(name="greenhouse", cfg=cfg)
+    # 일반 IW는 이미 Pallet_00 상당의 적재물을 싣고 시작한다. 이때 창고 0번
+    # 슬롯에도 팔레트를 만들면 같은 물류 ID가 두 개가 되므로 0번을 비운다.
+    # --iw --fork 단독 창고 시험은 빈 IW에 랙 0번을 상차하는 시나리오라 유지한다.
+    warehouse_empty_slots = (
+        {0} if "--iw" in sys.argv and not WAREHOUSE_TEST else set()
+    )
+    task = GreenhouseTask(
+        name="greenhouse",
+        cfg=cfg,
+        warehouse_empty_slots=warehouse_empty_slots,
+    )
     world.add_task(task)
     world.reset()                                # 씬 생성
 

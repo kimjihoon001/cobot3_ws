@@ -1,4 +1,4 @@
-"""FOLLOW/FORKLIFT 미션을 IW 전용 Nav2 NavigateToPose goal로 변환한다."""
+"""FOLLOW/FORKLIFT 미션을 IW 전용 전진 레인 NavigateThroughPoses goal로 변환한다."""
 from __future__ import annotations
 
 import math
@@ -9,14 +9,15 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
+from nav2_msgs.action import NavigateThroughPoses
 from nav2_msgs.srv import ManageLifecycleNodes
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from std_msgs.msg import Bool, String
+from smartfarm_interfaces.srv import ForkliftCycle
+from std_msgs.msg import Bool, Int32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -36,8 +37,6 @@ class MissionNavNode(Node):
     def __init__(self):
         super().__init__("iw_mission_nav_node")
         self.declare_parameter(
-            "navigate_to_pose_action", "/iwhub_0/navigate_to_pose")
-        self.declare_parameter(
             "navigate_through_poses_action",
             "/iwhub_0/navigate_through_poses")
         self.declare_parameter(
@@ -53,6 +52,10 @@ class MissionNavNode(Node):
         self.declare_parameter("iw_tf_topic", "/iwhub_0/tf")
         self.declare_parameter("follow_offset_x", 2.3)
         self.declare_parameter("follow_offset_y", 0.0)
+        # MM 주행 추종은 2.3m 안전거리를 유지하고, 로봇팔이 KLT에 과실을 놓을
+        # 때만 별도 LOAD 미션으로 약 1m 더 접근한다.
+        self.declare_parameter("load_offset_x", 1.30)
+        self.declare_parameter("load_offset_y", 0.0)
         self.declare_parameter("follow_update_distance", 0.30)
         self.declare_parameter("follow_update_yaw", math.radians(30.0))
         # 갭 게이팅(히스테리시스): min_gap 이하로 붙으면 정지(active goal cancel), resume_gap
@@ -70,13 +73,21 @@ class MissionNavNode(Node):
         )
         self._status_pub = self.create_publisher(
             String, "/iw/status", latched)
-        # 지게차 인계 핸드셰이크(트랙 C warehouse_dock 계약):
-        #   iw→포크 /forklift/amr_docked(Bool)=도킹완료 트리거,
-        #   포크→iw /forklift/clear(Bool)=인계완료 출발허가.
+        # 지게차 인계는 장시간 작업 시작을 명시적 서비스로 접수하고,
+        # 완료/출발 허가는 기존 latched clear 토픽으로 받는다.
+        self._forklift_client = self.create_client(
+            ForkliftCycle, "/forklift/start_cycle")
+        # 구형 노드와의 관찰/호환용 도킹 토픽은 유지하지만 정상 통합 경로에서는
+        # 서비스만 호출해 중복 사이클이 시작되지 않게 한다.
         self._amr_docked_pub = self.create_publisher(
             Bool, "/forklift/amr_docked", latched)
+        # iw→MM 복귀 완료 신호 — MM(수확 FSM)이 이걸 받아 다음 수확을 재개한다.
+        self._resume_pub = self.create_publisher(
+            Bool, "/iw/resume_harvest", latched)
         self.create_subscription(
             Bool, "/forklift/clear", self._on_forklift_clear, 10)
+        self.create_subscription(
+            Int32, "/forklift/pallet_on_iw", self._on_pallet_on_iw, 10)
         self.create_subscription(
             String, "/iw/mission", self._on_mission, latched)
         self.create_subscription(
@@ -90,10 +101,6 @@ class MissionNavNode(Node):
             str(self.get_parameter("iw_tf_topic").value),
             self._on_iw_tf,
             100,
-        )
-        self._client = ActionClient(
-            self, NavigateToPose,
-            str(self.get_parameter("navigate_to_pose_action").value),
         )
         self._through_client = ActionClient(
             self, NavigateThroughPoses,
@@ -112,11 +119,18 @@ class MissionNavNode(Node):
         self._last_target: tuple[float, float, float] | None = None
         self._request_pending = False
         self._dock_goal_sent = False
+        self._load_goal_sent = False
         # FORKLIFT 미션 서브페이즈: APPROACH(도크 주행) → WAITING_CLEAR(인계 대기)
         #   → RETURNING(MM 복귀 주행) → (FOLLOW 재개). 도크 미션 재시작 시 APPROACH로 리셋.
         self._dock_phase = "APPROACH"
+        self._current_pallet = 0
+        self._forklift_request_pending = False
         self._follow_held = False          # 갭 게이팅 히스테리시스 상태(hold 중?)
         self._follow_goal_handle = None    # active FOLLOW goal handle (cancel 용)
+        # MM의 body yaw는 홀로노믹 주행 방향과 일치하지 않는다. 실제 map 위치
+        # 변위로 진행 방향을 구해 그 뒤쪽에 FOLLOW 목표를 만든다.
+        self._mm_motion_sample: tuple[float, float] | None = None
+        self._mm_travel_yaw: float | None = None
         self._goal_gen = 0                 # goal 세대 ID — 취소/교체된 goal의 늦은 콜백 무시
         self._started_at = time.monotonic()
         self._last_startup_attempt = 0.0
@@ -127,20 +141,28 @@ class MissionNavNode(Node):
             "IW 미션 Nav2 연결: FOLLOW=MM 전방 목표 갱신, "
             "FORKLIFT=(0.0,10.84885)")
 
+    def _on_pallet_on_iw(self, msg: Int32) -> None:
+        pallet = int(msg.data)
+        if 0 <= pallet < 6:
+            self._current_pallet = pallet
+
     @staticmethod
     def _wrap(angle: float) -> float:
         return math.atan2(math.sin(angle), math.cos(angle))
 
     def _on_mission(self, msg: String) -> None:
         mission = msg.data.strip().upper()
-        if mission not in {"FOLLOW", "FORKLIFT"}:
+        if mission not in {"FOLLOW", "LOAD", "FORKLIFT"}:
             self.get_logger().warning(f"알 수 없는 IW 미션 무시: {mission}")
             return
         if mission == self._mission:
             return
+        if self._mission in {"FOLLOW", "LOAD"}:
+            self._cancel_follow_goal()
         self._mission = mission
         self._last_target = None
         self._dock_goal_sent = False
+        self._load_goal_sent = False
         if mission == "FORKLIFT":
             self._dock_phase = "APPROACH"
         self.get_logger().info(f"IW 미션 전환: {mission}")
@@ -179,7 +201,7 @@ class MissionNavNode(Node):
             self._wrap(map_yaw + odom_yaw),
         )
 
-    def _follow_target(self) -> tuple[float, float, float] | None:
+    def _follow_target(self, load: bool = False) -> tuple[float, float, float] | None:
         try:
             transform = self._buffer.lookup_transform(
                 str(self.get_parameter("mm_map_frame").value),
@@ -190,28 +212,43 @@ class MissionNavNode(Node):
             self.get_logger().warning(
                 f"MM TF 대기 중: {exc}", throttle_duration_sec=5.0)
             return None
-        yaw = _yaw_from_quaternion(transform.rotation)
-        ox = float(self.get_parameter("follow_offset_x").value)
-        oy = float(self.get_parameter("follow_offset_y").value)
-        c, s = math.cos(yaw), math.sin(yaw)
-        target_x = transform.translation.x + ox * c - oy * s
-        target_y = transform.translation.y + ox * s + oy * c
+        mm_x = float(transform.translation.x)
+        mm_y = float(transform.translation.y)
+        if self._mm_motion_sample is None:
+            self._mm_motion_sample = (mm_x, mm_y)
+        else:
+            dx = mm_x - self._mm_motion_sample[0]
+            dy = mm_y - self._mm_motion_sample[1]
+            # AMCL/TF 잔노이즈로 진행 방향이 흔들리지 않을 만큼 이동했을 때만 갱신한다.
+            if math.hypot(dx, dy) >= 0.08:
+                self._mm_travel_yaw = math.atan2(dy, dx)
+                self._mm_motion_sample = (mm_x, mm_y)
+        if self._mm_travel_yaw is None:
+            self.get_logger().info(
+                "MM 실제 이동방향 대기 중 — body yaw로 추종점을 만들지 않음",
+                throttle_duration_sec=5.0,
+            )
+            return None
+
+        travel_yaw = self._mm_travel_yaw
+        prefix = "load" if load else "follow"
+        ox = float(self.get_parameter(f"{prefix}_offset_x").value)
+        oy = float(self.get_parameter(f"{prefix}_offset_y").value)
+        c, s = math.cos(travel_yaw), math.sin(travel_yaw)
+        # ox는 MM 진행방향 기준 뒤쪽 거리, oy는 진행방향 기준 좌측 오프셋이다.
+        target_x = mm_x - ox * c - oy * s
+        target_y = mm_y - ox * s + oy * c
+        # 레인 인식 추종: 추종점 X를 세로레인 중심선에 스냅 → 아일 중심 유지(배드-클리어).
+        target_x = lanes.follow_lane_x(target_x)
         if self._iw_pose is None:
             self.get_logger().warning(
                 "IW map pose 대기 중: /iwhub_0/tf map→odom + /iwhub_0/odom",
                 throttle_duration_sec=5.0,
             )
             return None
-
-        iw_x, iw_y, iw_yaw = self._iw_pose
-        dx = target_x - iw_x
-        dy = target_y - iw_y
-        # FOLLOW 목표 자세는 MM 자세를 복사하지 않는다. 현재 IW에서 이동할
-        # 추종점의 방위를 사용해야 한 번 방향을 잡은 뒤 전진할 수 있다.
-        if math.hypot(dx, dy) > 0.10:
-            travel_yaw = math.atan2(dy, dx)
-        else:
-            travel_yaw = iw_yaw
+        # 갱신 판정용 yaw는 MM 실제 이동 방향을 사용한다. IW→목표 bearing을 쓰면 IW가
+        # 원호를 도는 동안 정지한 목표의 yaw도 계속 변해 goal을 반복 취소하게 된다.
+        # 실제 각 웨이포인트 yaw는 lanes.follow_route의 접선 방향이 결정한다.
         return target_x, target_y, travel_yaw
 
     def _target_changed(self, target: tuple[float, float, float]) -> bool:
@@ -230,13 +267,21 @@ class MissionNavNode(Node):
         )
 
     def _update_goal(self) -> None:
+        # Nav2가 아직 활성화 중이어도 MM 이동 샘플은 놓치지 않는다. 두 Nav2를
+        # 동시에 올릴 때 IW 쪽이 늦게 준비되면 MM이 수확점에 먼저 도착할 수 있다.
+        # 서버 준비 뒤에 처음 샘플링하면 정지한 MM의 진행방향을 영원히 알 수 없어
+        # IW가 초기 위치에 남으므로, FOLLOW 목표 계산(방향 기록)을 먼저 수행한다.
+        follow_target = (
+            self._follow_target(load=self._mission == "LOAD")
+            if self._mission in {"FOLLOW", "LOAD"} else None
+        )
         if self._request_pending:
             return
-        if not self._client.server_is_ready():
+        if not self._through_client.server_is_ready():
             self._recover_nav2()
             self.get_logger().warning(
-                "IW Nav2 action 서버 대기 중: "
-                f"{self.get_parameter('navigate_to_pose_action').value}",
+                "IW NavigateThroughPoses 서버 대기 중: "
+                f"{self.get_parameter('navigate_through_poses_action').value}",
                 throttle_duration_sec=5.0,
             )
             return
@@ -244,15 +289,13 @@ class MissionNavNode(Node):
             # 레인 경로 주행(단일 goal 아님) — 통로 중심선만 타 배드 회피 보장.
             if self._dock_phase == "WAITING_CLEAR":
                 return   # 포크 인계 완료(/forklift/clear) 대기 중 — 정차
+            if self._dock_phase == "REQUESTING_SERVICE":
+                self._request_forklift_cycle()
+                return
             if self._dock_goal_sent:
                 return
             if self._iw_pose is None:
                 return   # 레인 경로 계획에 현재 map pose 필요
-            if not self._through_client.server_is_ready():
-                self.get_logger().warning(
-                    "IW NavigateThroughPoses 서버 대기 중",
-                    throttle_duration_sec=5.0)
-                return
             if self._dock_phase == "APPROACH":
                 self._send_dock_route()
             else:                        # RETURNING — MM 부근으로 복귀
@@ -260,13 +303,56 @@ class MissionNavNode(Node):
                     return               # MM TF 아직 — 다음 주기 재시도
             self._dock_goal_sent = True
             return
+        if self._mission == "LOAD":
+            if self._load_goal_sent or follow_target is None:
+                return
+            self._send_follow_route(follow_target, purpose="LOAD")
+            self._load_goal_sent = True
+            return
         # FOLLOW
         if not self._follow_gap_ok():
             return
-        target = self._follow_target()
+        target = follow_target
         if target is None or not self._target_changed(target):
             return
-        self._send_goal(target, self._mission)
+        self._send_follow_route(target)
+
+    def _request_forklift_cycle(self) -> None:
+        """도킹 후 현재 IW 팔레트 번호로 지게차 교환 서비스를 한 번 호출한다."""
+        if self._forklift_request_pending:
+            return
+        if not self._forklift_client.service_is_ready():
+            self.get_logger().warning(
+                "지게차 서비스 /forklift/start_cycle 대기 중",
+                throttle_duration_sec=3.0,
+            )
+            return
+        request = ForkliftCycle.Request()
+        request.inbound_pallet = int(self._current_pallet)
+        self._forklift_request_pending = True
+        future = self._forklift_client.call_async(request)
+        future.add_done_callback(self._forklift_cycle_response)
+        self.get_logger().info(
+            f"지게차 서비스 요청: Pallet_{self._current_pallet:02d} "
+            "랙 복귀·다음 팔레트 IW 상차")
+
+    def _forklift_cycle_response(self, future) -> None:
+        self._forklift_request_pending = False
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"지게차 서비스 응답 실패: {exc}")
+            return
+        if response is None or not response.accepted:
+            message = "응답 없음" if response is None else response.message
+            self.get_logger().warning(
+                f"지게차 사이클 접수 거부: {message}")
+            return
+        self._dock_phase = "WAITING_CLEAR"
+        self._status_pub.publish(String(data="ARRIVED_FORKLIFT"))
+        self.get_logger().info(
+            f"지게차 사이클 접수 완료: 다음 Pallet_"
+            f"{int(response.outbound_pallet):02d}, 완료 신호 대기")
 
     def _mm_map_xy(self) -> tuple[float, float] | None:
         """MM base_link 의 map 좌표 (x, y). TF 없으면 None."""
@@ -324,8 +410,22 @@ class MissionNavNode(Node):
         pose.pose.orientation.w = math.cos(yaw / 2.0)
         return pose
 
-    def _send_through_route(self, route, log_msg: str) -> None:
+    def _send_through_route(
+        self,
+        route,
+        purpose: str,
+        log_msg: str,
+        target: tuple[float, float, float] | None = None,
+    ) -> None:
         """레인 경로(웨이포인트 리스트)를 전진 전용 BT로 NavigateThroughPoses 전송."""
+        if purpose == "FOLLOW" and self._follow_goal_handle is not None:
+            # 움직이는 MM 목표가 갱신되면 이전 레인 goal을 명시적으로 취소한다.
+            # action server의 암묵적 preempt에만 기대면 이전 경로가 잠시 더 진행될 수 있다.
+            try:
+                self._follow_goal_handle.cancel_goal_async()
+            except Exception as exc:
+                self.get_logger().warning(f"이전 FOLLOW goal cancel 실패: {exc}")
+            self._follow_goal_handle = None
         goal = NavigateThroughPoses.Goal()
         goal.poses = [self._make_pose(x, y, yaw) for (x, y, yaw) in route]
         # 전진 전용 BT — 기본 BT의 Spin/BackUp 복구를 배제(회전이 AMCL/라이다 정합을 흔듦).
@@ -338,7 +438,41 @@ class MissionNavNode(Node):
         self.get_logger().info(log_msg)
         future = self._through_client.send_goal_async(goal)
         future.add_done_callback(
-            lambda result, g=gen: self._through_response(result, g))
+            lambda result, g=gen, p=purpose, t=target:
+            self._through_response(result, g, p, t))
+
+    def _send_follow_route(
+        self,
+        target: tuple[float, float, float],
+        purpose: str = "FOLLOW",
+    ) -> None:
+        """MM 추종점을 레인 경로로 연결해 전진 전용 BT로 보낸다."""
+        if self._iw_pose is None:
+            return
+        iw_x, iw_y, iw_yaw = self._iw_pose
+        try:
+            route = lanes.follow_route(
+                iw_x, iw_y, iw_yaw, target[0], target[1])
+        except ValueError as exc:
+            self.get_logger().error(
+                f"FOLLOW 레인 경로 생성 거부: {exc}",
+                throttle_duration_sec=3.0,
+            )
+            self._cancel_follow_goal()
+            return
+        # 목표 방향은 임의의 직선 bearing이 아니라 검증된 레인 경로의 마지막
+        # 접선 방향을 사용한다. 그래야 목표 앞에서 불필요한 제자리 회전을 하지 않는다.
+        routed_target = (route[-1][0], route[-1][1], route[-1][2])
+        self._send_through_route(
+            route,
+            purpose,
+            f"IW {purpose} 레인 경로 {len(route)}웨이포인트 "
+            f"({iw_x:.1f},{iw_y:.1f} → "
+            f"{routed_target[0]:.1f},{routed_target[1]:.1f})",
+            # 갱신 비교에는 매번 같은 방식으로 계산되는 원래 추종점을 저장한다.
+            # 경로 마지막 접선 yaw를 저장하면 정지한 MM에도 yaw 차이로 재전송된다.
+            target=target,
+        )
 
     def _send_dock_route(self) -> None:
         """현재 위치→지게차 도크까지 통로 레인 경로를 NavigateThroughPoses로 보낸다."""
@@ -346,6 +480,7 @@ class MissionNavNode(Node):
         route = lanes.dock_route(iw_x, iw_y, iw_yaw)
         self._send_through_route(
             route,
+            "DOCK",
             f"IW 도크 레인 경로 {len(route)}웨이포인트 (시작 {iw_x:.1f},{iw_y:.1f} "
             f"→ 도크 {lanes.DOCK[0]:.1f},{lanes.DOCK[1]:.1f})")
 
@@ -360,6 +495,7 @@ class MissionNavNode(Node):
         route = lanes.return_route(dx, dy, dyaw, mm_xy[1])
         self._send_through_route(
             route,
+            "RETURN",
             f"IW 복귀 레인 경로 {len(route)}웨이포인트 (도크 → MM Y부근 "
             f"{mm_xy[1]:.1f}) — 도착 후 FOLLOW 재개")
         return True
@@ -374,50 +510,88 @@ class MissionNavNode(Node):
         self._dock_phase = "RETURNING"
         self._dock_goal_sent = False
 
-    def _through_response(self, future, gen) -> None:
+    def _through_response(self, future, gen, purpose, target) -> None:
         self._request_pending = False
         if gen != self._goal_gen:
             return
         try:
             handle = future.result()
         except Exception as exc:
-            self.get_logger().error(f"IW 도크 경로 goal 전송 실패: {exc}")
-            self._dock_goal_sent = False
+            self.get_logger().error(
+                f"IW {purpose} 레인 goal 전송 실패: {exc}")
+            if purpose == "FOLLOW":
+                self._last_target = None
+            elif purpose == "LOAD":
+                self._load_goal_sent = False
+            else:
+                self._dock_goal_sent = False
             return
         if not handle.accepted:
-            self.get_logger().warning("IW 도크 경로 goal 거부")
-            self._dock_goal_sent = False
+            self.get_logger().warning(f"IW {purpose} 레인 goal 거부")
+            if purpose == "FOLLOW":
+                self._last_target = None
+            elif purpose == "LOAD":
+                self._load_goal_sent = False
+            else:
+                self._dock_goal_sent = False
             return
+        if purpose == "FOLLOW":
+            self._follow_goal_handle = handle
+            self._last_target = target
         result = handle.get_result_async()
         result.add_done_callback(
-            lambda done, g=gen: self._through_result(done, g))
+            lambda done, g=gen, p=purpose:
+            self._through_result(done, g, p))
 
-    def _through_result(self, future, gen) -> None:
+    def _through_result(self, future, gen, purpose) -> None:
         if gen != self._goal_gen:
             return
+        if purpose == "FOLLOW":
+            self._follow_goal_handle = None
         try:
             status = future.result().status
         except Exception as exc:
-            self.get_logger().error(f"IW 도크 경로 결과 수신 실패: {exc}")
+            self.get_logger().error(
+                f"IW {purpose} 레인 경로 결과 수신 실패: {exc}")
+            return
+        if purpose == "FOLLOW":
+            if status not in {
+                GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED
+            }:
+                self.get_logger().warning(
+                    f"IW FOLLOW 레인 경로 실패(status={status})")
+                if self._mission == "FOLLOW":
+                    self._last_target = None
+            return
+        if purpose == "LOAD":
+            if status == GoalStatus.STATUS_SUCCEEDED:
+                self._status_pub.publish(String(data="READY_LOAD"))
+                self.get_logger().info(
+                    "IW KLT 적재 근접 도킹 완료 → /iw/status READY_LOAD")
+            elif status != GoalStatus.STATUS_CANCELED:
+                self.get_logger().warning(
+                    f"IW LOAD 레인 경로 실패(status={status})")
+                self._load_goal_sent = False
             return
         if status == GoalStatus.STATUS_SUCCEEDED:
-            if self._dock_phase == "APPROACH":
-                self._status_pub.publish(String(data="ARRIVED_FORKLIFT"))
-                self._amr_docked_pub.publish(Bool(data=True))   # 포크 인계 트리거
-                self._dock_phase = "WAITING_CLEAR"
+            if purpose == "DOCK":
+                self._dock_phase = "REQUESTING_SERVICE"
+                self._dock_goal_sent = False
                 self.get_logger().info(
-                    "IW 지게차 도킹 완료 → /iw/status ARRIVED_FORKLIFT + "
-                    "/forklift/amr_docked=True (인계 대기)")
-            else:                                               # RETURNING 완료
+                    "IW 지게차 도킹 완료 → /forklift/start_cycle 서비스 요청")
+            else:                                               # RETURN 완료
                 self._status_pub.publish(String(data="RETURNED"))
+                # IW→MM 작업 재개 신호.
+                self._resume_pub.publish(Bool(data=True))
                 self._mission = "FOLLOW"                        # 추종 재개
                 self._dock_phase = "APPROACH"                   # 다음 도크 미션 리셋
                 self._dock_goal_sent = False
                 self.get_logger().info(
-                    "IW MM 복귀 완료 → FOLLOW 재개 (/iw/status RETURNED)")
+                    "IW MM 복귀 완료 → /iw/status RETURNED + "
+                    "/iw/resume_harvest=True (MM 작업 재개 요청) → FOLLOW 재개")
         elif status != GoalStatus.STATUS_CANCELED:
             self.get_logger().warning(
-                f"IW {self._dock_phase} 경로 실패(status={status})")
+                f"IW {purpose} 레인 경로 실패(status={status})")
             self._dock_goal_sent = False
 
     def _recover_nav2(self) -> None:
@@ -464,79 +638,6 @@ class MissionNavNode(Node):
         else:
             self.get_logger().warning(
                 "IW Nav2 lifecycle STARTUP 미완료 — 자동 재시도 예정")
-
-    def _send_goal(
-        self, target: tuple[float, float, float], mission: str
-    ) -> None:
-        pose = PoseStamped()
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.header.frame_id = str(self.get_parameter("goal_frame").value)
-        pose.pose.position.x = target[0]
-        pose.pose.position.y = target[1]
-        pose.pose.orientation.z = math.sin(target[2] / 2.0)
-        pose.pose.orientation.w = math.cos(target[2] / 2.0)
-        goal = NavigateToPose.Goal()
-        goal.pose = pose
-        self._request_pending = True
-        self._goal_gen += 1
-        gen = self._goal_gen
-        future = self._client.send_goal_async(goal)
-        future.add_done_callback(
-            lambda result, m=mission, t=target, g=gen:
-            self._goal_response(result, m, t, g)
-        )
-
-    def _goal_response(self, future, mission, target, gen) -> None:
-        self._request_pending = False
-        if gen != self._goal_gen:
-            return   # 취소/교체된 goal의 늦은 응답 — 무시
-        try:
-            handle = future.result()
-        except Exception as exc:
-            self.get_logger().error(f"IW Nav2 goal 전송 실패: {exc}")
-            if mission == "FORKLIFT":
-                self._dock_goal_sent = False
-            return
-        if not handle.accepted:
-            self.get_logger().warning(f"IW Nav2 {mission} goal 거부")
-            if mission == "FORKLIFT":
-                self._dock_goal_sent = False
-            return
-        self._last_target = target
-        if mission == "FOLLOW":
-            self._follow_goal_handle = handle
-        self.get_logger().info(
-            f"IW Nav2 {mission} goal: "
-            f"({target[0]:.2f},{target[1]:.2f},{math.degrees(target[2]):.1f}°)")
-        result = handle.get_result_async()
-        result.add_done_callback(
-            lambda done, m=mission, g=gen:
-            self._goal_result(done, m, g)
-        )
-
-    def _goal_result(self, future, mission: str, gen: int) -> None:
-        if gen != self._goal_gen:
-            return   # 취소/교체된 goal의 늦은 결과 — 무시
-        if mission == "FOLLOW":
-            self._follow_goal_handle = None
-        try:
-            status = future.result().status
-        except Exception as exc:
-            self.get_logger().error(f"IW Nav2 결과 수신 실패: {exc}")
-            return
-        if mission == "FORKLIFT" and status == GoalStatus.STATUS_SUCCEEDED:
-            self._status_pub.publish(String(data="ARRIVED_FORKLIFT"))
-            self.get_logger().info(
-                "IW 지게차 도킹 완료 → /iw/status ARRIVED_FORKLIFT")
-        elif status not in {
-            GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED
-        }:
-            self.get_logger().warning(
-                f"IW Nav2 {mission} 실패(status={status})")
-            if mission == self._mission:
-                self._last_target = None
-                if mission == "FORKLIFT":
-                    self._dock_goal_sent = False
 
 
 def main(args=None) -> None:

@@ -22,6 +22,7 @@ POSE = (0.0, 14.5, COMMON_FLOOR_Z)
 # 즉 창고 밖 입구 중앙의 AMR을 향한다.
 YAW_DEG = 90.0
 PALLET_PATH_FORMAT = "/World/Warehouse/Pallet_{:02d}"
+INITIAL_IW_LOAD_PATH = "/World/IwHubCargo/Load"
 PALLET_CARRY_JOINT = "/World/ForkliftPalletCarryJoint"
 
 
@@ -184,8 +185,8 @@ class ForkDriver(Driver):
         """선택한 팔레트를 포크 캐리지에 현재 자세 그대로 연결한다."""
         if self._stage is None:
             return
-        pallet_path = PALLET_PATH_FORMAT.format(pallet_id)
-        attached_path = PALLET_PATH_FORMAT.format(self._pallet_id)
+        pallet_path = self._pallet_path(pallet_id)
+        attached_path = self._pallet_path(self._pallet_id)
         joint_exists = self._stage.GetPrimAtPath(PALLET_CARRY_JOINT).IsValid()
         if requested:
             if joint_exists:
@@ -221,6 +222,22 @@ class ForkDriver(Driver):
             self._stage.RemovePrim(PALLET_CARRY_JOINT)
             print(f"[Forklift Coupler] 연결 해제: {attached_path}")
         self._pallet_attached = False
+
+    def _pallet_path(self, pallet_id: int) -> str:
+        """Map logical Pallet_00 to the loaded IW cargo in integration mode."""
+        warehouse_path = PALLET_PATH_FORMAT.format(pallet_id)
+        if (
+            self._stage is not None
+            and self._stage.GetPrimAtPath(warehouse_path).IsValid()
+        ):
+            return warehouse_path
+        if (
+            pallet_id == 0
+            and self._stage is not None
+            and self._stage.GetPrimAtPath(INITIAL_IW_LOAD_PATH).IsValid()
+        ):
+            return INITIAL_IW_LOAD_PATH
+        return warehouse_path
 
     def _set_iw_dock_locked(self, requested: bool) -> None:
         """Lock/snap the IW for handoff, or release it for navigation."""
@@ -273,7 +290,10 @@ class ForkDriver(Driver):
 
         if fork_requested:
             if self._iw_driver is not None:
-                deck_was_attached = self._deck_pallet_attached
+                deck_was_attached = (
+                    self._deck_pallet_attached
+                    or self._iw_driver.has_warehouse_pallet_attached()
+                )
                 if not self._iw_driver.set_warehouse_pallet_attached(
                     False,
                     pallet_id,

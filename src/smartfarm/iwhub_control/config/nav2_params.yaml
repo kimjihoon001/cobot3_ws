@@ -83,7 +83,7 @@ controller_server:
       # use_rotate_to_heading로 큰 각도를 제자리 회전 후 전진 추종하고, 곡률/비용 기반
       # 감속으로 원호를 매끄럽게 돈다.
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.45
+      desired_linear_vel: 0.60
       lookahead_dist: 0.8
       min_lookahead_dist: 0.4
       max_lookahead_dist: 1.2
@@ -261,7 +261,7 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.50, 0.0, 0.80]
+    max_velocity: [0.65, 0.0, 0.80]
     # 전진 전용(RPP allow_reversing:false와 일치) — 후진 속도 0. 좁은 아일서 후진 불가.
     min_velocity: [0.0, 0.0, -0.80]
     max_accel: [1.2, 0.0, 1.6]

@@ -1625,18 +1625,11 @@ class ForkLiftNode(Node):
         *,
         rotation: float = math.pi,
     ) -> Step:
-        yaw_rate = abs(
-            drive
-            * self._wheel_radius
-            / self._wheelbase
-            * math.tan(steering)
-        )
-        # 요청 회전각에 필요한 이론 시간에 2초 여유를 둔 watchdog이다. 이 시간이
-        # 지났다고 성공으로 처리하지 않고, 실제 pose가 목표에 도달하지
-        # 못했으면 안전 실패시킨다.
-        hard_stop = (
-            rotation / yaw_rate + 2.0 if yaw_rate > 1e-6 else 1.0
-        )
+        # ForkliftB의 실제 회전 속도는 바퀴 기하로 계산한 이론값보다 느리다.
+        # 이론 시간(기존 13.4초)을 hard stop으로 쓰면 실제 61° 부근에서 정상
+        # U턴을 잘라 버린다. 실제 pose의 180° 도달 조건은 _run_arc가 계속
+        # 검사하므로 여기서는 설정된 최대 60초를 안전 watchdog으로 사용한다.
+        hard_stop = self._u_turn_timeout
         return Step(
             kind="arc",
             label=label,
@@ -1675,7 +1668,9 @@ class ForkLiftNode(Node):
             position_tolerance=self._insert_tol,
             x_tolerance=self._rack_entry_x_tol,
             yaw_tolerance=self._rack_entry_yaw_tol,
-            timeout=min(30.0, self._step_timeout),
+            # 실제 ForkliftB는 U턴 뒤 랙 중심선까지 약 45초가 걸린다.
+            # 기존 30초 제한은 정상 주행 중간에서 작업을 잘랐다.
+            timeout=self._step_timeout,
             attempt=attempt,
         )
 

@@ -392,7 +392,66 @@ class IwHub:
         klt_scale = 0.85
         kz = PALLET_SIZE[2] + KLT_SIZE[2] * klt_scale / 2.0
         nx, ny, pitx, pity = 4, 2, 0.31, 0.25
-        filled = {(0, 0), (1, 1), (3, 0)}                  # 토마토 넣을 3칸
+
+        # KLT 시각 메시는 얇고 오목한 형상이다. convex decomposition을 그대로
+        # 충돌체로 쓰면 바닥/벽 사이에 틈이 생겨 작은 토마토가 빠지거나, 반대로
+        # 입구를 덮는 convex hull이 생길 수 있다. Load 강체 아래에 바닥+4면의
+        # 보이지 않는 analytic box를 두어 열린 바구니 충돌 형상을 명시한다.
+        klt_outer_x = KLT_SIZE[0] * klt_scale
+        klt_outer_y = KLT_SIZE[1] * klt_scale
+        klt_height = KLT_SIZE[2] * klt_scale
+        klt_wall_t = 0.010
+        klt_floor_t = 0.012
+
+        def add_klt_box_collider(path: str,
+                                 center: tuple[float, float, float],
+                                 size: tuple[float, float, float]) -> None:
+            cube = UsdGeom.Cube.Define(stage, path)
+            cube.CreateSizeAttr(1.0)
+            prim = cube.GetPrim()
+            set_pose(prim, center, ident)
+            # pjt_utils.set_scale()은 균일 스케일 전용이다. 충돌 박스는
+            # 각 축 길이가 다르므로 새 Cube의 scale op를 직접 지정한다.
+            UsdGeom.Xformable(prim).AddScaleOp().Set(Gf.Vec3f(*size))
+            UsdPhysics.CollisionAPI.Apply(prim)
+            # 렌더링에서는 숨기되 물리 충돌은 계속 활성 상태로 유지한다.
+            UsdGeom.Imageable(prim).MakeInvisible()
+
+        def add_klt_shell(ix: int, iy: int, ox: float, oy: float) -> None:
+            shell = f"{load}/KLT_Colliders_{ix}{iy}"
+            UsdGeom.Xform.Define(stage, shell)
+            bottom_z = kz - klt_height / 2.0
+            add_klt_box_collider(
+                f"{shell}/Floor",
+                (ox, oy, bottom_z + klt_floor_t / 2.0),
+                (klt_outer_x, klt_outer_y, klt_floor_t),
+            )
+            add_klt_box_collider(
+                f"{shell}/Wall_X_Neg",
+                (ox - (klt_outer_x - klt_wall_t) / 2.0, oy, kz),
+                (klt_wall_t, klt_outer_y, klt_height),
+            )
+            add_klt_box_collider(
+                f"{shell}/Wall_X_Pos",
+                (ox + (klt_outer_x - klt_wall_t) / 2.0, oy, kz),
+                (klt_wall_t, klt_outer_y, klt_height),
+            )
+            inner_x = max(0.001, klt_outer_x - 2.0 * klt_wall_t)
+            add_klt_box_collider(
+                f"{shell}/Wall_Y_Neg",
+                (ox, oy - (klt_outer_y - klt_wall_t) / 2.0, kz),
+                (inner_x, klt_wall_t, klt_height),
+            )
+            add_klt_box_collider(
+                f"{shell}/Wall_Y_Pos",
+                (ox, oy + (klt_outer_y - klt_wall_t) / 2.0, kz),
+                (inner_x, klt_wall_t, klt_height),
+            )
+
+        # 통합 파이프라인에서는 MoveIt-MM이 실제로 수확한 토마토를 KLT에 넣는다.
+        # 미리 생성한 15개는 주행/포크 작업 중 팔레트 위를 굴러다니며 실제 하역
+        # 결과와 섞였으므로 제거한다. KLT는 8개 모두 빈 상태로 시작한다.
+        filled: set[tuple[int, int]] = set()
         tz0 = PALLET_SIZE[2] + 0.045                        # 첫 토마토 높이(팔레트 윗면 위)
         tmat = physics.create_physics_material(
             stage, f"{root}/PhysMat/tomato",
@@ -410,9 +469,10 @@ class IwHub:
                 set_pose(stage.GetPrimAtPath(kp), (ox, oy, kz), ident)
                 set_scale(stage.GetPrimAtPath(kp), klt_scale)
                 physics.disable_physics(stage, kp)         # 에셋 자체 강체 제거(중첩경고 §8)
+                # 시각 메시의 convex 근사 대신 열린 상자 형태의 확정 충돌체를 쓴다.
+                add_klt_shell(ix, iy, ox, oy)
                 if (ix, iy) not in filled or not ripe:
                     continue
-                physics.add_convex_decomposition_colliders(stage, kp)   # 담는 그릇(Load 콜라이더)
                 for k in range(5):                         # 토마토 5개 — 흩뿌려 떨어뜨림
                     body, calyx = rng.choice(ripe)
                     jx = ox + rng.uniform(-0.06, 0.06)     # 격자 아닌 랜덤 산포
@@ -436,9 +496,19 @@ class IwHub:
                     n_tom += 1
 
         # ── Load 를 동적 강체로 확정 + chassis 데크에 FixedJoint 결속 ──
-        load_density = 200.0   # [4] 근거없음 — 팔레트+빈 유효밀도. 결속돼 있어 동특성 영향 작음. GPU 보정.
+        # Explicit mass가 PhysX의 복합 참조 collider에서 무시되는 경우에도
+        # 분해 hull 부피로 수 톤이 계산되지 않도록 fallback density를 낮게 둔다.
+        # 실제 동특성은 바로 아래의 mass=40kg 속성이 결정한다.
+        load_density = 1.0
         physics.add_rigid_body(stage.GetPrimAtPath(load), load_density,
                                kinematic=False)
+        # 참조 팔레트 메시와 복합 KLT collider에 density만 지정하면 PhysX가
+        # 에셋의 저자 단위/분해 hull 부피를 합산해 1t 이상으로 계산할 수 있다.
+        # 실제 팔레트 약 25kg + 빈 소형 KLT 8개를 합친 운반 세트는 약 40kg으로
+        # 고정한다. 그렇지 않으면 lift drive가 16kN 이상을 내도 상승하지 않는다.
+        UsdPhysics.MassAPI.Apply(
+            stage.GetPrimAtPath(load)
+        ).CreateMassAttr(40.0)
         if stage.GetPrimAtPath(chassis).IsValid():
             physics.create_fixed_joint(stage, f"{root}/DeckJoint", chassis, load)
             bound = "chassis 결속(로봇 따라감·창고서 해제→지게차 인수)"
