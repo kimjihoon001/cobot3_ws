@@ -37,13 +37,62 @@ BED_RECTS = [
 
 
 def clearance(x: float, y: float) -> float:
-    """(x,y)에서 가장 가까운 배드 사각형까지 거리(0=내부/접촉). 경로 보장(sweep) 검사용."""
+    """(x,y)에서 가장 가까운 배드 사각형까지 거리(0=내부/접촉). 중심점 참고용(정밀검사는 footprint)."""
     best = float("inf")
     for x0, x1, y0, y1 in BED_RECTS:
         dx = max(x0 - x, 0.0, x - x1)
         dy = max(y0 - y, 0.0, y - y1)
         best = min(best, math.hypot(dx, dy))
     return best
+
+
+# iw 실측 footprint (base_link 프레임, nav2_params local costmap과 동일). 후방 오버행이 김.
+FOOTPRINT = ((0.3975, 0.376), (0.3975, -0.376), (-1.0335, -0.376), (-1.0335, 0.376))
+
+
+def _footprint_world(x: float, y: float, yaw: float, margin: float = 0.0):
+    """(x,y,yaw) 자세에서 footprint 코너를 map 프레임으로. margin>0이면 바깥으로 확장."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    out = []
+    for fx, fy in FOOTPRINT:
+        ex = fx + math.copysign(margin, fx) if fx else fx
+        ey = fy + math.copysign(margin, fy) if fy else fy
+        out.append((x + c * ex - s * ey, y + s * ex + c * ey))
+    return out
+
+
+def _obb_hits_aabb(corners, x0, x1, y0, y1) -> bool:
+    """회전 사각(corners) vs 축정렬 사각(x0..x1,y0..y1) 겹침 = SAT.
+
+    분리축(축정렬 2개 + OBB 변 법선 2개) 중 하나라도 투영이 안 겹치면 분리(=충돌X).
+    """
+    bed = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+    axes = [(1.0, 0.0), (0.0, 1.0)]
+    for i in range(4):
+        ex = corners[(i + 1) % 4][0] - corners[i][0]
+        ey = corners[(i + 1) % 4][1] - corners[i][1]
+        axes.append((-ey, ex))          # 변의 법선
+    for nx, ny in axes:
+        a = [nx * px + ny * py for px, py in corners]
+        b = [nx * px + ny * py for px, py in bed]
+        if max(a) < min(b) or max(b) < min(a):
+            return False                # 이 축에서 분리 → 겹침 없음
+    return True                         # 모든 축에서 겹침 → 충돌
+
+
+def footprint_clear(route, margin: float = 0.05):
+    """route 전 웨이포인트에서 로봇 footprint(+margin)가 어떤 배드와도 안 겹치면 (True, None).
+
+    중심점 clearance보다 엄격 — 회전 footprint 전체를 배드 사각형과 SAT로 검사한다.
+    웨이포인트 간격(0.5m) < footprint 길이(1.43m)라 연속 footprint가 sweep 영역을 덮는다.
+    겹치면 (False, 문제 자세)를 반환. margin=안전 여유(m).
+    """
+    for (x, y, yaw) in route:
+        corners = _footprint_world(x, y, yaw, margin)
+        for bx0, bx1, by0, by1 in BED_RECTS:
+            if _obb_hits_aabb(corners, bx0, bx1, by0, by1):
+                return False, (x, y, yaw)
+    return True, None
 
 
 def _nearest(v: float, options) -> float:
@@ -148,10 +197,11 @@ if __name__ == "__main__":   # self-test (ROS 불필요)
         jumps = [math.hypot(r[i+1][0]-r[i][0], r[i+1][1]-r[i][1])
                  for i in range(len(r)-1)]
         clr = min(clearance(x, y) for x, y, _ in r)
+        fp_ok, bad = footprint_clear(r)          # 전체 footprint sweep 검증(엄격)
         print(f"   최대 점프 = {max(jumps):.2f}m (step 0.5 근처여야 연속) | "
-              f"배드 최소거리(중심) = {clr:.2f}m "
-              f"{'✅' if max(jumps) < 0.9 and clr > 0.45 else '⚠'} "
-              f"(clr은 참고용 — 전체 footprint sweep 아님)")
+              f"배드 최소거리(중심) = {clr:.2f}m | "
+              f"footprint sweep = {'CLEAR ✅' if fp_ok else f'충돌@{bad} ⚠'} "
+              f"{'✅' if max(jumps) < 0.9 and fp_ok else '⚠'}")
 
     print("\n=== return_route (도크 → MM 복귀) ===")
     dx, dy, dyaw = DOCK
@@ -159,7 +209,17 @@ if __name__ == "__main__":   # self-test (ROS 불필요)
         r = return_route(dx, dy, dyaw, my)
         jumps = [math.hypot(r[i+1][0]-r[i][0], r[i+1][1]-r[i][1])
                  for i in range(len(r)-1)]
-        clr = min(clearance(x, y) for x, y, _ in r)
+        fp_ok, bad = footprint_clear(r)
         print(f"MM=({mx},{my}) waypoints={len(r)} 최대점프={max(jumps):.2f}m "
-              f"배드최소={clr:.2f}m 끝=({r[-1][0]:.1f},{r[-1][1]:.1f}) "
-              f"{'✅' if max(jumps) < 0.9 and clr > 0.45 else '⚠'}")
+              f"footprint={'CLEAR ✅' if fp_ok else f'충돌@{bad} ⚠'} "
+              f"끝=({r[-1][0]:.1f},{r[-1][1]:.1f})")
+
+    print("\n=== 검증기 negative 테스트 (충돌 검출력 확인) ===")
+    # (1.45,-8)=이랑 한복판, (1.05,-8)=footprint 앞모서리(+0.3975)가 배드(x≥1.24) 걸침,
+    # (0.5,-8)=배드서 충분히 떨어짐(CLEAR가 정답).
+    for label, pose, expect in [("배드 한복판", (1.45, -8.0, 0.0), "충돌"),
+                                ("가장자리 걸침", (1.05, -8.0, 0.0), "충돌"),
+                                ("충분히 이격", (0.50, -8.0, 0.0), "CLEAR")]:
+        ok, _ = footprint_clear([pose])
+        got = "CLEAR" if ok else "충돌"
+        print(f"  {label} {pose}: {got} 검출  {'✅' if got == expect else '❌ 불일치'}")
