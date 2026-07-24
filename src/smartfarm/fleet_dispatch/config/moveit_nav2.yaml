@@ -130,8 +130,14 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["Oscillation", "BaseObstacle", "GoalAlign", "PathDist", "GoalDist"]
+      # GoalAlign은 주행 중 방향만 유도한다. 목표 XY에 먼저 도착한 뒤 남은 yaw를
+      # 끝까지 맞추려면 RotateToGoal이 반드시 필요하다.
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
+                "PathDist", "GoalDist"]
       BaseObstacle.scale: 0.02
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
       GoalAlign.scale: 16.0
       GoalAlign.forward_point_distance: 0.1
       PathDist.scale: 32.0

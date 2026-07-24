@@ -25,6 +25,10 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>smartfarm_interfaces</exec_depend>
+  <exec_depend>iwhub_control</exec_depend>
+  <exec_depend>warehouse_dock</exec_depend>
+  <exec_depend>fleet_dispatch</exec_depend>
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>topic_based_ros2_control</exec_depend>

@@ -86,6 +86,10 @@ class Grasp(Node):
         self.fruit_ids = {}
         self.fruit_tracks = {}
         self.create_subscription(String, "sim/tomato", self._fruit, 20)
+        self.klt_targets = {}
+        self._klt_place_candidate_cache = None
+        self.create_subscription(
+            String, "klt_target", self._klt_target, 20)
         # ★YOLO 탐지 게이트(2026-07-23): vision_node 가 tomato 를 잡으면 target_class 발행.
         #   YOLO_GATE=1 이면 이 탐지를 기다렸다가 수확 시작(원거리 탐지→접근→파지). 좌표는 /sim/tomato.
         self.yolo_det_t = 0.0
@@ -103,6 +107,184 @@ class Grasp(Node):
         self.blade_ang = 0.0
         self.create_subscription(Float64, "blade_state",
                                  lambda m: setattr(self, "blade_ang", float(m.data)), 10)
+
+    def _klt_target(self, message):
+        try:
+            data = json.loads(message.data)
+            index = int(data["klt_index"])
+            position = tuple(float(v) for v in data["position"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return
+        if 0 <= index < 8 and len(position) == 3:
+            self.klt_targets[index] = position
+
+    @staticmethod
+    def _klt_joint_score(qmap):
+        """HOME에서 가까운 정상 관절해의 비용. 감긴 관절해는 None으로 거부한다."""
+        delta = {joint: abs(qmap[joint] - HOME_Q[joint]) for joint in JOINTS}
+        # 화면에서 확인된 비정상 해(pan=2.15, lift=6.12, elbow=0.08,
+        # wrist_2=-3.73)를 포함해, KLT 안으로 팔꿈치가 접혀 들어가는 branch를 금지한다.
+        limits = {
+            "shoulder_pan_joint": 1.75,
+            "shoulder_lift_joint": 1.60,
+            "elbow_joint": 1.85,
+            "wrist_1_joint": 1.80,
+            "wrist_2_joint": 1.80,
+            "wrist_3_joint": 2.40,
+        }
+        if any(delta[joint] > limits[joint] for joint in JOINTS):
+            return None
+        weights = {
+            "shoulder_pan_joint": 2.0,
+            "shoulder_lift_joint": 2.0,
+            "elbow_joint": 1.5,
+            "wrist_1_joint": 0.7,
+            "wrist_2_joint": 1.0,
+            "wrist_3_joint": 0.4,
+        }
+        return sum(weights[joint] * delta[joint] ** 2 for joint in JOINTS)
+
+    def _find_klt_place_candidate(self, preferred_index=0, wait=True):
+        """모든 가까운 KLT/손목 yaw를 검사해 가장 덜 꺾이는 안전 IK를 고른다."""
+        deadline = time.monotonic() + 5.0
+        while (wait and rclpy.ok() and len(self.klt_targets) < 8
+               and time.monotonic() < deadline):
+            rclpy.spin_once(self, timeout_sec=0.05)
+        if not self.klt_targets:
+            print("[KLT PLACE] /harvester_moveit/klt_target 미수신", flush=True)
+            return None
+
+        home_quat, _ = self.home_tool_quat()
+        # KLT는 MM의 측후방에 놓인다. 수확 때 쓰는 손목 yaw 한 가지를 그대로
+        # 강제하면 위치가 가동범위 안이어도 KDL이 NO_IK_SOLUTION(-31)을 낸다.
+        # 아래보기 기울기는 유지하면서 base-Z yaw만 바꾼 등가 자세를 검사한다.
+        def yawed_tool_quat(angle):
+            c = math.cos(angle / 2.0)
+            s = math.sin(angle / 2.0)
+            w, x, y, z = home_quat
+            return (
+                c * w - s * z,
+                c * x - s * y,
+                c * y + s * x,
+                c * z + s * w,
+            )
+
+        tool_quats = [
+            yawed_tool_quat(angle)
+            for angle in (
+                0.0, math.pi / 4.0, -math.pi / 4.0,
+                math.pi / 2.0, -math.pi / 2.0,
+                3.0 * math.pi / 4.0, -3.0 * math.pi / 4.0, math.pi)
+        ]
+        # 팔에 가장 가까운 KLT부터 검사한다. preferred는 같은 거리대에서만
+        # 우선하며, 멀고 도달 불가능한 KLT_00을 매번 24회 먼저 검사하지 않는다.
+        preferred = int(preferred_index) % 8
+        order = [
+            index for index, _ in sorted(
+                self.klt_targets.items(),
+                key=lambda item: (
+                    math.hypot(item[1][0], item[1][1]),
+                    0 if item[0] == preferred else 1),
+            )
+        ]
+        candidates = []
+        # 가까운 세 KLT만 검사한다. 멀리 있는 KLT의 억지 IK는 자세만 나빠지고,
+        # 8개×모든 방향을 검사하면 재도킹 판단이 지나치게 늦어진다.
+        for index in order[:3]:
+            p = self.klt_targets.get(index)
+            if p is None:
+                continue
+            # 실제 KLT 내부 진입은 이후 Pilz LIN이 담당한다. OMPL 목표를 15cm까지
+            # 낮춰 팔꿈치가 KLT 안으로 들어가는 해를 만들지 않는다.
+            for clearance in (0.30, 0.25, 0.20):
+                above = (p[0], p[1], p[2] + clearance)
+                for quat in tool_quats:
+                    qmap = self.solve_ik(above, quat, HOME_Q)
+                    if qmap is None:
+                        continue
+                    score = self._klt_joint_score(qmap)
+                    if score is None:
+                        print(
+                            "[KLT PLACE] 과도하게 꺾인 IK 제외: "
+                            + str({j: round(qmap[j], 2) for j in JOINTS}),
+                            flush=True,
+                        )
+                        continue
+                    candidates.append(
+                        (score, index, p, above, quat, qmap))
+                    # 이 정도면 HOME에서 부드럽게 이어지는 충분히 좋은 해다.
+                    # 나머지 수십 개 IK를 전부 계산해 수 분을 소비하지 않는다.
+                    if score <= 14.0:
+                        selected = (
+                            index, p, above, quat, qmap)
+                        self._klt_place_candidate_cache = selected
+                        return selected
+        if not candidates:
+            print("[KLT PLACE] 현재 IW 자세에서 도달 가능한 KLT가 없습니다", flush=True)
+            self._klt_place_candidate_cache = None
+            return None
+
+        _, index, target, above, quat, selected_q = min(
+            candidates, key=lambda candidate: candidate[0])
+        selected = (index, target, above, quat, selected_q)
+        self._klt_place_candidate_cache = selected
+        return selected
+
+    def klt_place_reachable(self, preferred_index=0):
+        """수확 전에 KLT 적재 자세가 정상 관절범위로 나오는지 사전 검사한다."""
+        return self._find_klt_place_candidate(preferred_index) is not None
+
+    def place_held_fruit_in_klt(self, preferred_index=0):
+        """실제 IW KLT 좌표로 팔을 이동한 뒤 과실을 내부에 플레이스한다."""
+        # 수확 전에 검증한 해를 그대로 사용한다. 같은 정지 도킹 자세에서 IK를
+        # 다시 72회 풀면 느릴 뿐 아니라 KDL branch가 달라져 사전검사 성공 후
+        # 실제 적재가 실패할 수 있다.
+        selected = self._klt_place_candidate_cache
+        self._klt_place_candidate_cache = None
+        if selected is None:
+            selected = self._find_klt_place_candidate(preferred_index)
+        if selected is None:
+            return False
+
+        index, target, above, quat, selected_q = selected
+        print(
+            f"[KLT PLACE] KLT_{index // 2}{index % 2} "
+            f"내부={tuple(round(v, 3) for v in target)}",
+            flush=True,
+        )
+        if not self.run_goal(
+                self.goal_joints(
+                    selected_q, vel=0.20, pipeline="ompl", planner=""),
+                "KLT_ABOVE(OMPL)"):
+            return False
+        release = (target[0], target[1], target[2] + 0.15)
+        if not self.run_goal(
+                self.goal_pose(
+                    release, quat,
+                    pipeline="pilz_industrial_motion_planner",
+                    planner="LIN", vel=0.06),
+                "KLT_RELEASE(Pilz LIN)"):
+            return False
+
+        # Isaac은 정확한 KLT 내부 중심으로 최종 물리 인계하고 Load에 고정한다.
+        # 로봇팔은 release pose까지 실제 MoveIt 궤적으로 이동한 뒤에만 이 명령을 낸다.
+        self.cmd.publish(String(data=json.dumps({
+            "place_in_klt": {"klt_index": index}
+        }, separators=(",", ":"))))
+        self.gripper(False)
+        self.spin_for(1.0)
+        self.remove_object(self.OBJ)
+        if not self.run_goal(
+                self.goal_pose(
+                    above, quat,
+                    pipeline="pilz_industrial_motion_planner",
+                    planner="LIN", vel=0.08),
+                "KLT_RETRACT(Pilz LIN)"):
+            return False
+        return self.run_goal(
+            self.goal_joints(
+                HOME_Q, vel=0.20, pipeline="ompl", planner=""),
+            "KLT_HOME(OMPL)")
 
     def _cmd_watch(self, m):
         for name, p in zip(m.name, m.position):

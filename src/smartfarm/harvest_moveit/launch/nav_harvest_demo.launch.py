@@ -92,9 +92,9 @@ def generate_launch_description():
     demo = GroupAction([
         vision_node, vision_view,
         TimerAction(
-            # 컨트롤러 스포너가 4초에 시작한다. 오케스트레이터는 5초에 띄우고 내부의
-            # MoveIt/Nav2 서버 대기로 준비를 동기화해 불필요한 15초 고정 지연을 없앤다.
-            period=5.0,
+            # 컨트롤러 스포너가 12초에 시작한다. 세 컨트롤러의 configure/activate가
+            # 끝난 뒤에만 수확 노드가 joint_states를 사용하도록 여유를 둔다.
+            period=18.0,
             # 수확 오케스트레이터 = grasp_proto (반복 HARVEST_N회 + YOLO 탐지 게이트 + 부착 파지).
             #   좌표는 /sim/tomato(정답), YOLO 탐지되면 접근·파지. MM 은 스폰위치서 바로 수확(나브 옵션).
             actions=[
@@ -138,6 +138,9 @@ def generate_launch_description():
                         "start_yaw": ParameterValue(
                             LaunchConfiguration("initial_pose_yaw"), value_type=float),
                         "base_frame": "mm_base",
+                        "iw_handoff_on_success": ParameterValue(
+                            LaunchConfiguration("iw_handoff_on_success"),
+                            value_type=bool),
                     }],
                 ),
                 # Nav2를 끈 경우에는 현재 위치 수확만 실행한다.
@@ -197,6 +200,9 @@ def generate_launch_description():
                               description="Nav2 자율주행→수확→복귀 실행"),
         DeclareLaunchArgument("harvest_n", default_value="1",
                               description="반복 수확 횟수"),
+        DeclareLaunchArgument(
+            "iw_handoff_on_success", default_value="false",
+            description="수확 성공 후 /iw/mission=FORKLIFT 발행"),
         DeclareLaunchArgument("attach", default_value="0",
                               description="0=U자 스쿱 순수 물리 운반. 1=비교용 FixedJoint"),
         DeclareLaunchArgument("stem_obstacle", default_value="0",

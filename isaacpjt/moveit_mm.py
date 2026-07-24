@@ -86,9 +86,14 @@ class MMDriver(Driver):
         self._status_pub = None
         self._contact_pub = None
         self._fruit_pub = None
+        self._klt_pub = None
+        self._klt_cursor = 0
         self._fruit_cursor = 0
         # 절단 후 pickable_fruits()에서 빠진 대상도 운반 검증을 위해 계속 추적한다.
         self._tracked_harvested_fruit = None
+        # KLT 위에서 그립을 푼 과실은 곧바로 조인트로 순간 고정하지 않는다.
+        # 잠시 중력/접촉으로 실제 KLT 바닥에 안착시킨 뒤 현재 자세 그대로 고정한다.
+        self._pending_klt_drop = None
         self._teleop = None
         self._stage = None
         self._twist = None                    # /cmd_vel 폴러 (Nav2 주행)
@@ -216,6 +221,10 @@ class MMDriver(Driver):
                     f"/World/RosSimTomato_{self.ns}",
                     f"/{self.ns}/sim/tomato")
                 self._fruit_pub = RB.StringPublisher(fruit_pub)
+                klt_pub = RB.build_string_pub(
+                    f"/World/RosKltTarget_{self.ns}",
+                    f"/{self.ns}/klt_target")
+                self._klt_pub = RB.StringPublisher(klt_pub)
             except Exception:
                 ros_fail("MM 조인트/명령 브리지")
             if opts.camera:
@@ -340,9 +349,12 @@ class MMDriver(Driver):
         if is_playing and not self._was_playing:
             self._tracked_harvested_fruit = None
             self._cut_status = {}
+            self._pending_klt_drop = None
             if self._rmpflow is not None:
                 self._rmpflow.reset()
         self._was_playing = is_playing
+        if is_playing:
+            self._update_pending_klt_drop()
         if self._blade_state_pub is not None and self._scoop_indices is not None:
             q = np.asarray(self.robot.get_joint_positions(), dtype=float)
             self._blade_state_pub.publish(float(np.degrees(q[self._scoop_indices[2]])))
@@ -473,6 +485,10 @@ class MMDriver(Driver):
                                 from pxr import UsdPhysics as _UP6
                                 _UP6.FixedJoint(_gj).GetJointEnabledAttr().Set(False)
                                 print("[Grasp] detach_grasp — 부착 해제(과실 낙하/적재)", flush=True)
+                    if "place_in_klt" in cmd:
+                        req = cmd["place_in_klt"]
+                        index = int(req.get("klt_index", 0)) if isinstance(req, dict) else int(req)
+                        self._place_grasped_fruit_in_klt(index)
                     if "grip_force" in cmd:
                         # ★힘/토크 제어 — 위치제어(진동·침투) 대신 일정 닫힘토크 유지(사용자 #4).
                         # 런타임에 finger 위치 drive만 0으로 내려 직접 effort와의 간섭을 없앤다.
@@ -783,6 +799,136 @@ class MMDriver(Driver):
                     pass
         if is_playing:
             self._publish_sim_tomato()
+            self._publish_klt_target()
+
+    def _publish_klt_target(self) -> None:
+        """IW의 움직이는 KLT 중심을 MoveIt MM의 mm_base 좌표로 순차 발행한다."""
+        if self._klt_pub is None or self._stage is None:
+            return
+        from pxr import Gf, UsdGeom
+
+        base = self._stage.GetPrimAtPath(f"{self.root}/Base/base_link")
+        if not base.IsValid():
+            return
+        index = self._klt_cursor % 8
+        ix, iy = divmod(index, 2)
+        path = f"/World/IwHubCargo/Load/KLT_{ix}{iy}"
+        klt = self._stage.GetPrimAtPath(path)
+        if not klt.IsValid():
+            return
+        cache = UsdGeom.XformCache()
+        # KLT 피벗은 높이 중심이다. 내부 중앙보다 2cm 위를 토마토 중심 목표로
+        # 사용해 바닥과 초기 중첩하지 않게 한다.
+        world = cache.GetLocalToWorldTransform(klt).Transform(
+            Gf.Vec3d(0.0, 0.0, 0.02))
+        world_to_base = cache.GetLocalToWorldTransform(base).GetInverse()
+        point = world_to_base.Transform(world)
+        self._klt_pub.publish(json.dumps({
+            "klt_index": index,
+            "position": [round(float(v), 4) for v in point],
+        }, separators=(",", ":")))
+        self._klt_cursor += 1
+
+    def _place_grasped_fruit_in_klt(self, index: int) -> bool:
+        """KLT 안에서 과실을 놓아 자유낙하시킨 뒤, 안착 자세를 나중에 고정한다."""
+        if self._stage is None or self._grasped_fruit is None:
+            print("[KLT Place] 파지 중인 토마토가 없습니다", flush=True)
+            return False
+        index = max(0, min(7, int(index)))
+        ix, iy = divmod(index, 2)
+        klt_path = f"/World/IwHubCargo/Load/KLT_{ix}{iy}"
+        load_path = "/World/IwHubCargo/Load"
+        fruit_path = self._grasped_fruit
+        klt = self._stage.GetPrimAtPath(klt_path)
+        fruit = self._stage.GetPrimAtPath(fruit_path)
+        load = self._stage.GetPrimAtPath(load_path)
+        if not (klt.IsValid() and fruit.IsValid() and load.IsValid()):
+            print(f"[KLT Place] 대상 prim 없음: {klt_path}", flush=True)
+            return False
+
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics
+        from scene import physics
+
+        grasp_joint = self._stage.GetPrimAtPath(fruit_path + "/GraspJoint")
+        if grasp_joint.IsValid():
+            UsdPhysics.FixedJoint(grasp_joint).GetJointEnabledAttr().Set(False)
+            self._stage.RemovePrim(fruit_path + "/GraspJoint")
+        old_joint = self._stage.GetPrimAtPath(fruit_path + "/KLTJoint")
+        if old_joint.IsValid():
+            self._stage.RemovePrim(fruit_path + "/KLTJoint")
+
+        # TCP와 실제 과실 중심 사이의 오프셋 때문에 현재 그립 위치에서 바로 놓으면
+        # KLT 벽 밖으로 떨어질 수 있다. 선택한 KLT 중앙의 약 8.5cm 위(로컬 Z=10cm,
+        # KLT scale=0.85)로 release 위치만 보정한 뒤 중력으로 바구니 안에 떨어뜨린다.
+        # 바닥 위치로 순간이동하거나 곧바로 조인트를 붙이지는 않는다.
+        physics.set_kinematic(fruit, True)
+        cache = UsdGeom.XformCache()
+        desired_world = cache.GetLocalToWorldTransform(klt).Transform(
+            Gf.Vec3d(0.0, 0.0, 0.10))
+        parent = fruit.GetParent()
+        desired_local = cache.GetLocalToWorldTransform(
+            parent).GetInverse().Transform(desired_world)
+        fruit_xform = UsdGeom.Xformable(fruit)
+        local_matrix = fruit_xform.GetLocalTransformation(
+            Usd.TimeCode.Default())
+        local_matrix.SetTranslateOnly(Gf.Vec3d(
+            float(desired_local[0]),
+            float(desired_local[1]),
+            float(desired_local[2]),
+        ))
+        fruit_xform.MakeMatrixXform().Set(local_matrix)
+
+        # 팔의 잔류 속도는 제거하고 중력만 받게 한다.
+        rigid_body = UsdPhysics.RigidBodyAPI(fruit)
+        if rigid_body:
+            try:
+                rigid_body.CreateVelocityAttr().Set(Gf.Vec3f(0.0))
+                rigid_body.CreateAngularVelocityAttr().Set(Gf.Vec3f(0.0))
+            except Exception:
+                pass
+        physics.set_kinematic(fruit, False)
+        settle_seconds = max(
+            0.2, float(os.environ.get("KLT_SETTLE_SECONDS", "1.0")))
+        self._pending_klt_drop = {
+            "fruit_path": fruit_path,
+            "load_path": load_path,
+            "joint_path": fruit_path + "/KLTJoint",
+            "frames": max(1, int(round(settle_seconds / self._dt))),
+            "label": f"KLT_{ix}{iy}",
+        }
+        self._grasped_fruit = None
+        self._tracked_harvested_fruit = None
+        print(
+            f"[KLT Place] 토마토를 KLT_{ix}{iy} 안에서 해제 — "
+            f"{settle_seconds:.1f}초 자유낙하·안착 시작",
+            flush=True,
+        )
+        return True
+
+    def _update_pending_klt_drop(self) -> None:
+        """자유낙하 시간이 지난 과실을 실제 안착 자세 그대로 IW 적재물에 고정한다."""
+        pending = self._pending_klt_drop
+        if pending is None or self._stage is None:
+            return
+        pending["frames"] -= 1
+        if pending["frames"] > 0:
+            return
+
+        fruit = self._stage.GetPrimAtPath(pending["fruit_path"])
+        load = self._stage.GetPrimAtPath(pending["load_path"])
+        self._pending_klt_drop = None
+        if not (fruit.IsValid() and load.IsValid()):
+            print("[KLT Place] 낙하 후 고정 실패 — prim이 사라졌습니다", flush=True)
+            return
+
+        from scene import physics
+        physics.create_fixed_joint(
+            self._stage, pending["joint_path"],
+            pending["load_path"], pending["fruit_path"])
+        print(
+            f"[KLT Place] {pending['label']} 바닥 안착 후 현재 자세로 고정 완료",
+            flush=True,
+        )
 
     def set_air_fruits(self, paths: list) -> None:
         """--airfruit 모드: 여러 공중 과실 경로 등록. 스윕이 select_fruit i 로 대상 전환."""

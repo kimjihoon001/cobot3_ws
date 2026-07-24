@@ -144,9 +144,20 @@ def create_fixed_joint(stage: Usd.Stage, path: str,
         Usd.TimeCode.Default())
     lw = UsdGeom.Xformable(stage.GetPrimAtPath(body1_path)).ComputeLocalToWorldTransform(
         Usd.TimeCode.Default())
-    rel = lw * cw.GetInverse()                 # body1 원점을 body0 프레임으로
+
+    # 과실 USD는 최상위 Xform에 0.01 scale이 있다. scale이 포함된 행렬로 joint
+    # local frame을 만들면 PhysX가 두 body transform을 서로 다른 프레임으로 판단해
+    # ``disjointed body transforms`` 경고와 함께 과실을 허공으로 snap시킨다.
+    # FixedJoint frame에는 강체의 이동·회전만 사용하고 시각 scale은 제외한다.
+    def rigid_transform(matrix):
+        rigid = Gf.Matrix4d()
+        rigid.SetRotate(matrix.ExtractRotationQuat().GetNormalized())
+        rigid.SetTranslateOnly(matrix.ExtractTranslation())
+        return rigid
+
+    rel = rigid_transform(lw) * rigid_transform(cw).GetInverse()
     t = rel.ExtractTranslation()
-    q = rel.ExtractRotationQuat()
+    q = rel.ExtractRotationQuat().GetNormalized()
     im = q.GetImaginary()
     j.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
     j.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()),
