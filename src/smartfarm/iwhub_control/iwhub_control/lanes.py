@@ -115,6 +115,24 @@ def dock_route(sx: float, sy: float, syaw: float, arc_r: float = 0.8,
     return wps
 
 
+def return_route(sx: float, sy: float, syaw: float, ty: float,
+                 standoff: float = 2.3, step: float = 0.5):
+    """도크(sx,sy,syaw) → MM Y부근(ty)으로 복귀. 전진 전용, X=0 중앙 레인 −Y 하강.
+
+    포크 인계 후 iw가 다시 MM을 따라가려 복귀한다. 중앙 레인(X=0)은 이랑 사이라
+    Y 전 구간 배드-클리어 → 도크에서 곧장 −Y로 내려가 MM 위(북)에 standoff 두고 정차.
+    최종 x-정렬(MM이 옆 레인일 때)은 FOLLOW가 라이브로 마무리한다 — 여기서 임의 Y의
+    수평 이동은 배드를 가로지를 수 있어 하지 않는다(중앙 레인 하강만 결정적으로 안전).
+    도크 시작 자세는 −X라 첫 구간(−Y)에서 RPP가 제자리 정렬(도크 주변은 개활지).
+    반환 = [(x,y,yaw), ...] (map 프레임).
+    """
+    lane_x = 0.0
+    target_y = ty + standoff                                   # MM 위에 standoff
+    wps: list[tuple[float, float, float]] = [(sx, sy, syaw)]
+    wps += _straight(lane_x, sy, lane_x, target_y, step)       # X=0 레인 −Y 하강
+    return wps
+
+
 def follow_lane_x(mm_x: float) -> float:
     """MM(또는 iw)이 있는 세로 레인 중심선 X. iw follow 목표를 레인에 스냅할 때 쓴다."""
     return _nearest(mm_x, VLANES)
@@ -134,3 +152,14 @@ if __name__ == "__main__":   # self-test (ROS 불필요)
               f"배드 최소거리(중심) = {clr:.2f}m "
               f"{'✅' if max(jumps) < 0.9 and clr > 0.45 else '⚠'} "
               f"(clr은 참고용 — 전체 footprint sweep 아님)")
+
+    print("\n=== return_route (도크 → MM 복귀) ===")
+    dx, dy, dyaw = DOCK
+    for (mx, my) in [(0.0, -12.0), (2.9, -8.0)]:
+        r = return_route(dx, dy, dyaw, my)
+        jumps = [math.hypot(r[i+1][0]-r[i][0], r[i+1][1]-r[i][1])
+                 for i in range(len(r)-1)]
+        clr = min(clearance(x, y) for x, y, _ in r)
+        print(f"MM=({mx},{my}) waypoints={len(r)} 최대점프={max(jumps):.2f}m "
+              f"배드최소={clr:.2f}m 끝=({r[-1][0]:.1f},{r[-1][1]:.1f}) "
+              f"{'✅' if max(jumps) < 0.9 and clr > 0.45 else '⚠'}")
