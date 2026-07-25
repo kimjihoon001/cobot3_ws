@@ -49,4 +49,13 @@ def generate_launch_description():
             parameters=[{"use_sim_time": True}],
             output="screen",
         ),
+
+        # 녹화 제어. use_sim_time을 주지 않는다 — 경과시간과 파일명은 실제
+        # 벽시계로 세야 시뮬이 멈춰도 녹화가 멈춘 것처럼 보이지 않는다.
+        Node(
+            package="monitor_ui",
+            executable="recorder_node",
+            name="recorder_node",
+            output="screen",
+        ),
     ])

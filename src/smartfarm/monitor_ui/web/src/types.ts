@@ -13,6 +13,13 @@ export interface UiStatus {
   events: { t: number; src: string; text: string }[];
 }
 
+/** recorder_node가 /recording/status로 보내는 JSON. */
+export interface RecordingStatus {
+  recording: boolean;
+  name: string;
+  elapsed: number;
+}
+
 export type CameraStatus = "online" | "warning" | "offline" | "error";
 export type CameraType =
   | "robot_front"

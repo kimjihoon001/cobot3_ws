@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ROSLIB from "roslib";
 
 import CameraTile from "./components/CameraTile";
 import EventTicker from "./components/EventTicker";
 import TopStatusBar from "./components/TopStatusBar";
-import { CAMERAS, ROSBRIDGE_URL, UiStatus } from "./types";
+import { CAMERAS, ROSBRIDGE_URL, RecordingStatus, UiStatus } from "./types";
 
 const STORE_KEY = "monitor-ui-prefs";
 
@@ -26,8 +26,11 @@ function loadPrefs(): { hud: boolean; focused: string | null } {
 
 export default function App() {
   const [status, setStatus] = useState<UiStatus | null>(null);
+  const [rec, setRec] = useState<RecordingStatus | null>(null);
   const [connected, setConnected] = useState(false);
   const [now, setNow] = useState(new Date());
+  // 서비스 호출에 필요해서 연결을 밖으로 들고 있는다.
+  const rosRef = useRef<any>(null);
 
   const prefs = loadPrefs();
   const [hud, setHud] = useState(prefs.hud);
@@ -56,6 +59,18 @@ export default function App() {
     }
   }, []);
 
+  const toggleRecording = useCallback(() => {
+    const ros = rosRef.current;
+    if (!ros) return;
+    const service = new ROSLIB.Service({
+      ros,
+      name: rec?.recording ? "/recording/stop" : "/recording/start",
+      serviceType: "std_srvs/Trigger",
+    });
+    // 결과는 /recording/status로 다시 들어오므로 응답은 따로 안 본다.
+    service.callService(new ROSLIB.ServiceRequest({}), () => {});
+  }, [rec?.recording]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = document.activeElement;
@@ -69,13 +84,15 @@ export default function App() {
       else if (key === "f") void toggleFullscreen();
       else if (key === "h") setHud((v) => !v);
       else if (key === "d") setDebug((v) => !v);
+      else if (key === "r") toggleRecording();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleFullscreen]);
+  }, [toggleFullscreen, toggleRecording]);
 
   useEffect(() => {
     const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
+    rosRef.current = ros;
     ros.on("connection", () => setConnected(true));
     // rosbridge가 죽어도 화면은 유지하고 상태만 바꾼다.
     ros.on("close", () => setConnected(false));
@@ -94,13 +111,29 @@ export default function App() {
       }
     });
 
+    const recTopic = new ROSLIB.Topic({
+      ros,
+      name: "/recording/status",
+      messageType: "std_msgs/String",
+    });
+    recTopic.subscribe((msg: { data: string }) => {
+      try {
+        setRec(JSON.parse(msg.data));
+      } catch {
+        // 무시 — 다음 주기에 다시 온다.
+      }
+    });
+
     return () => {
       topic.unsubscribe();
+      recTopic.unsubscribe();
       ros.close();
+      rosRef.current = null;
     };
   }, []);
 
-  const clock = now.toLocaleTimeString("ko-KR", { hour12: false });
+  // ko-KR은 "16시 45분 36초"로 뽑는다. 관제 화면엔 16:45:36이 맞다.
+  const clock = now.toLocaleTimeString("sv-SE");
   const focusedCam = CAMERAS.find((c) => c.id === focused);
   // 조감도는 확대했을 때만 붙인다 — 안 볼 때 스트림 하나를 통째로 아낀다.
   const visible = CAMERAS.filter((c) => c.inGrid || c.id === focused);
@@ -113,6 +146,9 @@ export default function App() {
         wallTime={clock}
         connected={connected}
         focusedName={focusedCam && `${focusedCam.id} ${focusedCam.name}`}
+        recording={rec?.recording ?? false}
+        recElapsed={formatSimTime(rec?.elapsed ?? 0)}
+        onToggleRecording={toggleRecording}
       />
 
       <main className={`grid${focused ? " is-focused" : ""}`}>
@@ -136,7 +172,7 @@ export default function App() {
       <footer className="bar bar-bottom">
         <EventTicker events={status?.events ?? []} format={formatSimTime} />
         <span className="hint">
-          1-4 확대 · 5 조감도 · 0 복귀 · F 전체화면 · H HUD · D 디버그
+          1-4 확대 · 5 조감도 · 0 복귀 · R 녹화 · F 전체화면 · H HUD · D 디버그
         </span>
       </footer>
     </div>
