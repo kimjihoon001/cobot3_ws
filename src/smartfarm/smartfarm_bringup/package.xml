@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>smartfarm_bringup</name>
+  <version>0.1.0</version>
+  <description>분산 실행용 스마트팜 시스템 bringup 진입점</description>
+  <maintainer email="pfr0213@gmail.com">rokey</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>harvest_vision</exec_depend>
+  <exec_depend>mm_moveit</exec_depend>
+  <exec_depend>iwhub_control</exec_depend>
+  <exec_depend>warehouse_dock</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

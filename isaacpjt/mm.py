@@ -527,6 +527,17 @@ class MMDriver(Driver):
             and same_captured_fruit
             and distance <= max_distance
             and self._task.detach_fruit(fruit_path))
+        if detached and self._stage is not None:
+            # 수확 후 자유 강체가 얇은 KLT 바닥을 한 physics step에 통과하지
+            # 않도록 연속 충돌 검사를 켠다. 특히 그리퍼 개방 직후의 낙하에 필요하다.
+            try:
+                from pxr import PhysxSchema
+                fruit_prim = self._stage.GetPrimAtPath(fruit_path)
+                if fruit_prim.IsValid():
+                    PhysxSchema.PhysxRigidBodyAPI.Apply(
+                        fruit_prim).CreateEnableCCDAttr(True).Set(True)
+            except Exception as exc:
+                print(f"[Scoop] harvested fruit CCD 설정 실패: {exc}")
         self._cut_status = {
             "cut_id": cut_id,
             "cut_success": detached,

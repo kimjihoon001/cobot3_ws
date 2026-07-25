@@ -119,3 +119,11 @@ setuptools의 `tests_require` 경고만 있었고 실패는 없었다.
 충돌 해소안은 `58ee69b`로 병합 커밋했다. 아직 Isaac Sim 실제 통합 검증은 하지
 않았으므로 위 체크리스트의 ROS/Isaac 항목은 다음 작업자가 실행 결과와 함께
 갱신해야 한다.
+
+## 6. 병합 후 추가 수정
+
+- 식물 루트의 회색 fallback 재질이 하위 토마토·잎 재질을 덮지 않도록 루트
+  바인딩을 `weakerThanDescendants`로 변경
+- 참조 USD Mesh가 늦게 구성돼도 색을 상속하도록 Body/Calyx/Foliage 루트에
+  `displayColor` primvar를 먼저 기록
+- 실제 RTX 실행에서 식물 잎 초록, 토마토 빨강, 꼭지 초록이 매번 유지되는지 재검증 필요

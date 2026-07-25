@@ -15,6 +15,7 @@ from iw_dock import WarehouseDockController
 # 중심거리 = 0.96/2 + 0.50 + 1.431/2 = 1.6955m.
 POSE = (1.6955, -12.0, COMMON_FLOOR_Z)
 SPAWN_YAW_DEG = 180.0
+IW_PALLET_PATH = "/World/IwHubCargo/Pallet_00"
 
 
 class IwDriver(Driver):
@@ -103,32 +104,57 @@ class IwDriver(Driver):
         """빈 KLT 중 데크 앞쪽(IW 코=+x, MM 쪽)에 가장 가까운 슬롯의 release pose를 발행한다."""
         if self._basket_pose_pub is None or self._stage is None:
             return
-        stage = self._stage
         from pxr import Gf, Usd, UsdGeom
-        # 데크 로컬 +x = IW 코 방향(도킹 시 MM 쪽). 로컬 x가 가장 큰(가장 앞선) 빈 슬롯이
-        # MM에 가장 가깝다. MM prim 조회 없이 데크 기하만으로 견고하게 고른다.
-        # load_cargo()의 초기 적재 슬롯 (00,11,30)은 제외한다.
-        best = None  # (local_x, release, quat)
-        for slot in ("KLT_01", "KLT_10", "KLT_20", "KLT_21", "KLT_31"):
-            prim = stage.GetPrimAtPath(f"/World/IwHubCargo/Load/{slot}")
-            if not prim.IsValid():
-                continue
-            xf = UsdGeom.Xformable(prim)
-            local_x = float(xf.GetLocalTransformation().ExtractTranslation()[0])
-            world = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            # KLT 높이 0.146m × scale 0.85의 윗면보다 5cm 위에서 놓는다.
-            release = world.Transform(Gf.Vec3d(0.0, 0.0, 0.11205))
-            quat = world.ExtractRotationQuat().GetNormalized()
-            if best is None or local_x > best[0]:
-                best = (local_x, release, quat)
-        if best is None:
+
+        stage = self._stage
+        # ★MM 루트 Xform(/World/Harvester)은 스폰 자세에 고정돼 있다. MM은 dummy
+        #   base 조인트로 움직이므로 실제로 움직이는 강체는 Base/base_link다.
+        #   루트를 쓰면 스폰점(0,-12) 기준 최근접 슬롯 = 실제 MM 기준 최원거리
+        #   슬롯을 고르게 된다(2026-07-25 sim_diag_152127 실측 2.30m vs 1.34m).
+        harvester = stage.GetPrimAtPath("/World/Harvester/Base/base_link")
+        if not harvester.IsValid():
+            harvester = stage.GetPrimAtPath("/World/Harvester")
+            if not harvester.IsValid():
+                return
+        harvester_world = UsdGeom.Xformable(
+            harvester).ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default())
+        harvester_position = harvester_world.ExtractTranslation()
+
+        candidates = []
+        for ix in range(4):
+            for iy in range(2):
+                prim = stage.GetPrimAtPath(
+                    f"{IW_PALLET_PATH}/KLT_{ix}{iy}")
+                if not prim.IsValid():
+                    continue
+                world = UsdGeom.Xformable(
+                    prim).ComputeLocalToWorldTransform(
+                        Usd.TimeCode.Default())
+                center = world.ExtractTranslation()
+                distance_xy = (
+                    (float(center[0]) - float(harvester_position[0])) ** 2
+                    + (float(center[1]) - float(harvester_position[1])) ** 2
+                )
+                candidates.append((distance_xy, world))
+        if not candidates:
             return
-        _, release, quat = best
+
+        # 현재 통합 시나리오는 1개 적재 후 IW가 바로 지게차로 출발한다.
+        # 따라서 매 시퀀스에서 MM에 가장 가까운 KLT 한 칸을 release 목표로 쓴다.
+        _, world = min(candidates, key=lambda candidate: candidate[0])
+        # KLT 높이 0.146m × scale 0.85의 윗면보다 약 5cm 위.
+        release = world.Transform(Gf.Vec3d(0.0, 0.0, 0.11205))
+        quat = world.ExtractRotationQuat().GetNormalized()
         imaginary = quat.GetImaginary()
         self._basket_pose_pub.publish(
             (float(release[0]), float(release[1]), float(release[2])),
-            (float(imaginary[0]), float(imaginary[1]),
-             float(imaginary[2]), float(quat.GetReal())),
+            (
+                float(imaginary[0]),
+                float(imaginary[1]),
+                float(imaginary[2]),
+                float(quat.GetReal()),
+            ),
             frame_id="map",
         )
 

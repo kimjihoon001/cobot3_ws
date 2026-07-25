@@ -35,6 +35,9 @@ class NavHarvestTestNode(Node):
             "manipulator_state_topic", "/harvester_0/manipulator/target_state")
         self.declare_parameter(
             "mobility_ready_topic", "/harvester_0/manipulator/mobility_ready")
+        self.declare_parameter("require_moveit_ready", False)
+        self.declare_parameter(
+            "moveit_ready_topic", "/harvester_0/moveit_ready")
         self.declare_parameter("basket_pose_topic", "/iw/basket/empty_slot_pose")
         self.declare_parameter("basket_frame", "harvester_0/base_link")
         # IW가 붙기 전 시험용 tool0 release pose. 실제 바스켓 중심 좌표가 아니다.
@@ -92,6 +95,15 @@ class NavHarvestTestNode(Node):
             "fixed_goal_yaw", float(fixed.get("fixed_goal_yaw", 1.91)))
         self.declare_parameter("fixed_goal_send_delay_sec", 2.0)
         self.declare_parameter("fixed_goal_retry_sec", 2.0)
+        self.declare_parameter("iw_yield_request_topic", "/iw/mm_yield_request")
+        self.declare_parameter("iw_yield_complete_topic", "/iw/mm_yield_complete")
+        # IW가 중앙 레인으로 하역 출발할 때 MM이 비켜 대기할 교차통로 옆 레인.
+        # 2026-07-25 최신 녹화에서 (-2.90,-3.85)는 중간 이후 global plan이
+        # 끊겨 MM이 충분히 비켜도 성공 응답이 나오지 않았다. 실제로 도달한
+        # 교차통로 안전점에서 완료시켜 IW 출발 게이트를 연다.
+        self.declare_parameter("iw_yield_x", -0.8)
+        self.declare_parameter("iw_yield_y", -6.8)
+        self.declare_parameter("iw_yield_yaw", 0.0)
 
         latched = QoSProfile(
             depth=1,
@@ -109,10 +121,21 @@ class NavHarvestTestNode(Node):
         # IW 연동: mission_nav_node가 FOLLOW/FORKLIFT를 IW 전용 Nav2 goal로 변환한다.
         # 만재(N=1) 도킹 완료 보고를 받으면 지게차 하역을 트리거한다.
         self._iw_mission_pub = self.create_publisher(String, "/iw/mission", latched)
+        self._iw_yield_complete_pub = self.create_publisher(
+            Bool,
+            str(self.get_parameter("iw_yield_complete_topic").value),
+            latched,
+        )
         self._forklift_dock_pub = self.create_publisher(
             Bool, "/forklift/amr_docked", 10)
         self.create_subscription(String, "/iw/status",
                                  self._iw_status_callback, latched)
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("iw_yield_request_topic").value),
+            self._iw_yield_request_callback,
+            latched,
+        )
         self._iw_full = False
         self._placed = False
         # IW는 MM과 동시에 출발시키지 않는다. MM이 수확 위치에 도착하고 실제
@@ -142,6 +165,12 @@ class NavHarvestTestNode(Node):
             latched,
         )
         self.create_subscription(
+            Bool,
+            str(self.get_parameter("moveit_ready_topic").value),
+            self._moveit_ready_callback,
+            latched,
+        )
+        self.create_subscription(
             String,
             str(self.get_parameter("rmpflow_status_topic").value),
             self._rmpflow_status_callback,
@@ -165,6 +194,9 @@ class NavHarvestTestNode(Node):
         self._active_goal: bytes | None = None
         self._status_initialized = False
         self._mobility_ready = True
+        self._moveit_ready = not bool(
+            self.get_parameter("require_moveit_ready").value)
+        self._post_nav_waiting_moveit = False
         self._search_deadline_ns = 0
         self._basket_sent = False
         self._cycle_failed = False
@@ -182,6 +214,8 @@ class NavHarvestTestNode(Node):
         self._reposition_goal_pending = False
         self._fixed_goal_sent = False
         self._fixed_goal_pending = False
+        self._yield_goal_pending = False
+        self._yield_goal_id: bytes | None = None
         fixed_delay = float(
             self.get_parameter("fixed_goal_send_delay_sec").value)
         self._fixed_goal_deadline_ns = (
@@ -197,6 +231,9 @@ class NavHarvestTestNode(Node):
     def _send_fixed_nav_goal(self) -> None:
         """기억한 map 좌표를 한 번만 전송하고, 도착 뒤 기존 MoveIt 수확 FSM에 넘긴다."""
         if self._fixed_goal_sent or self._fixed_goal_pending:
+            return
+        if not self._moveit_ready:
+            self._publish_status("WAITING_FOR_MOVEIT_READY")
             return
         if not self._nav_client.server_is_ready():
             return
@@ -319,12 +356,24 @@ class NavHarvestTestNode(Node):
                 continue
             if entry.status == GoalStatus.STATUS_SUCCEEDED:
                 self._active_goal = None
-                self._schedule_post_nav_manipulation()
+                if goal_id == self._yield_goal_id:
+                    self._yield_goal_id = None
+                    self._iw_yield_complete_pub.publish(Bool(data=True))
+                    self._publish_status("WAITING_IW_RETURN")
+                    self.get_logger().info(
+                        "MM 피항 완료 → IW 하역 출발 허가, 복귀까지 대기")
+                else:
+                    self._schedule_post_nav_manipulation()
             elif entry.status in (GoalStatus.STATUS_CANCELED,
                                   GoalStatus.STATUS_ABORTED):
                 self._active_goal = None
-                self._publish_enable(False)
-                self._publish_status("NAV_FAILED_OR_CANCELED")
+                if goal_id == self._yield_goal_id:
+                    self._yield_goal_id = None
+                    self._iw_yield_complete_pub.publish(Bool(data=False))
+                    self._publish_status("ERROR_MM_YIELD_FAILED")
+                else:
+                    self._publish_enable(False)
+                    self._publish_status("NAV_FAILED_OR_CANCELED")
 
     def _start_search(self) -> None:
         self._waiting_home = False
@@ -344,6 +393,11 @@ class NavHarvestTestNode(Node):
         self._waiting_home = False
         self._waiting_bed_view = False
         self._search_deadline_ns = 0
+        if not self._moveit_ready:
+            self._post_nav_waiting_moveit = True
+            self._publish_status("WAITING_FOR_MOVEIT_READY_AFTER_NAV")
+            return
+        self._post_nav_waiting_moveit = False
         delay = max(
             0.0, float(self.get_parameter("post_nav_settle_sec").value))
         if delay == 0.0:
@@ -488,7 +542,7 @@ class NavHarvestTestNode(Node):
         elif state == "HARVEST_FAILED":
             self._cycle_failed = True
             self._publish_status("HARVEST_FAILED_RETURNING_HOME")
-        elif state == "WAIT_BASKET" and not self._basket_sent:
+        elif state == "WAIT_BASKET_AT_BED_VIEW" and not self._basket_sent:
             if bool(self.get_parameter("use_mock_basket").value):
                 self._publish_mock_basket()
                 self._basket_sent = True
@@ -504,9 +558,12 @@ class NavHarvestTestNode(Node):
             # 1차·단순(N=1): 토마토 1개를 iw 데크에 놓으면 만재 → iw 를 지게차로.
             if not self._cycle_failed and self._placed and not self._iw_full:
                 self._iw_full = True
-                self._iw_mission_pub.publish(String(data="FORKLIFT"))
-                self._publish_status("IW_FULL_TO_FORKLIFT")
-                self.get_logger().info("적재 1개(만재) → iw 지게차 이동 지시")
+                self._iw_yield_complete_pub.publish(Bool(data=False))
+                self._iw_mission_pub.publish(
+                    String(data="PREPARE_FORKLIFT"))
+                self._publish_status("WAITING_IW_YIELD_REQUEST")
+                self.get_logger().info(
+                    "적재 1개(만재) → IW 하역 준비, MM 피항 요청 대기")
         elif state == "RETRY_VISION":
             # 실패 후 홈에 도달한 경우에는 원샷 게이트를 끄지 않는다. 홈 카메라 대신
             # Nav 도착 때와 동일하게 홈→베드뷰로 재관측한 뒤 새 YOLO 프레임을 받는다.
@@ -523,6 +580,69 @@ class NavHarvestTestNode(Node):
 
     def _mobility_callback(self, msg: Bool) -> None:
         self._mobility_ready = bool(msg.data)
+
+    def _moveit_ready_callback(self, msg: Bool) -> None:
+        was_ready = self._moveit_ready
+        self._moveit_ready = bool(msg.data)
+        if self._moveit_ready and not was_ready:
+            self.get_logger().info("MoveIt 준비 확인 — 통합 시퀀스 게이트 개방")
+            if self._post_nav_waiting_moveit:
+                self._schedule_post_nav_manipulation()
+        elif was_ready and not self._moveit_ready:
+            self.get_logger().error(
+                "MoveIt 준비 신호 해제 — 새 Nav/팔 시퀀스 시작 보류")
+
+    def _iw_yield_request_callback(self, msg: Bool) -> None:
+        """IW 하역 출발 전에 MM을 교차통로 옆 레인으로 이동시킨다."""
+        if not msg.data or not self._iw_full:
+            return
+        if (self._yield_goal_pending or self._yield_goal_id is not None
+                or self._active_goal is not None):
+            return
+        if not self._mobility_ready:
+            self._publish_status("ERROR_MM_YIELD_ARM_NOT_HOME")
+            return
+        if not self._nav_client.server_is_ready():
+            self._publish_status("ERROR_MM_YIELD_NAV2_NOT_READY")
+            return
+        x = float(self.get_parameter("iw_yield_x").value)
+        y = float(self.get_parameter("iw_yield_y").value)
+        yaw = float(self.get_parameter("iw_yield_yaw").value)
+        goal = NavigateToPose.Goal()
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.header.frame_id = str(
+            self.get_parameter("map_frame").value)
+        goal.pose.pose.position.x = x
+        goal.pose.pose.position.y = y
+        goal.pose.pose.orientation.z = math.sin(yaw * 0.5)
+        goal.pose.pose.orientation.w = math.cos(yaw * 0.5)
+        self._yield_goal_pending = True
+        self._publish_enable(False)
+        self._publish_status("MM_YIELD_GOAL_SENDING")
+        future = self._nav_client.send_goal_async(goal)
+        future.add_done_callback(self._iw_yield_goal_response)
+        self.get_logger().info(
+            f"IW 하역 통로 피항 목표 전송: map=({x:.2f}, {y:.2f}), "
+            f"yaw={yaw:.2f}rad")
+
+    def _iw_yield_goal_response(self, future) -> None:
+        self._yield_goal_pending = False
+        try:
+            handle = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"MM 피항 목표 전송 실패: {exc}")
+            self._iw_yield_complete_pub.publish(Bool(data=False))
+            self._publish_status("ERROR_MM_YIELD_SEND_FAILED")
+            return
+        if handle is None or not handle.accepted:
+            self._iw_yield_complete_pub.publish(Bool(data=False))
+            self._publish_status("ERROR_MM_YIELD_REJECTED")
+            return
+        goal_id = bytes(handle.goal_id.uuid)
+        self._yield_goal_id = goal_id
+        self._known_goals.add(goal_id)
+        self._active_goal = goal_id
+        self._publish_status("MM_YIELDING_FOR_IW")
 
     def _reposition_callback(self, msg: String) -> None:
         """팔 밖 목표를 받으면 현재 base 자세에서 필요한 만큼 Nav2로 재정차한다."""

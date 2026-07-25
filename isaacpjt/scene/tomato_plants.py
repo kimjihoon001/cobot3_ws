@@ -67,7 +67,10 @@ class TomatoPlants:
         self._elevation = elevation
         # 무광 재질 — 없으면 RTX 기본 광택 재질이라 과실이 유리처럼 보인다.
         # displayColor(=클래스 색, YOLO 라벨 근거)는 그대로 읽는다.
-        ripeness.bind_matte_material(stage, root)
+        # 공통 루트 재질은 줄기·베드의 displayColor만 보조한다. 강한 바인딩이면
+        # 하위 과실/잎의 빨강·초록 전용 재질까지 회색 fallback으로 덮을 수 있다.
+        ripeness.bind_matte_material(
+            stage, root, stronger_than_descendants=False)
 
         # aoc 배경 식물 옵션: 플래그 ON + 에셋 존재해야 켜진다 (없으면 조용히 건너뜀).
         self._aoc_bg = (self._cfg.use_aoc_background
