@@ -9,9 +9,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."   # cobot3_ws 루트
 
 if [ -z "${ROS_DISTRO:-}" ]; then
-  ROS_DISTRO=$(ls /opt/ros 2>/dev/null | head -n1)
+  shopt -s nullglob
+  ros_setups=(/opt/ros/*/setup.bash)
+  shopt -u nullglob
+
+  if [ "${#ros_setups[@]}" -eq 1 ]; then
+    ROS_DISTRO=${ros_setups[0]#/opt/ros/}
+    ROS_DISTRO=${ROS_DISTRO%/setup.bash}
+  elif [ "${#ros_setups[@]}" -gt 1 ]; then
+    echo "[fix_ros_build_env] ROS2 배포판이 여러 개입니다. 사용할 /opt/ros/<distro>/setup.bash 를 source한 뒤 다시 실행하세요." >&2
+    exit 1
+  fi
 fi
-if [ -z "$ROS_DISTRO" ]; then
+if [ -z "${ROS_DISTRO:-}" ] || [ ! -f "/opt/ros/$ROS_DISTRO/setup.bash" ]; then
   echo "[fix_ros_build_env] ROS2 배포판을 못 찾았습니다. /opt/ros/<distro>/setup.bash 를 source 하거나 ROS2를 설치하세요." >&2
   exit 1
 fi
@@ -21,27 +31,27 @@ if [ ! -x ".venv/bin/pip" ]; then
   exit 1
 fi
 
-PIP=".venv/bin/pip"
+PIP=(.venv/bin/pip)
 
 echo "[fix_ros_build_env] ROS_DISTRO=$ROS_DISTRO"
 
-# Jazzy(및 그 이후 rolling)만 신버전 empy(4.x) 호환. Humble 등 이전 배포판은 3.3.4 고정.
+# Jazzy 이상은 신버전 empy(4.x) 호환. Humble/Iron은 3.3.4 고정.
 case "$ROS_DISTRO" in
-  jazzy|rolling) REQUIRED_EMPY="" ;;
+  jazzy|kilted|rolling) REQUIRED_EMPY="" ;;
   *) REQUIRED_EMPY="3.3.4" ;;
 esac
 
-$PIP show catkin_pkg >/dev/null 2>&1 || { echo "[fix_ros_build_env] catkin_pkg 설치"; $PIP install -q catkin_pkg; }
-$PIP show lark        >/dev/null 2>&1 || { echo "[fix_ros_build_env] lark 설치"; $PIP install -q lark; }
+"${PIP[@]}" show catkin_pkg >/dev/null 2>&1 || { echo "[fix_ros_build_env] catkin_pkg 설치"; "${PIP[@]}" install -q catkin_pkg; }
+"${PIP[@]}" show lark        >/dev/null 2>&1 || { echo "[fix_ros_build_env] lark 설치"; "${PIP[@]}" install -q lark; }
 
-CURRENT_EMPY=$($PIP show empy 2>/dev/null | awk '/^Version:/{print $2}')
+CURRENT_EMPY=$("${PIP[@]}" show empy 2>/dev/null | awk '/^Version:/{print $2}')
 
 if [ -n "$REQUIRED_EMPY" ] && [ "$CURRENT_EMPY" != "$REQUIRED_EMPY" ]; then
   echo "[fix_ros_build_env] empy ${CURRENT_EMPY:-없음} -> $REQUIRED_EMPY (배포판 $ROS_DISTRO 호환 버전으로 교체)"
-  $PIP install -q "empy==$REQUIRED_EMPY"
+  "${PIP[@]}" install -q "empy==$REQUIRED_EMPY"
 elif [ -z "$REQUIRED_EMPY" ] && [ -z "$CURRENT_EMPY" ]; then
   echo "[fix_ros_build_env] empy 설치 (최신)"
-  $PIP install -q empy
+  "${PIP[@]}" install -q empy
 else
   echo "[fix_ros_build_env] empy $CURRENT_EMPY 유지 (배포판 $ROS_DISTRO 와 호환)"
 fi
