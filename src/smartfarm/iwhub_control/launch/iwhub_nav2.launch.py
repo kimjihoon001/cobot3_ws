@@ -27,6 +27,8 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.descriptions import ParameterFile
+from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
@@ -40,6 +42,17 @@ def generate_launch_description():
     rviz = LaunchConfiguration("rviz")
     namespace = "iwhub_0"
     tf_remaps = [("/tf", "tf"), ("/tf_static", "tf_static")]
+    # namespace 안의 lifecycle node가 자기 파라미터를 찾도록 Nav2 표준
+    # RewrittenYaml로 /iwhub_0 root를 씌운다.
+    collision_monitor_params = ParameterFile(
+        RewrittenYaml(
+            source_file=nav2_params,
+            root_key=namespace,
+            param_rewrites={"use_sim_time": use_sim_time},
+            convert_types=True,
+        ),
+        allow_substs=True,
+    )
     with open(os.path.join(pkg, "urdf", "iwhub.urdf")) as urdf_file:
         robot_desc = urdf_file.read()
 
@@ -88,8 +101,7 @@ def generate_launch_description():
             parameters=[{"use_sim_time": use_sim_time}],
         ),
 
-        # DWB가 동적 장애물을 피하지 못하더라도 실제 바퀴 명령 직전에 전·후방
-        # 라이다로 감속/정지한다. base_node는 cmd_vel_safe만 구독한다.
+        # IW 진행 방향의 전방 라이다만 최종 감속/정지에 사용한다.
         Node(
             package="nav2_collision_monitor",
             executable="collision_monitor",
@@ -97,7 +109,7 @@ def generate_launch_description():
             namespace=namespace,
             remappings=tf_remaps,
             output="screen",
-            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
+            parameters=[collision_monitor_params],
         ),
         Node(
             package="nav2_lifecycle_manager",

@@ -289,32 +289,28 @@ collision_monitor:
     source_timeout: 0.5
     base_shift_correction: true
     stop_pub_timeout: 1.0
-    polygons: ["StopZone", "SlowZone"]
-    # 실제 적재 footprint보다 전후/좌우 15cm 넓은 최종 정지 영역.
-    StopZone:
+    polygons: ["FrontStop", "FrontSlow"]
+    # 차체 전면(0.65m)에서 8cm 앞까지만 최종 정지 영역으로 사용한다.
+    FrontStop:
       type: "polygon"
-      points: [0.80, 0.55, 0.80, -0.55, -1.23, -0.55, -1.23, 0.55]
+      points: [0.73, 0.46, 0.73, -0.46, 0.55, -0.46, 0.55, 0.46]
       action_type: "stop"
       max_points: 1
       visualize: true
-      polygon_pub_topic: "collision_stop_zone"
+      polygon_pub_topic: "collision_front_stop"
       enabled: true
-    # 정지 영역 바깥 35cm부터 25% 속도로 감속한다.
-    SlowZone:
+    # 전면 8~35cm 구간에서만 40%로 감속해 MM 접근 자체는 허용한다.
+    FrontSlow:
       type: "polygon"
-      points: [1.15, 0.80, 1.15, -0.80, -1.58, -0.80, -1.58, 0.80]
+      points: [1.00, 0.55, 1.00, -0.55, 0.55, -0.55, 0.55, 0.55]
       action_type: "slowdown"
       max_points: 1
-      slowdown_ratio: 0.25
+      slowdown_ratio: 0.40
       visualize: true
-      polygon_pub_topic: "collision_slow_zone"
+      polygon_pub_topic: "collision_front_slow"
       enabled: true
-    observation_sources: ["scan_front", "scan_back"]
+    observation_sources: ["scan_front"]
     scan_front:
       type: "scan"
       topic: "front_2d_lidar/scan_filtered"
-      enabled: true
-    scan_back:
-      type: "scan"
-      topic: "back_2d_lidar/scan_filtered"
       enabled: true

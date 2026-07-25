@@ -82,7 +82,7 @@ def generate_launch_description():
                 "ns": "iwhub_0",
                 "odom_frame": "iwhub_0/odom",
                 "base_frame": "iwhub_0/base_link",
-                # Nav2/도킹 cmd_vel은 Collision Monitor를 통과한 안전 출력만 실행한다.
+                # 전방 Collision Monitor를 통과한 명령만 바퀴에 전달한다.
                 "cmd_vel_topic": "/iwhub_0/cmd_vel_safe",
                 "odom_topic": "/iwhub_0/odom",
                 "publish_odom": ParameterValue(publish_odom, value_type=bool),
