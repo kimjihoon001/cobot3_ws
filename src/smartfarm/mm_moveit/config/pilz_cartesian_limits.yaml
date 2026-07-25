@@ -1,0 +1,7 @@
+# Pilz LIN/CIRC 데카르트 한계 — 파지 접근은 천천히·직선으로.
+# TODO 근거 없음(보수적 임의값). 파지 검증 후 사이클타임 보며 올린다.
+cartesian_limits:
+  max_trans_vel: 0.5
+  max_trans_acc: 1.0
+  max_trans_dec: -1.0
+  max_rot_vel: 1.0

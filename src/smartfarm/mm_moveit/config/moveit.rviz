@@ -1,0 +1,86 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 70
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /MotionPlanning1
+      Splitter Ratio: 0.5
+    Tree Height: 350
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.5
+      Plane Cell Count: 10
+      Value: true
+    - Class: moveit_rviz_plugin/MotionPlanning
+      Name: MotionPlanning
+      Enabled: true
+      Move Group Namespace: ""
+      Robot Description: robot_description
+      Planning Scene Topic: monitored_planning_scene
+      Planned Path:
+        Loop Animation: false
+        Show Robot Collision: false
+        Show Robot Visual: true
+        State Display Time: 0.05 s
+        Trajectory Topic: display_planned_path
+      Planning Metrics:
+        Payload: 1
+        Show Joint Torques: false
+        Show Manipulability: false
+        Show Manipulability Index: false
+        Show Weight Limit: false
+      Planning Request:
+        Colliding Link Color: 255; 0; 0
+        Goal State Alpha: 1
+        Goal State Color: 250; 128; 0
+        Interactive Marker Size: 0.15
+        Joint Violation Color: 255; 0; 255
+        Planning Group: mm_manipulator
+        # 실제 Scene Robot만 표시하고 저장된 Query Goal ghost는 숨긴다.
+        Query Goal State: false
+        Query Start State: false
+        Show Workspace: false
+        Start State Alpha: 0.5
+        Start State Color: 0; 255; 0
+      Scene Geometry:
+        Scene Alpha: 0.9
+        Show Scene Geometry: true
+      Scene Robot:
+        Attached Body Color: 150; 50; 150
+        Robot Alpha: 1
+        Show Robot Collision: false
+        Show Robot Visual: true
+      Value: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: mm_base
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 2.5
+      Focal Point:
+        X: -0.25
+        Y: 0
+        Z: 0.8
+      Name: Current View
+      # m0617 홈 접힘은 X-Z 평면이다. Y축 정측면에서 봐야 '>' 형상이
+      # 깊이 방향으로 눌려 일자로 보이지 않는다.
+      Pitch: 0.15
+      Yaw: 1.5708
+Window Geometry:
+  Height: 900
+  Width: 1400

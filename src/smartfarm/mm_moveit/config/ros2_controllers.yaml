@@ -1,0 +1,46 @@
+# ros2_control — Isaac topic_based 하드웨어 위의 컨트롤러들.
+# update_rate 는 Isaac 물리 60fps 와 맞춘다.
+# 어느 로봇 namespace로 띄워도 그 namespace의 controller_manager에만 적용된다.
+# 파라미터 파일은 해당 ros2_control_node에만 전달되므로 다른 로봇에는 전파되지 않는다.
+/**/controller_manager:
+  ros__parameters:
+    update_rate: 60
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: position_controllers/JointGroupPositionController
+
+/**/arm_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 60.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    constraints:
+      stopped_velocity_tolerance: 0.2
+      goal_time: 0.0
+
+# 동축 스쿱 — 세 회전축을 /gripper_controller/commands (Float64MultiArray) 로 직접 지령.
+# 순서: inner receiver, middle receiver, outer cutter.
+/**/gripper_controller:
+  ros__parameters:
+    joints:
+      - scoop_quarter_1_joint
+      - scoop_quarter_2_joint
+      - cutter_quarter_3_joint

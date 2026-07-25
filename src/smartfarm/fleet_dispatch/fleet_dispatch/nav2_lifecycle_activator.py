@@ -25,6 +25,9 @@ class Nav2LifecycleActivator(Node):
         super().__init__("nav2_lifecycle_activator")
         self.declare_parameter("startup_delay_sec", 8.0)
         self.declare_parameter("timeout_sec", 120.0)
+        # 담당할 lifecycle 노드(상대명). 통합 런치에서 IW는 localization(map_server+amcl)만
+        # 맡기고 navigation은 mission_nav STARTUP이 별도로 올린다.
+        self.declare_parameter("targets", list(self.TARGETS))
 
     def _state(self, name: str) -> int | None:
         client = self.create_client(GetState, f"{name}/get_state")
@@ -55,13 +58,14 @@ class Nav2LifecycleActivator(Node):
         self.destroy_client(client)
 
     def run(self) -> bool:
+        targets = list(self.get_parameter("targets").value) or list(self.TARGETS)
         time.sleep(float(self.get_parameter("startup_delay_sec").value))
         deadline = time.monotonic() + float(
             self.get_parameter("timeout_sec").value)
         last_report = 0.0
         while rclpy.ok() and time.monotonic() < deadline:
             pending = []
-            for name in self.TARGETS:
+            for name in targets:
                 state = self._state(name)
                 if state == State.PRIMARY_STATE_ACTIVE:
                     continue

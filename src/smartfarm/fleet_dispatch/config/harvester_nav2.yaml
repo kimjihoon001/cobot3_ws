@@ -52,7 +52,7 @@ amcl:
     resample_interval: 1
     transform_tolerance: 1.0
     tf_broadcast: true
-    # Isaac rmp_mm.py의 실제 스폰 자세와 동일하게 고정한다. launch에서도 같은 값을
+    # Isaac moveit_mm.py의 실제 스폰 자세와 동일하게 고정한다. launch에서도 같은 값을
     # 주입하지만, 이 YAML을 직접 사용하는 재시작에서도 잘못된 과거 위치로 뜨지 않게 한다.
     set_initial_pose: true
     initial_pose: {x: 0.0, y: -12.0, z: 0.0, yaw: 0.0}

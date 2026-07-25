@@ -77,23 +77,14 @@ def generate_launch_description():
             }.items(),
         ),
 
-        # Isaac chassis odom은 스폰 자세를 (0,0,0)으로 삼는 상대 좌표다.
-        # 월드/map의 IW 스폰 자세 (1.6955,-12,pi)를 map→odom으로 고정한다.
-        # 대칭 온실에서 AMCL이 다른 통로로 수렴해 이 변환을 흔들지 않도록
-        # AMCL은 관찰에 남기되 config의 tf_broadcast=false로 덮어쓰지 않는다.
+        # 팔레트/KLT가 전·후방 360° 라이다에 자기 장애물로 보이지 않도록
+        # base_link의 실제 적재 footprint 내부 점만 제거한다.
         Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            name="map_to_odom_identity",
+            package="iwhub_control",
+            executable="scan_self_filter_node",
+            name="scan_self_filter",
             namespace=namespace,
-            remappings=tf_remaps,
-            arguments=[
-                "--x", "1.6955", "--y", "-12.0", "--z", "0.0",
-                "--yaw", "3.141592653589793",
-                "--pitch", "0.0", "--roll", "0.0",
-                "--frame-id", "iwhub_0/map",
-                "--child-frame-id", "iwhub_0/odom",
-            ],
+            output="screen",
             parameters=[{"use_sim_time": use_sim_time}],
         ),
 
@@ -102,18 +93,45 @@ def generate_launch_description():
         # 명시적으로 감싸야 노드·액션·costmap·TF가 MM의 전역 Nav2와 분리된다.
         GroupAction(actions=[
             PushRosNamespace(namespace),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(os.path.join(
-                    nav2_bringup, "launch", "localization_launch.py")),
-                launch_arguments={
-                    "namespace": namespace,
-                    "use_sim_time": use_sim_time,
-                    "params_file": nav2_params,
-                    "map": map_yaml,
-                    # 상위 MM Nav2의 use_composition 값이 중첩 launch로
-                    # 전파되면 존재하지 않는 iwhub_0/nav2_container를 기다린다.
-                    "use_composition": "False",
-                }.items(),
+            # localization(map_server+amcl)도 즉시 뜨면 MM composed Nav2 플러그인
+            # 로딩과 lifecycle activate가 겹쳐 FastDDS service 응답이 유실되고
+            # map_server가 activate 실패(맵 미발행)한다. navigation과 동일하게 지연해
+            # MM 로딩 버스트 뒤에 뜨게 하고, navigation(3s)보다 먼저 올린다.
+            TimerAction(
+                period=2.0,
+                actions=[
+                    GroupAction(actions=[
+                        PushRosNamespace(namespace),
+                        IncludeLaunchDescription(
+                            PythonLaunchDescriptionSource(os.path.join(
+                                nav2_bringup, "launch", "localization_launch.py")),
+                            launch_arguments={
+                                "namespace": namespace,
+                                "use_sim_time": use_sim_time,
+                                "params_file": nav2_params,
+                                "map": map_yaml,
+                                # 상위 MM Nav2의 use_composition 값이 중첩 launch로
+                                # 전파되면 존재하지 않는 iwhub_0/nav2_container를 기다린다.
+                                "use_composition": "False",
+                            }.items(),
+                        ),
+                        # localization autostart는 FastDDS 응답 유실 시 map_server가
+                        # activate에서 멈춰 /iwhub_0/map 이 안 나간다. activator가 실제
+                        # state를 다시 읽으며 configure/activate를 재시도해 확실히
+                        # 활성화한다(여기선 localization=map_server+amcl만; navigation은
+                        # mission_nav STARTUP이 담당). PushRosNamespace로 iwhub_0 적용됨.
+                        Node(
+                            package="fleet_dispatch",
+                            executable="nav2_lifecycle_activator",
+                            name="iw_localization_activator",
+                            output="screen",
+                            parameters=[{
+                                "targets": ["map_server", "amcl"],
+                                "startup_delay_sec": 3.0,
+                            }],
+                        ),
+                    ]),
+                ],
             ),
             # 통합 launch에서 MM composed Nav2 플러그인 로딩과 IW DWB lifecycle
             # configure가 동시에 겹치면 FastDDS service 응답이 유실될 수 있다.

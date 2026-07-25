@@ -20,8 +20,9 @@ class VisionDebugView(Node):
     def __init__(self):
         super().__init__("vision_debug_view")
 
-        self.declare_parameter("annotated_topic", "/vision/annotated_image")
-        self.declare_parameter("depth_topic", "/harvester/depth")
+        self.declare_parameter(
+            "annotated_topic", "/harvester_0/vision/annotated_image")
+        self.declare_parameter("depth_topic", "/harvester_0/depth")
 
         annotated_topic = self.get_parameter("annotated_topic").value
         depth_topic = self.get_parameter("depth_topic").value

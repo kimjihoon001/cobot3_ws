@@ -1,4 +1,4 @@
-"""그리퍼 카메라 스냅샷 — /harvester/rgb 를 PNG 로 저장 (파지 디버깅 눈)."""
+"""그리퍼 카메라 스냅샷 — /harvester_0/rgb 를 PNG 로 저장 (파지 디버깅 눈)."""
 import sys
 import time
 
@@ -10,7 +10,8 @@ from sensor_msgs.msg import Image
 
 def snap(node, out_path, timeout=6.0):
     got = []
-    sub = node.create_subscription(Image, "/harvester/rgb", lambda m: got.append(m), 5)
+    sub = node.create_subscription(
+        Image, "/harvester_0/rgb", lambda m: got.append(m), 5)
     end = time.time() + timeout
     while time.time() < end and not got:
         rclpy.spin_once(node, timeout_sec=0.1)

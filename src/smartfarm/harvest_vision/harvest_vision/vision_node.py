@@ -42,10 +42,11 @@ class VisionNode(Node):
 
         share = get_package_share_directory("harvest_vision")
         # 모두 상대 이름: 노드 namespace 아래에만 생성되어 다른 로봇과 섞이지 않는다.
-        # namespace 없이 단독 실행하면 기존과 동일하게 /harvester/*, /vision/*가 된다.
-        self.declare_parameter("rgb_topic", "harvester/rgb")
-        self.declare_parameter("depth_topic", "harvester/depth")
-        self.declare_parameter("camera_info_topic", "harvester/camera_info")
+        # 단독 실행과 namespace launch 모두 같은 MM 카메라를 보도록 절대 토픽을 기본값으로
+        # 둔다. 통합 launch에서는 상대 이름(rgb/depth/camera_info)으로 덮어쓴다.
+        self.declare_parameter("rgb_topic", "/harvester_0/rgb")
+        self.declare_parameter("depth_topic", "/harvester_0/depth")
+        self.declare_parameter("camera_info_topic", "/harvester_0/camera_info")
         self.declare_parameter("annotated_topic", "vision/annotated_image")
         self.declare_parameter("target_topic", "vision/approach_target")
         self.declare_parameter("target_class_topic", "vision/target_class")

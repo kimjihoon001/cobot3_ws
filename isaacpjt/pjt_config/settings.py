@@ -176,14 +176,10 @@ class PlantConfig:
     foliage_scale: float = 0.85      # aoc 식물 기준 크기(원본 1.388m). 개체마다 ×0.8~1.2 변주됨
     foliage_z: float = 0.4           # 바닥에서 올림. 잎이 과실 구간(0.5~1.4m)에 오게 위로
 
-    # 2026-07-18 수확·운반 피벗 → 2클래스(익은거/상한거). 성숙단계(green/half_ripe)는 스코프 밖.
-    # 데모 씬 분포. 스마트팜은 관리되는 환경이라 상한거가 드물다.
-    # 주의 1: 이 비율 자체는 출처가 없다. 관측 데이터가 아니라 씬 연출값이다([4] 임의).
-    # 주의 2: YOLO 학습용 데이터셋은 클래스 균형이 필요하므로 이 값을 쓰지 말 것.
-    #         데이터셋 생성기는 별도 분포를 써야 한다.
+    # 현재 수확 통합시험 씬은 모든 과실을 익은 토마토로 고정한다.
+    # 품질 분류 데이터셋 생성은 별도 스크립트의 클래스 분포를 사용한다.
     class_weights: dict[str, float] = field(default_factory=lambda: {
-        "ripe":    0.85,   # 익은거=수확 대상 (씬은 완숙 위주)
-        "spoiled": 0.15,   # 상한거=제거 대상. 관리된 환경이라 드묾 (VegNet Old/Damaged)
+        "ripe": 1.0,
     })
 
 
@@ -656,7 +652,6 @@ class HarvesterNavConfig:
     # 높이는 차체 상면(0.30m) 바로 위. 팔이 접힌 상태에서 전방 시야를 가리지 않는 최소 높이.
     # ⚠ 팔이 앞으로 뻗으면 스캔에 자기 팔이 잡힌다 — GPU 에서 확인 후 오프셋/각도 보정할 것.
     lidar_offset: tuple[float, float, float] = (0.45, 0.0, 0.35)  # m
-
     # TF 프레임/토픽 — **네임스페이스를 붙인다**. iw.hub 도 Nav2 를 켜면 프레임이 충돌하기
     # 때문(map 만 공유, 로봇 프레임은 접두사 분리 = Nav2 다중로봇 표준 방식).
     # ⚠ 지금은 **전역(네임스페이스 없음)** 으로 간다. 로봇이 한 대뿐이고, nav2_bringup 이
@@ -687,20 +682,20 @@ class CameraBridgeConfig:
     """
     width: int = 640         # px  [4] 임의 — D455 컬러 관행 해상도. YOLO 입력에 맞게 조정.
     height: int = 480        # px  [4]
-    rgb_topic: str = "/harvester/rgb"
-    depth_topic: str = "/harvester/depth"
-    info_topic: str = "/harvester/camera_info"
+    rgb_topic: str = "/harvester_0/rgb"
+    depth_topic: str = "/harvester_0/depth"
+    info_topic: str = "/harvester_0/camera_info"
     frame_id: str = "d455_color"
     # moveit_mm(harvester_moveit) 격리용 D455 전체 스트림 필드 (2026-07-24). moveit_mm._build_camera
     # 가 dataclasses.replace 로 node_namespace + 상대 토픽을 얹어 RMP MM 카메라와 완전히 분리한다.
     # node_namespace 가 비면 위 절대 토픽을 그대로 쓰고, 차면 상대 토픽으로 복제된다.
-    depth_info_topic: str = "/harvester/depth/camera_info"
-    pointcloud_topic: str = "/harvester/depth/points"
-    infra1_topic: str = "/harvester/infra1/image_raw"
-    infra2_topic: str = "/harvester/infra2/image_raw"
-    infra1_info_topic: str = "/harvester/infra1/camera_info"
-    infra2_info_topic: str = "/harvester/infra2/camera_info"
-    imu_topic: str = "/harvester/imu"
+    depth_info_topic: str = "/harvester_0/depth/camera_info"
+    pointcloud_topic: str = "/harvester_0/depth/points"
+    infra1_topic: str = "/harvester_0/infra1/image_raw"
+    infra2_topic: str = "/harvester_0/infra2/image_raw"
+    infra1_info_topic: str = "/harvester_0/infra1/camera_info"
+    infra2_info_topic: str = "/harvester_0/infra2/camera_info"
+    imu_topic: str = "/harvester_0/imu"
     depth_frame_id: str = "d455_depth_optical_frame"
     infra1_frame_id: str = "d455_infra1_optical_frame"
     infra2_frame_id: str = "d455_infra2_optical_frame"

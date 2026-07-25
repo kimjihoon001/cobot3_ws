@@ -1,7 +1,7 @@
 """이동→인식→파지 통합 실행 — 비전 + 디버그창 + 오케스트레이션 + 파지(RMPflow).
 
 한 번에 켜는 것: (Isaac 은 별도 — isaac_python main.py --mm --rmpflow [--nav])
-  - vision_node            : /harvester/rgb,depth → YOLO 검출 → /vision/* 발행
+  - vision_node            : /harvester_0/rgb,depth → YOLO 검출 → /vision/* 발행
   - vision_debug_view      : /vision/annotated_image 를 OpenCV 창으로 (비전 디버깅)
   - manipulator_target_node: /vision/approach_target → /harvester_0/cmd rmp_target (파지, 검증된 경로)
   - nav_harvest_test_node  : 섹터 이동→인식→수확→모의 바스켓 오케스트레이션

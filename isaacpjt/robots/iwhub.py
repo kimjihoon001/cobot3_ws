@@ -493,7 +493,9 @@ class IwHub:
                 set_pose(stage.GetPrimAtPath(kp), (ox, oy, kz), ident)
                 set_scale(stage.GetPrimAtPath(kp), klt_scale)
                 physics.disable_physics(stage, kp)         # 에셋 자체 강체 제거(중첩경고 §8)
-                # 시각 메시의 convex 근사 대신 열린 상자 형태의 확정 충돌체를 쓴다.
+                # 초기 적재 여부와 무관하게 8개 KLT 모두 실제로 토마토를 받을 수
+                # 있어야 한다. 시각 메시의 convex 근사 대신 입구가 열려 있음이
+                # 보장되는 바닥+4벽 충돌체를 Load 강체 아래에 직접 구성한다.
                 add_klt_shell(ix, iy, ox, oy)
                 if (ix, iy) not in filled or not ripe:
                     continue

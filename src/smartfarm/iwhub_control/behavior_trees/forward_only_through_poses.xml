@@ -4,7 +4,7 @@
   이고, Spin 회전은 주행 실패 시 로봇을 제자리 회전시켜 AMCL/라이다 정합을 흔들어
   "라이다가 틀어진" 착시를 만들며 복구루프에 가둔다(2026-07-24 GPU 실측).
   → 복구는 costmap을 지우고 잠깐 대기 후 재계획만. 로봇을 절대 회전/후진시키지 않는다.
-  정상 heading 정렬은 RPP(use_rotate_to_heading)가 주행 중 담당한다.
+  정상 heading 정렬과 곡선 조향은 DWB의 회전 샘플과 경로 critic이 담당한다.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">

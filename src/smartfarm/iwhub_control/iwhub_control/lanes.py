@@ -50,8 +50,15 @@ def clearance(x: float, y: float) -> float:
     return best
 
 
-# iw 실측 footprint (base_link 프레임, nav2_params local costmap과 동일). 후방 오버행이 김.
-FOOTPRINT = ((0.3975, 0.376), (0.3975, -0.376), (-1.0335, -0.376), (-1.0335, 0.376))
+# 현재 브랜치 Nav2 local costmap과 동일한 적재 외곽(base_link 프레임).
+# 전·후방 라이다 원점과 폭 0.802m 팔레트를 포함하며 아래 footprint_clear의
+# 기본 margin=0.05가 costmap footprint_padding과 같은 안전 여유를 더한다.
+FOOTPRINT = (
+    (0.65, 0.401),
+    (0.65, -0.401),
+    (-1.08, -0.401),
+    (-1.08, 0.401),
+)
 
 
 def _footprint_world(x: float, y: float, yaw: float, margin: float = 0.0):
@@ -246,6 +253,7 @@ def follow_route(
     ty: float,
     arc_r: float = 0.8,
     step: float = 0.5,
+    snap_target_x: bool = True,
 ):
     """현재 IW 자세에서 MM 추종점까지 배드-클리어 레인 경로를 만든다.
 
@@ -256,7 +264,9 @@ def follow_route(
     IW가 배드 구간 안의 레인 중심에서 크게 벗어나 있으면 임의 복구 주행을 만들지
     않는다. 잘못된 자세에서 경로를 강행하는 것보다 정지·운영자 확인이 안전하다.
     """
-    target_x = _nearest(float(tx), VLANES)
+    requested_target_x = float(tx)
+    target_lane_x = _nearest(requested_target_x, VLANES)
+    target_x = target_lane_x if snap_target_x else requested_target_x
     start_lane_x = _nearest(float(sx), VLANES)
     start_lane_error = abs(float(sx) - start_lane_x)
     target = (target_x, float(ty))
@@ -265,11 +275,24 @@ def follow_route(
     if math.hypot(target[0] - start[0], target[1] - start[1]) < 0.05:
         return [(start[0], start[1], float(syaw))]
 
-    same_vertical_lane = abs(start[0] - target_x) <= 0.35
-    if same_vertical_lane:
+    same_vertical_lane = abs(start[0] - target_lane_x) <= 0.35
+    exact_direct = (
+        not snap_target_x
+        and abs(start[1] - target[1]) < 0.05
+        and _in_horizontal_corridor(start[1])
+    )
+    if exact_direct:
+        # 최상·최하단 및 가로 교차통로는 횡방향 개활부다. 여기서는 레인
+        # 중심까지 갔다가 되돌아오는 180도 꺾임 없이 정확한 standoff로 직행한다.
+        points = [start, target]
+    elif same_vertical_lane:
         # AMCL의 작은 횡오차는 현재 위치에서 레인 중심으로 짧게 복귀한 뒤 종주한다.
         # 바로 target과 이으면 대각선이 되어 결정적 레인 경로가 아니게 된다.
-        points = [start, (target_x, start[1]), (target_x, target[1])]
+        points = [
+            start,
+            (target_lane_x, start[1]),
+            (target_lane_x, target[1]),
+        ]
     else:
         if not _in_horizontal_corridor(start[1]) and start_lane_error > 0.35:
             raise ValueError(
@@ -284,9 +307,14 @@ def follow_route(
         points = [
             start,
             (start[0], connector_y),
-            (target_x, connector_y),
-            target,
+            (target_lane_x, connector_y),
+            (target_lane_x, target[1]),
         ]
+    if points[-1] != target:
+        # 현재 브랜치의 접근방향 standoff를 쓰는 호출은 최종 1.2m 위치를
+        # 보존한다. 레인에서 이 점까지의 짧은 접근도 아래 swept-footprint
+        # 검사를 통과해야 하므로 배드를 가로지르는 목표는 안전하게 거부된다.
+        points.append(target)
 
     route = _rounded_manhattan_route(
         points, start_yaw=syaw, arc_r=arc_r, step=step)

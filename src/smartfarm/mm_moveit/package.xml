@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mm_moveit</name>
+  <version>0.1.0</version>
+  <description>mm 수확 MM(Doosan m0617 + 동축 3축 1/4구 스쿱) MoveIt2 —
+    Isaac topic_based_ros2_control 통합. harvest_moveit(UR10e)과 완전히 분리된 사본으로,
+    팔만 m0617 로 갈아끼웠다. dsr_description2 가 없는 워크스페이스라 m0617 링크/메시를
+    패키지가 직접 들고 간다(urdf/m0617_macro.xacro, meshes/m0617/).
+    OMPL(프리스페이스) + Pilz LIN(직선 접근) + CHOMP. 그리퍼는 MoveIt 밖(Isaac JSON 명령).</description>
+  <maintainer email="pfr0213@gmail.com">HyeonminLEE</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>moveit_ros_move_group</exec_depend>
+  <exec_depend>moveit_planners_ompl</exec_depend>
+  <exec_depend>moveit_planners_chomp</exec_depend>
+  <exec_depend>pilz_industrial_motion_planner</exec_depend>
+  <exec_depend>moveit_kinematics</exec_depend>
+  <exec_depend>moveit_servo</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>moveit_msgs</exec_depend>
+  <exec_depend>shape_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>harvest_vision</exec_depend>
+  <exec_depend>fleet_dispatch</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>topic_based_ros2_control</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>position_controllers</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

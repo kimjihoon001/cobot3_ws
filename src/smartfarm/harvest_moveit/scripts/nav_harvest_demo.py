@@ -429,23 +429,8 @@ class NavHarvestDemo:
             self.node.get_logger().info(
                 "베이스 정지 완료 — 팔 수확 시퀀스로 전환합니다")
 
-        # 일반 FOLLOW는 MM을 밀지 않도록 2.3m 뒤에서 끝난다. 팔 수확을 시작하기
-        # 전에만 IW를 KLT 도달권으로 약 1m 더 접근시키고, Nav2 도착 확인 뒤 진행한다.
-        self.iw_status = None
-        self.iw_mission_pub.publish(String(data="LOAD"))
-        self.node.get_logger().info(
-            "IW KLT 적재 근접 도킹 요청 → /iw/status READY_LOAD 대기")
-        load_deadline = time.monotonic() + 60.0
-        while rclpy.ok() and time.monotonic() < load_deadline:
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            if self.iw_status == "READY_LOAD":
-                break
-        if self.iw_status != "READY_LOAD":
-            self.node.get_logger().error(
-                "IW KLT 적재 근접 도킹 타임아웃 — 수확을 시작하지 않음")
-            return False
-        self.node.get_logger().info(
-            "IW KLT 적재 근접 도킹 확인 — 팔 수확 시작")
+        # 현재 FOLLOW 자체가 MM 접근 방향 1.2m의 플레이스 위치를 유지한다.
+        # 별도 LOAD 미션 없이 현 자세에서 KLT 도달성을 확인한다.
         if not self.ensure_klt_place_reachable():
             self.node.get_logger().error(
                 "안전한 KLT 적재 자세를 확보하지 못해 수확을 시작하지 않음")

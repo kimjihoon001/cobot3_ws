@@ -70,3 +70,24 @@ def test_existing_dock_and_return_routes_remain_clear():
     assert lanes.footprint_clear(dock) == (True, None)
     assert lanes.footprint_clear(back) == (True, None)
     assert dock[-1] == lanes.DOCK
+
+
+def test_follow_route_can_preserve_approach_standoff_in_free_area():
+    route = lanes.follow_route(
+        1.6955, -12.0, math.pi,
+        1.2, -12.0,
+        snap_target_x=False,
+    )
+
+    assert route[-1][0] == pytest.approx(1.2)
+    assert route[-1][1] == pytest.approx(-12.0)
+    assert lanes.footprint_clear(route) == (True, None)
+
+
+def test_follow_route_rejects_exact_standoff_through_bed():
+    with pytest.raises(ValueError, match="footprint"):
+        lanes.follow_route(
+            0.0, -8.0, math.pi / 2.0,
+            1.7, -8.0,
+            snap_target_x=False,
+        )

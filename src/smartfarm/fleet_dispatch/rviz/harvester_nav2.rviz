@@ -1,182 +1,352 @@
-# 수확 MM Nav2 시각화 기본 설정.
-# 손으로 매번 맞추던 3가지를 여기 박아둔다 (2026-07-20 실사용에서 확정):
-#   Fixed Frame = map    (저장 맵 + AMCL 자동 초기화가 map->odom 을 만든다)
-#   LaserScan Size = 0.03
-#   /scan · /map · TF 를 기본 표시
-# 시계(use_sim_time)는 이 파일이 아니라 런치가 파라미터로 넣는다 —
-# Isaac 이 시뮬 시간으로 타임스탬프를 찍어서, 벽시계로 보면 전부 '너무 오래된 것' 으로 버려진다.
 Panels:
   - Class: rviz_common/Displays
+    Help Height: 70
     Name: Displays
     Property Tree Widget:
       Expanded:
         - /Global Options1
         - /LaserScan1
       Splitter Ratio: 0.5
-    Tree Height: 600
+    Tree Height: 357
   - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
     Name: Views
+    Splitter Ratio: 0.5
 Visualization Manager:
   Class: ""
-  Name: root
   Displays:
-    - Class: rviz_default_plugins/Grid
-      Name: Grid
-      Enabled: true
+    - Alpha: 0.5
       Cell Size: 1
-      Plane Cell Count: 40
+      Class: rviz_default_plugins/Grid
       Color: 160; 160; 164
-      Alpha: 0.5
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 40
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz_default_plugins/TF
-      Name: TF
       Enabled: true
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        base_link:
+          Value: true
+        cutter_quarter_3:
+          Value: true
+        harvest_tcp:
+          Value: true
+        harvester_0_d455_color_optical_frame:
+          Value: true
+        harvester_d455_mount:
+          Value: true
+        laser:
+          Value: true
+        link_1:
+          Value: true
+        link_2:
+          Value: true
+        link_3:
+          Value: true
+        link_4:
+          Value: true
+        link_5:
+          Value: true
+        link_6:
+          Value: true
+        map:
+          Value: true
+        mm_base:
+          Value: true
+        odom:
+          Value: true
+        scoop_adapter:
+          Value: true
+        scoop_quarter_1:
+          Value: true
+        scoop_quarter_2:
+          Value: true
       Marker Scale: 0.5
-      Show Names: true
-      Show Axes: true
+      Name: TF
       Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        map:
+          odom:
+            mm_base:
+              base_link:
+                harvester_0_d455_color_optical_frame:
+                  {}
+                link_1:
+                  link_2:
+                    link_3:
+                      link_4:
+                        link_5:
+                          link_6:
+                            scoop_adapter:
+                              cutter_quarter_3:
+                                {}
+                              harvest_tcp:
+                                {}
+                              harvester_d455_mount:
+                                {}
+                              scoop_quarter_1:
+                                {}
+                              scoop_quarter_2:
+                                {}
+              laser:
+                {}
       Update Interval: 0
       Value: true
-    - Class: rviz_default_plugins/LaserScan
-      Name: LaserScan
-      Enabled: true
-      Topic:
-        Value: scan
-        Depth: 5
-        Durability Policy: Volatile
-        Reliability Policy: Best Effort
-        History Policy: Keep Last
-      Size (m): 0.03
-      Style: Flat Squares
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/LaserScan
       Color: 255; 85; 0
       Color Transformer: FlatColor
-      Alpha: 1
       Decay Time: 0
-      Position Transformer: XYZ
-      Value: true
-    - Class: rviz_default_plugins/Map
-      Name: Map
       Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: LaserScan
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.029999999329447746
+      Style: Flat Squares
       Topic:
-        Value: map
-        Depth: 1
-        Durability Policy: Transient Local
-        Reliability Policy: Reliable
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
-      Alpha: 0.7
+        Reliability Policy: Best Effort
+        Value: scan
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 0.699999988079071
+      Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: true
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: map
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: map_updates
+      Use Timestamp: false
       Value: true
-    - Class: rviz_default_plugins/Map
+    - Alpha: 0.25
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
+      Enabled: true
       Name: Global Costmap
-      Enabled: true
       Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: global_costmap/costmap
-        Depth: 1
-        Durability Policy: Transient Local
-        Reliability Policy: Reliable
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
         History Policy: Keep Last
-      Alpha: 0.25
-      Color Scheme: costmap
-      Draw Behind: false
+        Reliability Policy: Reliable
+        Value: global_costmap/costmap_updates
       Use Timestamp: false
       Value: true
-    - Class: rviz_default_plugins/Map
+    - Alpha: 0.550000011920929
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
+      Enabled: true
       Name: Local Costmap
-      Enabled: true
       Topic:
-        Value: local_costmap/costmap
         Depth: 1
         Durability Policy: Transient Local
-        Reliability Policy: Reliable
+        Filter size: 10
         History Policy: Keep Last
-      Alpha: 0.55
-      Color Scheme: costmap
-      Draw Behind: false
+        Reliability Policy: Reliable
+        Value: local_costmap/costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: local_costmap/costmap_updates
       Use Timestamp: false
       Value: true
-    - Class: rviz_default_plugins/Path
-      Name: Global Plan
-      Enabled: true
-      Topic:
-        Value: plan
-        Depth: 5
-        Durability Policy: Volatile
-        Reliability Policy: Reliable
-        History Policy: Keep Last
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
       Color: 255; 0; 0
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
       Line Style: Lines
-      Line Width: 0.04
+      Line Width: 0.03999999910593033
+      Name: Global Plan
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
       Pose Style: Arrows
-      Value: true
-    - Class: rviz_default_plugins/Path
-      Name: Local Plan
-      Enabled: true
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
       Topic:
-        Value: local_plan
         Depth: 5
         Durability Policy: Volatile
-        Reliability Policy: Reliable
+        Filter size: 10
         History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: plan
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
       Color: 0; 100; 255
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
       Line Style: Lines
-      Line Width: 0.04
+      Line Width: 0.03999999910593033
+      Name: Local Plan
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
       Pose Style: None
-      Value: true
-    - Class: rviz_default_plugins/Polygon
-      Name: Robot Footprint
-      Enabled: true
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
       Topic:
-        Value: local_costmap/published_footprint
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
         Reliability Policy: Reliable
-        History Policy: Keep Last
-      Color: 25; 255; 0
+        Value: local_plan
       Value: true
-    - Class: nav2_rviz_plugins/ParticleCloud
-      Name: AMCL Particles
+    - Alpha: 1
+      Class: rviz_default_plugins/Polygon
+      Color: 25; 255; 0
       Enabled: true
+      Name: Robot Footprint
       Topic:
-        Value: particle_cloud
         Depth: 5
         Durability Policy: Volatile
-        Reliability Policy: Best Effort
+        Filter size: 10
         History Policy: Keep Last
-      Color: 0; 180; 0
-      Max Arrow Length: 0.3
-      Min Arrow Length: 0.02
-      Shape: Arrow (Flat)
+        Reliability Policy: Reliable
+        Value: local_costmap/published_footprint
       Value: true
+    - Alpha: 1
+      Class: nav2_rviz_plugins/ParticleCloud
+      Color: 0; 180; 0
+      Enabled: true
+      Max Arrow Length: 0.30000001192092896
+      Min Arrow Length: 0.019999999552965164
+      Name: AMCL Particles
+      Shape: Arrow (Flat)
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: particle_cloud
+      Value: true
+  Enabled: true
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: map
     Frame Rate: 30
+  Name: root
   Tools:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
       Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: initialpose
-    # 외부 NavigateToPose 액션 응답이 DDS 타임아웃 나는 환경이라, bt_navigator가
-    # 직접 구독하는 goal_pose를 쓴다. 기능은 같은 Nav2 목표이며 액션은 BT 내부에서 생성된다.
     - Class: rviz_default_plugins/SetGoal
       Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: goal_pose
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
   Value: true
   Views:
     Current:
+      Angle: 1.6049994230270386
       Class: rviz_default_plugins/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Invert Z Axis: false
       Name: Current View
-      Near Clip Distance: 0.01
-      Scale: 22
+      Near Clip Distance: 0.009999999776482582
+      Scale: 42.31793212890625
       Target Frame: <Fixed Frame>
-      X: 0
-      Y: 4
       Value: TopDownOrtho (rviz_default_plugins)
+      X: 0.11274313181638718
+      Y: -2.8932583332061768
+    Saved: ~
 Window Geometry:
-  Height: 900
-  Width: 1400
   Displays:
     collapsed: false
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001cb0000032afc0200000002fb000000100044006900730070006c006100790073010000003d000001e8000000c900fffffffb0000000a00560069006500770073010000022b0000013c000000a400ffffff000003a70000032a00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Views:
+    collapsed: false
+  Width: 1400
+  X: 165
+  Y: 122
