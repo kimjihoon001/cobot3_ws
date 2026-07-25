@@ -62,7 +62,15 @@ class ManipulatorTargetNode(Node):
         # IW 슬롯 선택기가 최근에 발행한 실제 좌표만 사용한다. 오래된 좌표를 들고
         # 이미 떠난 IW를 향해 팔이 다시 움직이지 않도록 유효시간을 둔다.
         self.declare_parameter("basket_pose_max_age_sec", 2.0)
-        self.declare_parameter("use_iw_tf_basket_fallback", True)
+        # IW가 정차하기 전에 좌표를 래치하면 IW가 계속 전진해 과실이 칸 뒤쪽
+        # 격벽으로 떨어진다(2026-07-25: IW가 목표까지 0.4 m 남기고도 pose 발행).
+        # /iw/status에는 "MM 옆 정차" 상태가 없으므로, 발행 pose가 움직이지
+        # 않는 것을 정차 판정으로 쓴다.
+        # 판정은 직전 샘플이 아니라 구간 기준 좌표 대비 변위로 한다 —
+        # 저속으로 계속 기어가는 IW를 정차로 오인하지 않기 위해서다.
+        self.declare_parameter("basket_stable_sec", 2.0)
+        self.declare_parameter("basket_stable_tolerance_m", 0.01)
+        self.declare_parameter("use_iw_tf_basket_fallback", False)
         self.declare_parameter("iw_base_frame", "iwhub_0/base_link")
         # IwHub cargo의 실제 4×2 KLT 격자. [x,y,z]는 IW base_link 기준 release
         # pose이며 z=KLT 윗면+약 5 cm다. 이 표는 /iw/basket/empty_slot_pose가
@@ -187,7 +195,9 @@ class ManipulatorTargetNode(Node):
         #   → 툴 끝은 TCP 앞 57mm. 릴리즈 자세는 연직 하방이라 그대로 아래쪽 여유다.
         #   발행 슬롯 pose = KLT 윗면 + 33.1mm (isaacpjt/iw.py: 0.11205×0.85 − 62.1mm)
         #   ∴ 0.030 + 0.057 − 0.0331 = 0.0539
-        self.declare_parameter("basket_approach_height_m", 0.054)
+        # 2026-07-25 사용자 지시로 2 cm 낮춤(0.054 → 0.034). 낙하 높이가 3 cm
+        # → 1 cm로 줄어 릴리즈 중 과실이 옆으로 빠질 여지를 줄인다.
+        self.declare_parameter("basket_approach_height_m", 0.014)
         # 릴리즈 후 LIN으로 빠져나올 바구니 상부 안전점(릴리즈점 기준 추가 상승).
         # 릴리즈 시 스쿱 끝이 림보다 3cm 위다. 추가 8cm만 수직 후퇴해도
         # 총 11cm 여유라 접기에 충분하며, 기존 15cm LIN 왕복 시간을 줄인다.
@@ -217,7 +227,8 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("basket_z_min", 0.15)
         self.declare_parameter("basket_z_max", 1.80)
         # KLT 중심에서 수평면상 MM(base 원점) 방향으로 최종 릴리즈점을 당긴다.
-        self.declare_parameter("basket_place_toward_mm_m", 0.02)
+        # IW/팔레트 TF의 잔여 수평 오차를 흡수하도록 기본 80 mm를 적용한다.
+        self.declare_parameter("basket_place_toward_mm_m", 0.08)
         self.declare_parameter("workspace_min", [0.15, -1.05, 0.15])
         self.declare_parameter("workspace_max", [1.25, 1.05, 1.80])
         # 데모: 성공/실패 무관 매 시도 후 홈 복귀 → 팔이 안 굳고 다음 과실을 계속 시도한다.
@@ -270,6 +281,8 @@ class ManipulatorTargetNode(Node):
         self._basket_place: np.ndarray | None = None
         self._basket_map_z: float | None = None
         self._basket_received_ns = 0
+        self._basket_stable_since_ns = 0
+        self._basket_stable_ref_xy: np.ndarray | None = None
         # 접힌 홈 경유의 **성공 응답**을 받았는지. 명령 발행만으로 True로 만들지
         # 않는다 — 홈이 실패하면 바구니 접근을 시작하면 안 된다.
         self._place_home_done = False
@@ -535,6 +548,14 @@ class ManipulatorTargetNode(Node):
         if state == self._state:
             return False
         self._state = state
+        if state == "WAIT_BASKET_AT_BED_VIEW":
+            # 접는 동안 PRE_PLACE_BED_VIEW에서 관측한 좌표는 IW가 완전히
+            # 정지하기 전의 것일 수 있다. WAIT 진입 이후에 받은 새 pose만으로
+            # 정차 시간을 다시 측정해 과거 안정 구간을 이어 쓰지 않는다.
+            self._basket_place = None
+            self._basket_received_ns = 0
+            self._basket_stable_since_ns = 0
+            self._basket_stable_ref_xy = None
         self._state_pub.publish(String(data=state))
         self.get_logger().info(f"매니퓰레이터 목표 상태: {state}")
         if stop and bool(self.get_parameter("command_enabled").value):
@@ -892,7 +913,7 @@ class ManipulatorTargetNode(Node):
             # 축방향 직선 삽입/후퇴 — CIRC 원호를 쓰지 않는다.
             command["rmp_target"]["motion"] = "LIN"
             if phase == "GRASP":
-                command["rmp_target"]["velocity_scale"] = 0.05
+                command["rmp_target"]["velocity_scale"] = 0.065
         elif phase in {
             "PREGRASP", "CAPTURE_TRIM", "RETRACT_LIN", "BASKET_RETRACT",
         }:
@@ -902,9 +923,9 @@ class ManipulatorTargetNode(Node):
                 # 반대쪽 등가 IK를 골라 프리그랩에서 크게 도는 현상을 막는다.
                 command["rmp_target"]["lock_joint_1"] = True
             if phase == "CAPTURE_TRIM":
-                command["rmp_target"]["velocity_scale"] = 0.035
+                command["rmp_target"]["velocity_scale"] = 0.0455
             if phase == "BASKET_RETRACT":
-                command["rmp_target"]["velocity_scale"] = 0.45
+                command["rmp_target"]["velocity_scale"] = 0.585
         else:
             command["rmp_target"]["motion"] = "PTP"
         # PREGRASP마다 카메라 광선으로 새 TCP 자세를 만들면 ±360° 범위의 두산 손목이
@@ -1315,16 +1336,28 @@ class ManipulatorTargetNode(Node):
         if not msg.header.frame_id or self._is_stale(msg):
             return
         base_frame = str(self.get_parameter("base_frame").value)
+        timeout = Duration(seconds=float(
+            self.get_parameter("tf_timeout_sec").value))
         try:
-            target = self._buffer.transform(
-                msg, base_frame,
-                timeout=Duration(seconds=float(
-                    self.get_parameter("tf_timeout_sec").value)))
+            target = self._buffer.transform(msg, base_frame, timeout=timeout)
         except TransformException as exc:
-            self.get_logger().warning(
-                f"바스켓 TF 변환 실패 ({msg.header.frame_id} -> {base_frame}): {exc}",
-                throttle_duration_sec=2.0)
-            return
+            # sim clock이 튀면 발행 stamp가 TF 버퍼 구간 밖으로 나가 매번
+            # extrapolation 오류가 난다(2026-07-25: stamp 34.1 vs 버퍼 최초
+            # 42.3). 아래 안정화 게이트가 IW 정차를 보장하므로, 이때는 최신
+            # TF로 다시 시도한다 — 정차 중이면 최신 TF가 곧 그 시각의 TF다.
+            latest = PoseStamped()
+            latest.header.frame_id = msg.header.frame_id
+            latest.header.stamp = Time().to_msg()
+            latest.pose = msg.pose
+            try:
+                target = self._buffer.transform(
+                    latest, base_frame, timeout=timeout)
+            except TransformException:
+                self.get_logger().warning(
+                    "바스켓 TF 변환 실패 "
+                    f"({msg.header.frame_id} -> {base_frame}): {exc}",
+                    throttle_duration_sec=2.0)
+                return
         p = target.pose.position
         values = np.array([p.x, p.y, p.z], dtype=float)
         if not self._basket_reachable(values):
@@ -1349,14 +1382,46 @@ class ManipulatorTargetNode(Node):
             return
         self._basket_place = values
         self._basket_map_z = float(msg.pose.position.z)
-        self._basket_received_ns = self.get_clock().now().nanoseconds
+        now_ns = self.get_clock().now().nanoseconds
+        self._basket_received_ns = now_ns
+        # IW 정차 판정: 구간 시작의 "기준 좌표" 대비 누적 변위로 본다.
+        # 직전 샘플과 비교하면 매 프레임 8 mm씩 꾸준히 기어가는 저속 IW가
+        # 프레임마다 허용오차 안이라 영원히 정차로 오인된다. 기준 좌표를
+        # 고정해두면 그 변위가 누적돼 허용오차를 넘고 구간이 리셋된다.
+        raw_xy = np.array([msg.pose.position.x, msg.pose.position.y])
+        tolerance = float(self.get_parameter("basket_stable_tolerance_m").value)
+        if (self._basket_stable_ref_xy is None
+                or float(np.linalg.norm(raw_xy - self._basket_stable_ref_xy))
+                > tolerance):
+            self._basket_stable_ref_xy = raw_xy
+            self._basket_stable_since_ns = now_ns
+        stable_sec = (now_ns - self._basket_stable_since_ns) * 1e-9
+        # IW 프레임(iwhub_0/base_link)은 MM의 TF 트리에 없다 — IW는 /iwhub_0/tf
+        # 네임스페이스로 발행하고 MM은 /harvester_0/tf만 듣는다. 대신 수신
+        # 원본(map)을 그대로 남긴다. Isaac의 "[IW Basket] prim 원점 map=(...)"
+        # 과 직접 대조하면 발행 XY가 KLT 중앙인지 판정된다(z는 +0.0952 차이).
+        raw = msg.pose.position
         self.get_logger().info(
             "실제 IW 바스켓 좌표 수신: "
-            f"base=({values[0]:.3f}, {values[1]:.3f}, {values[2]:.3f})",
-            throttle_duration_sec=2.0,
-        )
-        if self._state == "WAIT_BASKET_AT_BED_VIEW":
-            self._start_place()
+            f"base=({values[0]:.3f}, {values[1]:.3f}, {values[2]:.3f})"
+            f" | 수신 map=({raw.x:.4f}, {raw.y:.4f}, {raw.z:.4f})"
+            f" | 안정 {stable_sec:.1f}s",
+            throttle_duration_sec=2.0)
+        if self._state != "WAIT_BASKET_AT_BED_VIEW":
+            return
+        required = float(self.get_parameter("basket_stable_sec").value)
+        if stable_sec < required:
+            # IW가 아직 움직인다. 대기 타임아웃을 미뤄 "바구니 없음" 으로
+            # 빠지지 않게 한 뒤, 멈출 때까지 접힌 자세로 기다린다.
+            self._deadline_ns = now_ns + int(
+                (required - stable_sec + float(self.get_parameter(
+                    "basket_wait_timeout_sec").value)) * 1e9)
+            self.get_logger().info(
+                f"IW 정차 대기 — 발행 좌표가 {stable_sec:.1f}s 안정 "
+                f"(필요 {required:.1f}s)",
+                throttle_duration_sec=2.0)
+            return
+        self._start_place()
 
     def _basket_reachable(self, values: np.ndarray) -> bool:
         """바스켓 릴리즈 좌표(base 프레임)가 팔 도달 범위 안인가."""
@@ -1489,10 +1554,21 @@ class ManipulatorTargetNode(Node):
             transform = self._buffer.lookup_transform(
                 base_frame, "harvest_tcp", Time()).transform
             measured = float(transform.translation.z)
+            # XY 실측도 함께 남긴다. 과실은 스쿱 회전중심(=harvest_tcp)에 앉아
+            # 있으므로 낙하점 XY = TCP XY다. 이 오차가 작은데도 KLT 중앙이
+            # 아니면 원인은 팔이 아니라 발행 슬롯 좌표다.
+            mx = float(transform.translation.x)
+            my = float(transform.translation.y)
+            lateral = math.hypot(mx - float(self._basket_release[0]),
+                                 my - float(self._basket_release[1]))
             message += (
                 f" | TF 실측 harvest_tcp z={measured:.4f}, "
                 f"스쿱 최저점 z={measured - tip_offset:.4f}, "
-                f"여유={measured - tip_offset - rim_base:.4f} m(지연 가능)")
+                f"여유={measured - tip_offset - rim_base:.4f} m(지연 가능)"
+                f" | TF 실측 XY=({mx:.4f}, {my:.4f}) vs 명령 XY="
+                f"({float(self._basket_release[0]):.4f}, "
+                f"{float(self._basket_release[1]):.4f}) → 횡오차="
+                f"{lateral:.4f} m")
         except TransformException as exc:
             message += f" | TF 실측 실패: {exc}"
         self.get_logger().info(message)

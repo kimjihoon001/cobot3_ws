@@ -50,6 +50,12 @@ class MissionNavNode(Node):
         self.declare_parameter("mm_base_frame", "base_link")
         self.declare_parameter("iw_odom_topic", "/iwhub_0/odom")
         self.declare_parameter("iw_tf_topic", "/iwhub_0/tf")
+        # DOCK_ALIGN은 controller_server와 같은 velocity_smoother 입력으로
+        # 보낸다. smoother 출력(/cmd_vel)에 직접 publish하면 Nav2의 정지
+        # 출력과 두 publisher가 서로 덮어써 실제 바퀴가 움직이지 않는다.
+        self.declare_parameter(
+            "dock_cmd_topic", "/iwhub_0/cmd_vel_nav"
+        )
         # 도킹 standoff: MM 중심에서 IW 접근 방향으로 이 거리에 비접촉 정차점을 둔다.
         # 하한(비접촉) ≈ MM반경 + IW앞0.40 + 여유0.10, 상한 ≈ 팔 도달반경(~1.35).
         # 플레이스 때 1번 링크가 지면과 수평에 가깝게 완전 신전되어, 그리퍼
@@ -69,7 +75,7 @@ class MissionNavNode(Node):
             "dock_align_yaw_tolerance", math.radians(2.0)
         )
         self.declare_parameter("dock_align_max_linear_speed", 0.08)
-        self.declare_parameter("dock_align_max_angular_speed", 0.15)
+        self.declare_parameter("dock_align_max_angular_speed", 0.60)
         self.declare_parameter("dock_align_settle_sec", 1.0)
         self.declare_parameter("dock_align_timeout_sec", 45.0)
 
@@ -94,7 +100,7 @@ class MissionNavNode(Node):
         self._amr_docked_pub = self.create_publisher(
             Bool, "/forklift/amr_docked", latched)
         self._dock_cmd_pub = self.create_publisher(
-            Twist, "/iwhub_0/cmd_vel", 10
+            Twist, str(self.get_parameter("dock_cmd_topic").value), 10
         )
         # iw→MM 복귀 완료 신호 — MM(수확 FSM)이 이걸 받아 다음 수확을 재개한다.
         self._resume_pub = self.create_publisher(
@@ -151,6 +157,7 @@ class MissionNavNode(Node):
         self._dock_align_started: float | None = None
         self._dock_align_stable_since: float | None = None
         self._dock_align_log_at = 0.0
+        self._dock_align_stage = "POSITION"
         self._follow_goal_handle = None    # active FOLLOW goal handle (cancel 용)
         self._goal_gen = 0                 # goal 세대 ID — 취소/교체된 goal의 늦은 콜백 무시
         self._started_at = time.monotonic()
@@ -360,7 +367,8 @@ class MissionNavNode(Node):
             if self._iw_pose is None:
                 return   # 레인 경로 계획에 현재 map pose 필요
             if self._dock_phase == "APPROACH":
-                self._send_dock_route()
+                if not self._send_dock_route():
+                    return
             else:                        # RETURNING — MM 부근으로 복귀
                 if not self._send_return_route():
                     return               # MM TF 아직 — 다음 주기 재시도
@@ -420,10 +428,11 @@ class MissionNavNode(Node):
         self._dock_align_started = time.monotonic()
         self._dock_align_stable_since = None
         self._dock_align_log_at = 0.0
+        self._dock_align_stage = "POSITION"
         self._publish_dock_cmd(0.0, 0.0)
         self.get_logger().info(
             f"IW DOCK_ALIGN 시작: {reason} — "
-            "고정 도크 X/Y와 yaw를 저속으로 동시 보정"
+            "위치 보정 후 정지, 마지막에 yaw만 제자리 보정"
         )
 
     def _stop_dock_alignment(self) -> None:
@@ -499,36 +508,61 @@ class MissionNavNode(Node):
             self.get_parameter("dock_align_max_angular_speed").value
         )
         linear = 0.0
-        angular = max(-max_angular, min(max_angular, 0.9 * yaw_error))
-        # base_node의 각속도 재시작 deadband(0.04rad/s)보다 작은 명령은
-        # 실제 바퀴까지 전달되지 않아 약 2도에서 영원히 멈춘다. 허용오차
-        # 밖에서는 방향을 유지한 최소 0.045rad/s를 보내 최종 yaw를 끝낸다.
-        if (
-            abs(yaw_error) > yaw_tolerance
-            and abs(angular) < 0.045
-        ):
-            angular = math.copysign(0.045, yaw_error)
-        if position_error > position_tolerance:
+        angular = 0.0
+
+        if self._dock_align_stage == "POSITION":
+            if position_error <= position_tolerance:
+                # 위치와 최종 yaw를 한 제어식에 섞으면 전진/후진 판정 경계에서
+                # 회전 부호가 뒤집힌다. 한 tick 완전히 정지한 뒤 yaw 단계로 간다.
+                self._dock_align_stage = "YAW"
+                self._publish_dock_cmd(0.0, 0.0)
+                self.get_logger().info(
+                    f"IW DOCK_ALIGN 위치 완료: xy={position_error:.3f}m "
+                    "→ 제자리 yaw 보정"
+                )
+                return
             bearing = math.atan2(error_y, error_x)
             forward_error = self._wrap(bearing - yaw)
             direction = 1.0
             if abs(forward_error) > math.pi / 2.0:
                 direction = -1.0
                 forward_error = self._wrap(forward_error - math.pi)
-            linear = direction * min(
-                max_linear, max(0.02, 0.7 * position_error)
-            )
-            # 위치를 향하는 조향과 최종 yaw를 함께 반영한다.
             angular = max(
                 -max_angular,
-                min(max_angular, 1.2 * forward_error + 0.35 * yaw_error),
+                min(max_angular, 1.2 * forward_error),
             )
+            # 목표점 방향을 먼저 맞춘 뒤 이동한다. 큰 각도 오차에서 전진까지
+            # 동시에 시키면 벽 쪽으로 원호를 그리며 footprint가 충돌한다.
+            if abs(forward_error) <= math.radians(15.0):
+                linear = direction * min(
+                    max_linear, max(0.02, 0.7 * position_error)
+                )
+        else:
+            # YAW 단계에서는 위치 보정을 절대 섞지 않는다. 회전 중 물리적으로
+            # 8cm 이상 밀리면 반대편으로 되돌아가지 않고 정지 후 재접근한다.
+            if position_error > max(0.08, 2.0 * position_tolerance):
+                self._stop_dock_alignment()
+                self._dock_phase = "APPROACH"
+                self._dock_goal_sent = False
+                self.get_logger().warning(
+                    "IW DOCK_ALIGN 회전 중 위치 이탈 → Nav2 재접근: "
+                    f"xy_error={position_error:.3f}m"
+                )
+                return
+            angular = max(
+                -max_angular, min(max_angular, 0.9 * yaw_error)
+            )
+            # base_node의 각속도 재시작 deadband보다 작은 명령은 실제 바퀴까지
+            # 전달되지 않는다. 허용오차 밖에서는 최소 회전 명령을 유지한다.
+            if abs(yaw_error) > yaw_tolerance and abs(angular) < 0.045:
+                angular = math.copysign(0.045, yaw_error)
         self._publish_dock_cmd(linear, angular)
 
         if now - self._dock_align_log_at >= 1.0:
             self._dock_align_log_at = now
             self.get_logger().info(
                 "IW DOCK_ALIGN: "
+                f"stage={self._dock_align_stage}, "
                 f"xy={position_error:.3f}m, "
                 f"yaw={math.degrees(yaw_error):.1f}deg, "
                 f"cmd=({linear:.3f}m/s,{angular:.3f}rad/s)"
@@ -659,15 +693,25 @@ class MissionNavNode(Node):
             target=target,
         )
 
-    def _send_dock_route(self) -> None:
+    def _send_dock_route(self) -> bool:
         """현재 위치→지게차 도크까지 통로 레인 경로를 NavigateThroughPoses로 보낸다."""
         iw_x, iw_y, iw_yaw = self._iw_pose
-        route = lanes.dock_route(iw_x, iw_y, iw_yaw)
+        try:
+            route = lanes.dock_route(iw_x, iw_y, iw_yaw)
+        except ValueError as exc:
+            # 경로 입력이 일시적으로 유효하지 않아도 0.5초 타이머를 죽이지 않고
+            # 다음 pose에서 재시도한다.
+            self.get_logger().error(
+                f"IW 도크 레인 경로 생성 실패, 재시도: {exc}",
+                throttle_duration_sec=3.0,
+            )
+            return False
         self._send_through_route(
             route,
             "DOCK",
             f"IW 도크 레인 경로 {len(route)}웨이포인트 (시작 {iw_x:.1f},{iw_y:.1f} "
             f"→ 도크 {lanes.DOCK[0]:.1f},{lanes.DOCK[1]:.1f})")
+        return True
 
     def _send_return_route(self) -> bool:
         """도크→MM 부근 복귀 경로 전송. MM TF 없으면 False(다음 주기 재시도)."""

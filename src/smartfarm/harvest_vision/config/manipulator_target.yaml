@@ -9,7 +9,10 @@ manipulator_target_node:
     rmp_status_topic: /harvester_0/rmpflow/status
     basket_pose_topic: /iw/basket/empty_slot_pose
     basket_pose_max_age_sec: 2.0
-    use_iw_tf_basket_fallback: true
+    # 실제 슬롯 pose가 WAIT_BASKET 진입 후 정지 상태로 2초 연속 관측돼야 한다.
+    # IW TF 폴백은 정차 여부를 증명할 수 없으므로 통합 운전에서는 사용하지 않는다.
+    use_iw_tf_basket_fallback: false
+    basket_stable_sec: 2.0
     iw_base_frame: iwhub_0/base_link
     # 팔레트 중심은 base_link가 아니라 실측 chassis bbox 중심(-0.3171 m)이다.
     # 격자 ±0.465/±0.155 + 이 오프셋 = 실제 release pose (8칸 모두 빈 슬롯).
@@ -75,17 +78,17 @@ manipulator_target_node:
     # IW(바스켓) 없으면 파지한 채 홈으로 복귀(그리퍼 안 엶). True 라 RETRACT→_send_home.
     home_after_attempt: true
     retry_after_failure: false
-    # 그리퍼 끝이 KLT 윗면 3cm 위에 오는 릴리즈 높이(슬롯 pose 기준).
-    # 0.030(여유) + 0.057(TCP→스쿱 끝) − 0.0331(슬롯 pose가 이미 윗면 위) = 0.054
-    basket_approach_height_m: 0.054
+    # 기존 릴리즈 TCP 높이에서 20mm 더 낮춘다.
+    # 슬롯 pose 기준 +14mm이며 스쿱 최저점은 KLT 윗면보다 약 10mm 낮다.
+    basket_approach_height_m: 0.014
     # 접힘 자세에서 바구니 pose를 기다리는 시간(일반 motion_timeout_sec와 분리).
     basket_wait_timeout_sec: 2.0
     # KLT는 MM 측후방에 놓인다. 축정렬 상자가 아니라 수평 반경으로 판정한다.
     basket_max_reach_m: 1.45
     basket_z_min: 0.15
     basket_z_max: 1.80
-    # KLT 중심에서 수평면상 MM 방향으로 2cm 이동한 릴리즈점.
-    basket_place_toward_mm_m: 0.02
+    # KLT 중심에서 XY 평면상 MM base_link 원점 방향으로 80mm 이동한 릴리즈점.
+    basket_place_toward_mm_m: 0.08
 
     # base_frame 기준 허용 작업영역 [x, y, z] (m). 실제 로봇/환경에 맞춰 축소한다.
     # 팔을 대각선으로 완전히 펴는 자세도 허용한다. 최종 안전 한계는 별도의

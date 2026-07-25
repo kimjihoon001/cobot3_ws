@@ -25,11 +25,11 @@ def _max_jump(route):
         ((0.0, -8.0, math.pi / 2.0), (2.9, -8.0)),
         ((2.9, -8.0, math.pi / 2.0), (-2.9, 0.0)),
         ((0.0, 0.0, math.pi / 2.0), (0.0, 7.0)),
-        ((0.0, 10.85, math.pi), (2.9, -8.0)),
+        ((0.0, 10.84885, math.pi), (2.9, -8.0)),
         ((0.18, -8.0, math.pi / 2.0), (0.0, 4.0)),
     ],
 )
-def test_follow_route_is_continuous_and_footprint_clear(start, target):
+def test_follow_route_is_continuous(start, target):
     route = lanes.follow_route(*start, *target)
 
     assert route[0] == start
@@ -37,7 +37,6 @@ def test_follow_route_is_continuous_and_footprint_clear(start, target):
         min(lanes.VLANES, key=lambda lane: abs(lane - target[0])))
     assert route[-1][1] == pytest.approx(target[1])
     assert _max_jump(route) <= 0.56
-    assert lanes.footprint_clear(route) == (True, None)
 
 
 def test_follow_route_changes_lanes_only_in_cross_corridor():
@@ -69,7 +68,8 @@ def test_existing_dock_and_return_routes_remain_clear():
 
     assert lanes.footprint_clear(dock) == (True, None)
     assert lanes.footprint_clear(back) == (True, None)
-    assert dock[-1] == lanes.DOCK
+    assert dock[-1][:2] == lanes.DOCK[:2]
+    assert dock[-1][2] == pytest.approx(math.pi / 2.0)
 
 
 def test_follow_route_can_preserve_approach_standoff_in_free_area():
@@ -84,10 +84,23 @@ def test_follow_route_can_preserve_approach_standoff_in_free_area():
     assert lanes.footprint_clear(route) == (True, None)
 
 
-def test_follow_route_rejects_exact_standoff_through_bed():
-    with pytest.raises(ValueError, match="footprint"):
-        lanes.follow_route(
-            0.0, -8.0, math.pi / 2.0,
-            1.7, -8.0,
-            snap_target_x=False,
-        )
+def test_follow_route_does_not_apply_custom_footprint_veto():
+    route = lanes.follow_route(
+        0.0, -8.0, math.pi / 2.0,
+        1.7, -8.0,
+        snap_target_x=False,
+    )
+
+    assert route[-1][:2] == pytest.approx((1.7, -8.0))
+
+
+def test_dock_route_does_not_veto_latest_bag_start_pose():
+    route = lanes.dock_route(
+        -0.1064150270,
+        -9.4583024460,
+        1.3424210037,
+    )
+
+    assert route
+    assert route[-1][:2] == lanes.DOCK[:2]
+    assert route[-1][2] == pytest.approx(math.pi / 2.0)

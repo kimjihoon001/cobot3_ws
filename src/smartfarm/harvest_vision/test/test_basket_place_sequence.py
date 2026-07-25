@@ -99,6 +99,8 @@ def test_fold_keeps_j1_and_is_confirmed_by_response(node):
     assert node._place_home_done is True
     assert node._state == "WAIT_BASKET_AT_BED_VIEW"
 
+    # WAIT 진입 전에 받은 좌표는 폐기되므로 정지 후 새 좌표가 필요하다.
+    _arm_at_basket(node)
     node._start_place()                     # 바구니 있음 → 방위 회전부터
     assert node._state == "BASKET_AZIMUTH_ALIGN"
 
@@ -128,7 +130,7 @@ def test_azimuth_align_runs_before_the_arm_extends(node):
     assert node._state == "BASKET_AZIMUTH_ALIGN"
     aligns = node._isaac_command_pub.aligns()
     assert len(aligns) == 1
-    assert aligns[0]["position"][2] == pytest.approx(0.342, abs=1e-6)
+    assert aligns[0]["position"][2] == pytest.approx(0.302, abs=1e-6)
     assert node._isaac_command_pub.targets() == []
 
     _motion_done(node)                      # 정렬 성공 응답
@@ -136,8 +138,11 @@ def test_azimuth_align_runs_before_the_arm_extends(node):
     assert node._isaac_command_pub.phases() == ["BASKET_APPROACH"]
 
 
-def test_release_height_puts_the_tool_tip_3cm_above_the_klt(node):
-    """슬롯 z=0.288 → 릴리즈 z=0.342. 그리퍼 끝이 KLT 윗면 3cm 위."""
+def test_release_height_puts_the_tool_tip_1cm_below_the_klt_rim(node):
+    """슬롯 z=0.288 → 릴리즈 z=0.302. 스쿱 끝이 KLT 윗면 1cm 아래.
+
+    2026-07-26 사용자 지시로 기존 릴리즈 높이에서 2cm 더 낮췄다.
+    """
     node._place_home_done = True
     node._transition("WAIT_BASKET_AT_BED_VIEW")
     _arm_at_basket(node, slot_z=0.288)
@@ -146,19 +151,19 @@ def test_release_height_puts_the_tool_tip_3cm_above_the_klt(node):
 
     targets = node._isaac_command_pub.targets()
     assert [t["phase"] for t in targets] == ["BASKET_APPROACH"]
-    assert targets[0]["position"][2] == pytest.approx(0.342, abs=1e-6)
-    # IW가 발행한 KLT 중심에서 수평면상 MM 원점 방향으로 정확히 2cm 이동한다.
+    assert targets[0]["position"][2] == pytest.approx(0.302, abs=1e-6)
+    # IW가 발행한 KLT 중심에서 XY 평면상 MM 원점 방향으로 정확히 80mm 이동한다.
     center_xy = np.array([-1.209, 0.536])
-    expected_xy = center_xy * (1.0 - 0.02 / np.linalg.norm(center_xy))
+    expected_xy = center_xy * (1.0 - 0.08 / np.linalg.norm(center_xy))
     actual_xy = np.asarray(targets[0]["position"][:2])
     assert actual_xy == pytest.approx(expected_xy, abs=1e-6)
     assert np.linalg.norm(actual_xy - center_xy) == pytest.approx(
-        0.02, abs=1e-6)
+        0.08, abs=1e-6)
     # 슬롯 pose는 이미 KLT 윗면 +0.0331 m다. 툴 끝(TCP 앞 0.057 m)이 윗면에서
-    # 0.030 m 뜨는 높이여야 한다.
+    # 0.010 m 들어가는 높이여야 한다.
     klt_top = 0.288 - 0.0331
     assert targets[0]["position"][2] - 0.057 - klt_top == pytest.approx(
-        0.030, abs=1e-3)
+        -0.010, abs=1e-3)
 
     _motion_done(node)                      # 릴리즈점 도달
     assert node._state == "PLACE_RELEASING"
@@ -264,3 +269,96 @@ def test_fold_failure_keeps_fruit_and_stops(node):
     assert node._state == "PLACE_FAILED_HOLDING"
     assert node._place_home_done is False
     assert node._isaac_command_pub.messages == []
+
+
+def _publish_basket(node, x, y, z=0.588):
+    """map 프레임 슬롯 pose 발행을 흉내낸다(TF 없이 base로 그대로 통과)."""
+    from geometry_msgs.msg import PoseStamped
+
+    msg = PoseStamped()
+    msg.header.frame_id = "map"
+    msg.pose.position.x = x
+    msg.pose.position.y = y
+    msg.pose.position.z = z
+    msg.pose.orientation.w = 1.0
+
+    class _Passthrough:
+        @staticmethod
+        def transform(source, target_frame, timeout=None):
+            out = PoseStamped()
+            out.header.frame_id = target_frame
+            out.pose.position.x = source.pose.position.x
+            out.pose.position.y = source.pose.position.y
+            out.pose.position.z = source.pose.position.z - 0.3
+            return out
+
+    node._buffer.transform = _Passthrough.transform
+    node._basket_callback(msg)
+
+
+def test_place_waits_until_the_iw_pose_stops_moving(node):
+    """IW가 이동 중(발행 좌표가 계속 바뀜)이면 플레이스를 시작하지 않는다.
+
+    2026-07-25: IW가 목표까지 0.4 m 남은 상태에서도 pose를 발행했고, 그 좌표를
+    래치하면 IW가 계속 전진해 과실이 칸 뒤쪽 격벽으로 떨어진다.
+    """
+    node._place_home_done = True
+    node._transition("WAIT_BASKET_AT_BED_VIEW")
+    node._isaac_command_pub.messages.clear()
+
+    _publish_basket(node, -1.10, 0.45)          # 첫 수신 → 안정 0초
+    _publish_basket(node, -1.10, 0.65)          # 20cm 이동 → 안정 타이머 리셋
+    assert node._state == "WAIT_BASKET_AT_BED_VIEW"
+    assert node._isaac_command_pub.aligns() == []   # 플레이스 미시작
+
+    # 좌표가 멈춘 뒤 필요한 안정 시간이 지나면 시작한다.
+    node._basket_stable_since_ns -= int(
+        (float(node.get_parameter("basket_stable_sec").value) + 0.1) * 1e9)
+    _publish_basket(node, -1.10, 0.65)
+    assert node._state == "BASKET_AZIMUTH_ALIGN"
+    assert len(node._isaac_command_pub.aligns()) == 1
+
+
+def test_wait_basket_discards_stability_accumulated_while_folding(node):
+    """접는 동안 쌓인 안정 시간으로 WAIT 진입 직후 출발하면 안 된다."""
+    node._place_home_done = False
+    node._transition("PRE_PLACE_BED_VIEW")
+    _publish_basket(node, -1.10, 0.45)
+    node._basket_stable_since_ns -= int(
+        (float(node.get_parameter("basket_stable_sec").value) + 0.1) * 1e9)
+
+    node._place_home_done = True
+    node._transition("WAIT_BASKET_AT_BED_VIEW")
+    node._isaac_command_pub.messages.clear()
+    _publish_basket(node, -1.10, 0.45)
+
+    assert node._state == "WAIT_BASKET_AT_BED_VIEW"
+    assert node._isaac_command_pub.aligns() == []
+
+
+def test_slowly_creeping_iw_is_never_treated_as_stopped(node):
+    """매 프레임 8 mm씩 계속 이동하는 IW를 정차로 오인하지 않는다.
+
+    직전 샘플과만 비교하면 8 mm < 허용오차 10 mm 라 매번 "안정"으로 보여
+    영원히 정차 판정이 난다. 구간 기준 좌표 대비 누적 변위로 봐야 한다.
+    """
+    node._place_home_done = True
+    node._transition("WAIT_BASKET_AT_BED_VIEW")
+    node._isaac_command_pub.messages.clear()
+
+    required = float(node.get_parameter("basket_stable_sec").value)
+    y = 0.45
+    for step in range(40):                     # 프레임마다 8 mm 전진
+        _publish_basket(node, -1.10, y)
+        y += 0.008
+        # 시간이 충분히 흘러도(구간 길이 초과) 정차로 보면 안 된다.
+        node._basket_stable_since_ns -= int((required + 0.1) * 1e9 / 20)
+
+    assert node._state == "WAIT_BASKET_AT_BED_VIEW"
+    assert node._isaac_command_pub.aligns() == []
+
+    # 멈추면(같은 좌표 반복) 정상적으로 정차로 판정한다.
+    _publish_basket(node, -1.10, y)
+    node._basket_stable_since_ns -= int((required + 0.1) * 1e9)
+    _publish_basket(node, -1.10, y)
+    assert node._state == "BASKET_AZIMUTH_ALIGN"

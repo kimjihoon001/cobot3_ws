@@ -44,7 +44,7 @@ class MMMotionBridge(Node):
         # 기존 harvest_moveit/grasp_proto의 스쿱 수용 정밀도와 동일하다.
         self.declare_parameter("position_tolerance_m", 0.0025)
         self.declare_parameter("planning_time_sec", 8.0)
-        self.declare_parameter("velocity_scale", 0.50)
+        self.declare_parameter("velocity_scale", 0.65)
         self.declare_parameter("acceleration_scale", 0.30)
         self.declare_parameter(
             "planning_pipeline", "pilz_industrial_motion_planner")
@@ -201,7 +201,7 @@ class MMMotionBridge(Node):
                 "GO_HOME",
                 self._joint_goal(
                     HOME_Q,
-                    velocity_scale=0.70 if fast else None,
+                    velocity_scale=0.91 if fast else None,
                     acceleration_scale=0.50 if fast else None,
                 ),
             )
@@ -242,7 +242,7 @@ class MMMotionBridge(Node):
                 request_id, phase,
                 self._joint_goal(
                     positions,
-                    velocity_scale=0.70 if fast else None,
+                    velocity_scale=0.91 if fast else None,
                     acceleration_scale=0.50 if fast else None,
                 ))
             return
@@ -662,10 +662,10 @@ class MMMotionBridge(Node):
         # 전반적으로 조금 빠르게. GRASP(0.05)·CAPTURE_TRIM(0.035)은 명시 velocity_scale
         # 오버라이드라 그대로 저속 유지된다. LIN 은 삽입/후퇴 공용이므로 과하지 않게.
         goal.request.max_velocity_scaling_factor = {
-            "OMPL": 0.35,
-            "PTP": 0.40,
-            "LIN": 0.15,
-            "CIRC": 0.15,
+            "OMPL": 0.455,
+            "PTP": 0.52,
+            "LIN": 0.195,
+            "CIRC": 0.195,
         }[motion] if velocity_scale is None else velocity_scale
         goal.request.max_acceleration_scaling_factor = 0.30
         constraint = Constraints()

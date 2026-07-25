@@ -77,6 +77,8 @@ class MMDriver(Driver):
         self._follow_status = {}
         self._tcp_status = {}
         self._verified_fruit_path: str | None = None
+        self._verified_fruit_id = -1           # 릴리즈 시 낙하점 측정용
+        self._release_pub = None
         # 레거시 follow_check용 상대 위치 기준값. 과실을 부착하거나 위치 보정하는 데
         # 사용하지 않고, 스쿱 안에서 물리적으로 함께 이동했는지만 측정한다.
         self._grasp_tcp_offset: np.ndarray | None = None
@@ -171,6 +173,13 @@ class MMDriver(Driver):
                     f"/World/RosSimTomato_{self.ns}",
                     f"/{self.ns}/sim/tomato")
                 self._fruit_pub = RB.StringPublisher(fruit_pub)
+                # 릴리즈 순간 과실-TCP 오프셋 진단. 제어용 status 채널(120 byte
+                # 제한)을 건드리지 않도록 전용 토픽으로 분리한다. stdout print는
+                # rosbag에 안 남아 진단이 불가능했다(2026-07-25).
+                release_pub = RB.build_string_pub(
+                    f"/World/RosScoopRelease_{self.ns}",
+                    f"/{self.ns}/scoop/release_debug")
+                self._release_pub = RB.StringPublisher(release_pub)
             except Exception:
                 ros_fail("MM 조인트/명령 브리지")
             if opts.camera:
@@ -186,7 +195,7 @@ class MMDriver(Driver):
                     tf_namespace=self.ns,
                     # Ridgeback은 기존 MM 규약대로 x 전진/후진 + z 회전만 허용한다.
                     # y 횡이동은 Nav2 설정과 Isaac 적용부 양쪽에서 차단한다.
-                    max_vx=0.8,
+                    max_vx=1.2,
                     max_vy=0.0,
                     max_wz=8.0,
                     # MoveIt URDF의 이동 베이스 루트. robot_state_publisher가
@@ -325,6 +334,7 @@ class MMDriver(Driver):
                         print(f"[Scoop] {'CLOSE' if self._gripper_closed else 'OPEN'}")
                         self._apply_scoop()
                         if not self._gripper_closed:
+                            self._log_release_offset()
                             self._pending_grasp_check = None
                             self._cut_status = {}
                     if "blade" in cmd:
@@ -446,6 +456,35 @@ class MMDriver(Driver):
                 return fruit, self._fruit_center_world(fruit["path"])
         return None, None
 
+    def _log_release_offset(self) -> None:
+        """스쿱을 여는 순간 과실이 TCP에서 얼마나 벗어나 있는지 남긴다.
+
+        MM은 릴리즈점을 TCP 기준으로 명령하지만 과실은 스쿱 안에서 굴러 이동할
+        수 있다. GRASP 때 0.9mm였던 오프셋이 릴리즈 시점에도 유지되는지가
+        KLT 중앙 낙하의 마지막 미검증 구간이다(KLT 내부 여유 y ±0.040 m).
+        """
+        if self._verified_fruit_id < 0:
+            return
+        fruit_id, self._verified_fruit_id = self._verified_fruit_id, -1
+        _, center = self._ripe_by_id(fruit_id)
+        tcp = self._tcp_world()
+        if center is None or tcp is None:
+            print(f"[Scoop] release fruit_id={fruit_id} "
+                  "측정 실패(과실/TCP 좌표 없음)")
+            return
+        delta = center - tcp
+        lateral = float(np.linalg.norm(delta[:2]))
+        print(f"[Scoop] release fruit_id={fruit_id} "
+              f"과실-TCP dx={float(delta[0]):+.4f} dy={float(delta[1]):+.4f} "
+              f"dz={float(delta[2]):+.4f} → 횡오프셋={lateral:.4f} m")
+        if self._release_pub is not None:
+            self._release_pub.publish(json.dumps({
+                "fruit_id": fruit_id,
+                "fruit_map": [round(float(v), 4) for v in center],
+                "tcp_map": [round(float(v), 4) for v in tcp],
+                "lateral": round(lateral, 4),
+            }, separators=(",", ":")))
+
     def _handle_grasp_check(self, request) -> None:
         """스쿱이 닫힌 상태에서 선택한 과실이 수용 범위 안에 있는지만 확인한다."""
         self._follow_status = {}
@@ -479,6 +518,7 @@ class MMDriver(Driver):
             else None
         )
         self._verified_fruit_path = fruit_path if success else None
+        self._verified_fruit_id = fruit_id if success else -1
         self._grasp_status = {
             "grasp_id": check_id, "ok": success,
             "fruit_id": fruit_id,

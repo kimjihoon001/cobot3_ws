@@ -111,16 +111,16 @@ controller_server:
       debug_trajectory_details: true
       min_vel_x: -0.3
       min_vel_y: 0.0
-      max_vel_x: 0.8
+      max_vel_x: 1.2
       max_vel_y: 0.0
       max_vel_theta: 8.0
       min_speed_xy: 0.0
-      max_speed_xy: 0.8
+      max_speed_xy: 1.2
       min_speed_theta: 0.0
-      acc_lim_x: 0.8
+      acc_lim_x: 1.2
       acc_lim_y: 1.0
       acc_lim_theta: 6.0
-      decel_lim_x: -1.5
+      decel_lim_x: -2.25
       decel_lim_y: -1.0
       decel_lim_theta: -6.0
       vx_samples: 20
@@ -136,7 +136,9 @@ controller_server:
       stateful: true
       critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
                 "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.02
+      # 거리/경로 추종보다 장애물 주변 cost를 충분히 비싸게 평가해
+      # 피항 시에도 베드 가장자리 대신 통로의 낮은-cost 쪽을 선택한다.
+      BaseObstacle.scale: 2.0
       PathAlign.scale: 32.0
       PathAlign.forward_point_distance: 0.1
       GoalAlign.scale: 24.0
@@ -185,11 +187,13 @@ local_costmap:
         #           (2026-07-20 실측: 0.30 으로 뒀더니 nav2 가 정확히 이 에러를 냈다)
         #     상한: inflation_radius <  통로 반폭 0.75m (= 1.5m / 2).
         #           넘으면 통로 중앙까지 비용이 깔려 중앙 주행선이 사라진다.
-        #   0.41 <= r < 0.75 → 0.45 채택(하한에 여유 0.04). Carter 기본 0.55 도 이 범위
-        #   안이라 사실 그대로 써도 됐다 — 통로가 좁아 못 쓴다던 최초 판단은 틀렸다.
+        #   0.41 <= r < 0.75 → 0.70 채택. 통로 중앙까지 낮은 비용 구배를 남겨
+        #   플래너와 DWB가 장애물에서 먼 쪽을 명확히 선호하게 한다.
         #   ※ 인플레이션은 '비용'이지 '차단'이 아니다. 차단하는 건 내접반경 안쪽뿐.
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.45
+        # 내접반경(~0.40m) 바로 밖 5cm에서 비용이 사라지지 않게 구배를
+        # 넓힌다. 낮은 factor는 거리에 따른 cost를 더 천천히 감소시킨다.
+        cost_scaling_factor: 2.0
+        inflation_radius: 0.70
       always_send_full_costmap: true
 
 global_costmap:
@@ -223,8 +227,8 @@ global_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.45      # local_costmap 과 동일 근거(내접 0.41 <= r < 통로반폭 0.75)
+        cost_scaling_factor: 2.0
+        inflation_radius: 0.70      # 1.5m 통로 반폭 0.75m 안에서 넓은 cost 구배 유지
       always_send_full_costmap: true
 
 map_server:
@@ -322,10 +326,10 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
     # 배열 순서는 [x, y, theta]. y는 0으로 고정해 횡이동을 차단한다.
-    max_velocity: [0.8, 0.0, 8.0]
+    max_velocity: [1.2, 0.0, 8.0]
     min_velocity: [-0.3, 0.0, -8.0]
-    max_accel: [0.8, 1.0, 6.0]
-    max_decel: [-1.5, -1.0, -6.0]
+    max_accel: [1.2, 1.0, 6.0]
+    max_decel: [-2.25, -1.0, -6.0]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
