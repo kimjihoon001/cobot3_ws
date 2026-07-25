@@ -457,6 +457,34 @@ def build_camera(stage, graph_path: str, camera_prim: str, cam,
     return cam.rgb_topic, cam.depth_topic
 
 
+def build_rgb_camera(stage, graph_path: str, camera_prim: str, topic: str,
+                     width: int, height: int, frame_id: str = "map",
+                     domain_id: int = DOMAIN_ID, log=print) -> str:
+    """고정 감시 카메라 → RGB 1스트림만 발행. 반환: 토픽명.
+
+    build_camera() 는 같은 렌더프로덕트에 depth·camera_info 헬퍼까지 붙인다.
+    모니터링 화면은 사람이 보기만 하므로 depth 렌더를 빼서 카메라당 GPU
+    비용을 줄인다. nodeNamespace 를 비워 topic 을 절대 경로로 그대로 쓴다.
+    """
+    _edit(graph_path,
+          [("OnTick", T["OnTick"]), ("Ctx", T["Ctx"]), ("RP", T["RenderProduct"]),
+           ("Rgb", T["CamHelper"])],
+          [("OnTick.outputs:tick", "RP.inputs:execIn"),
+           ("RP.outputs:execOut", "Rgb.inputs:execIn"),
+           ("Ctx.outputs:context", "Rgb.inputs:context"),
+           ("RP.outputs:renderProductPath", "Rgb.inputs:renderProductPath")],
+          [("Ctx.inputs:domain_id", domain_id),
+           ("Ctx.inputs:useDomainIDEnvVar", False),
+           ("RP.inputs:width", width),
+           ("RP.inputs:height", height),
+           ("Rgb.inputs:type", "rgb"),
+           ("Rgb.inputs:topicName", topic),
+           ("Rgb.inputs:frameId", frame_id)])
+    _set_target(stage, f"{graph_path}/RP", "inputs:cameraPrim", camera_prim)
+    log(f"[MonitorCam] {topic} ({width}x{height}, {camera_prim})")
+    return topic
+
+
 def build_d455(stage, graph_path: str, sensor_paths: dict[str, str], cam,
                domain_id: int = DOMAIN_ID, log=print) -> None:
     """D455 전체 스트림을 서로 다른 원본 센서 extrinsic으로 발행한다.
