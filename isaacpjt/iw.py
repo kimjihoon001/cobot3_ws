@@ -40,7 +40,11 @@ class IwDriver(Driver):
     def finalize(self, world, stage, opts):
         self._stage = stage
         self._iw.load_cargo(
-            stage, self._cfg.tomato_assets, self._cfg.physics)
+            stage,
+            self._cfg.tomato_assets,
+            self._cfg.physics,
+            pallet_phys_cfg=self._cfg.warehouse.pallet_physics,
+        )
         self._warehouse_dock = WarehouseDockController(
             stage, self.robot, self.art
         )
@@ -72,6 +76,8 @@ class IwDriver(Driver):
 
     def update(self, is_playing: bool):
         """실측 데크 높이를 ROS 지게차 제어기에 계속 제공한다."""
+        if is_playing and self._warehouse_dock is not None:
+            self._warehouse_dock.update()
         if (
             not is_playing
             or self._warehouse_dock is None
@@ -138,6 +144,30 @@ class IwDriver(Driver):
         return bool(
             self._warehouse_dock
             and self._warehouse_dock.set_pallet_on_deck(attached, pallet_id)
+        )
+
+    def has_warehouse_pallet_attached(self) -> bool:
+        return bool(
+            self._warehouse_dock
+            and self._warehouse_dock.pallet_on_deck
+        )
+
+    def set_warehouse_pallet_deck_collision_filtered(
+        self, filtered: bool, pallet_id: int
+    ) -> bool:
+        return bool(
+            self._warehouse_dock
+            and self._warehouse_dock.set_pallet_deck_collision_filtered(
+                filtered, pallet_id
+            )
+        )
+
+    def warehouse_pallet_deck_collision_filtered(
+        self, pallet_id: int
+    ) -> bool:
+        return bool(
+            self._warehouse_dock
+            and self._warehouse_dock.pallet_deck_collision_filtered(pallet_id)
         )
 
 

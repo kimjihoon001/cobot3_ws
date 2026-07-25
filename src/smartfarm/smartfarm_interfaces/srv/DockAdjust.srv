@@ -1,0 +1,6 @@
+# 지게차가 IW 도킹 잠금에 실패했을 때 Nav2 정밀 재정렬을 요청한다.
+int32 attempt
+string reason
+---
+bool accepted
+string message

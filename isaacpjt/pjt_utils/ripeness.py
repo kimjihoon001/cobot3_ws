@@ -123,5 +123,10 @@ def bind_matte_material(stage, prim_path,
             surf.CreateOutput("surface", Sdf.ValueTypeNames.Token))
     else:
         mat = UsdShade.Material(stage.GetPrimAtPath(mat_path))
+    # 참조된 토마토 USD 일부에는 하위 Mesh의 기본 회색 재질 바인딩이 들어 있다.
+    # 기본(weakerThanDescendants) 상속으로 묶으면 그 회색 재질이 displayColor를
+    # 덮어써 ripe 과실까지 회색으로 보인다. 클래스 색을 읽는 이 재질이 하위
+    # 바인딩보다 강하도록 명시해 렌더링을 결정적으로 만든다.
     UsdShade.MaterialBindingAPI.Apply(
-        stage.GetPrimAtPath(prim_path)).Bind(mat)
+        stage.GetPrimAtPath(prim_path)).Bind(
+            mat, UsdShade.Tokens.strongerThanDescendants)

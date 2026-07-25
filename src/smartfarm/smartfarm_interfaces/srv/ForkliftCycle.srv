@@ -1,0 +1,14 @@
+# IW가 창고 도크에 도착했을 때 시작할 팔레트 교환 사이클.
+# inbound_pallet: IW에서 내려 0~5번 랙에 복귀시킬 팔레트 번호.
+int32 inbound_pallet
+# 서비스 요청 시점의 IW 실제 map pose. 지게차는 고정 도크 좌표를
+# 재가정하지 않고 이 pose에서 포크 접근축을 계산한다.
+float64 dock_x
+float64 dock_y
+float64 dock_yaw
+---
+# 서비스 응답은 장시간 작업의 "접수" 결과다. 실제 완료는
+# /forklift/clear=True 및 /forklift/pallet_on_iw로 통지한다.
+bool accepted
+int32 outbound_pallet
+string message

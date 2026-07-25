@@ -272,3 +272,19 @@ isaac_python tools/measure_pallet_fork_geometry.py --/log/level=error
 
 Warehouse 단독 시험도 실제 pose/joint-state 연결을 확인한 뒤 자동 시작하며 실제
 GUI 자세를 경로 제어에 사용한다. U턴 단계 제한시간은 60초다.
+## 풀 파이프라인 팔레트 교환 서비스
+
+통합 실행에서는 사용자가 `ros2 service call`을 직접 보낼 필요가 없다.
+`iwhub_control/mission_nav_node`가 IW의 도크 도착을 확인한 뒤
+`/forklift/start_cycle` (`smartfarm_interfaces/srv/ForkliftCycle`)을
+자동 호출한다. `warehouse_dock/fork_lift_return_node`가 요청을 접수하면
+다음 순서를 연속 실행한다.
+
+1. IW의 `inbound_pallet`을 들어 원래 번호의 랙에 복귀
+2. 다음 번호의 빈 팔레트를 랙에서 픽업
+3. 빈 팔레트를 IW에 상차
+4. `/forklift/clear=true`와 `/forklift/pallet_on_iw`를 발행
+5. IW가 MoveIt-MM 작업 위치로 자동 복귀
+
+서비스 응답은 장시간 물류 작업의 완료가 아니라 접수 여부를 뜻한다.
+실제 완료와 새 팔레트 번호는 위 완료 토픽으로 전달한다.

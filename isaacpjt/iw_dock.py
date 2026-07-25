@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 
 import numpy as np
-from pxr import Gf, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
 from pjt_utils.deck_geometry import (
+    IW_LOAD_MAP_X_OFFSET_M,
     PALLET_SUPPORT_CLEARANCE,
     supported_pallet_hole_center_z,
 )
@@ -22,10 +23,14 @@ from scene import physics
 
 
 WAREHOUSE_DOCK_XY = (0.0, 10.84885)
+DOCK_POSITION_TOLERANCE_M = 0.04
+DOCK_QUATERNION_ALIGNMENT_MIN = 0.99984  # 약 2도 yaw 오차
 IW_WORLD_JOINT = "/World/WarehouseDockIwHubFixed"
 IW_PALLET_JOINT = "/World/WarehouseDockPalletJoint"
 FORK_PALLET_JOINT = "/World/ForkliftPalletCarryJoint"
 PALLET_PATH_FORMAT = "/World/Warehouse/Pallet_{:02d}"
+INITIAL_IW_PALLET_PATH = "/World/IwHubCargo/Pallet_00"
+INITIAL_IW_DECK_JOINT = "/World/IwHubCargo/DeckJoint"
 
 
 def _rigid_body_path(stage: Usd.Stage, root_path: str) -> str | None:
@@ -38,37 +43,6 @@ def _rigid_body_path(stage: Usd.Stage, root_path: str) -> str | None:
         if prim.HasAPI(UsdPhysics.RigidBodyAPI):
             return str(prim.GetPath())
     return None
-
-
-def _fix_body_to_world(stage: Usd.Stage, body_path: str) -> bool:
-    """Create a world FixedJoint at the body's current world transform."""
-    body = stage.GetPrimAtPath(body_path)
-    if not body.IsValid() or not body.HasAPI(UsdPhysics.RigidBodyAPI):
-        return False
-    world = UsdGeom.Xformable(body).ComputeLocalToWorldTransform(
-        Usd.TimeCode.Default()
-    )
-    position = world.ExtractTranslation()
-    rotation = world.ExtractRotationQuat()
-    imag = rotation.GetImaginary()
-
-    joint = UsdPhysics.FixedJoint.Define(stage, IW_WORLD_JOINT)
-    joint.CreateBody1Rel().SetTargets([body_path])
-    joint.CreateCollisionEnabledAttr(False)
-    joint.CreateLocalPos0Attr(
-        Gf.Vec3f(*[float(value) for value in position])
-    )
-    joint.CreateLocalRot0Attr(
-        Gf.Quatf(
-            float(rotation.GetReal()),
-            float(imag[0]),
-            float(imag[1]),
-            float(imag[2]),
-        )
-    )
-    joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
-    joint.CreateLocalRot1Attr(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
-    return True
 
 
 def _world_bbox_range(stage: Usd.Stage, prim_path: str):
@@ -108,13 +82,157 @@ class WarehouseDockController:
         self._deck_body = _rigid_body_path(stage, f"{art_path}/chassis")
         if self._deck_body is None:
             self._deck_body = _rigid_body_path(stage, art_path)
-        self._deck_pallet_id: int | None = None
+        self._deck_pallet_id: int | None = (
+            0
+            if self._stage.GetPrimAtPath(INITIAL_IW_DECK_JOINT).IsValid()
+            else None
+        )
+        self._deck_pallet_rigid = None
+        self._deck_root_relative = None
         # Runtime 도킹은 정지/스냅/Joint 생성을 서로 다른 physics frame에
         # 수행한다. 동적 articulation을 순간이동한 직후 같은 frame에
         # FixedJoint까지 만들면 PhysX/Fabric의 native pointer가 어긋나
         # world.step()에서 segmentation fault가 날 수 있다.
         self._dock_lock_phase = "idle"
+        self._locked_position = None
+        self._locked_orientation = None
+        if self._deck_pallet_id is not None:
+            self.set_pallet_deck_collision_filtered(
+                True, self._deck_pallet_id
+            )
         self._log_deck_geometry()
+
+    @staticmethod
+    def _pose_matrix(position, quat_wxyz) -> Gf.Matrix4d:
+        matrix = Gf.Matrix4d()
+        matrix.SetRotate(
+            Gf.Quatd(
+                float(quat_wxyz[0]),
+                float(quat_wxyz[1]),
+                float(quat_wxyz[2]),
+                float(quat_wxyz[3]),
+            )
+        )
+        matrix.SetTranslateOnly(
+            Gf.Vec3d(*(float(value) for value in position))
+        )
+        return matrix
+
+    def _begin_deck_follow(self, pallet_id: int) -> bool:
+        """현재 팔레트 자세를 보존한 채 IW root 상대 자세를 기록한다."""
+        pallet_path = self._pallet_path(pallet_id)
+        pallet = self._stage.GetPrimAtPath(pallet_path)
+        if not pallet.IsValid() or not pallet.HasAPI(UsdPhysics.RigidBodyAPI):
+            return False
+        try:
+            from isaacsim.core.prims import SingleRigidPrim
+
+            rigid = SingleRigidPrim(
+                pallet_path, name="iwhub_deck_pallet_probe"
+            )
+            rigid.initialize()
+            pallet_position, pallet_quat = rigid.get_world_pose()
+            root_position, root_quat = self._robot.get_world_pose()
+            pallet_world = self._pose_matrix(pallet_position, pallet_quat)
+            root_world = self._pose_matrix(root_position, root_quat)
+            UsdPhysics.RigidBodyAPI(
+                pallet
+            ).CreateKinematicEnabledAttr(True).Set(True)
+            self._deck_pallet_rigid = rigid
+            self._deck_root_relative = (
+                pallet_world * root_world.GetInverse()
+            )
+            return True
+        except Exception as exc:
+            print(f"[IW Deck] kinematic 추종 초기화 실패: {exc}")
+            self._deck_pallet_rigid = None
+            self._deck_root_relative = None
+            return False
+
+    def _stop_deck_follow(self) -> None:
+        pallet_path = (
+            self._pallet_path(self._deck_pallet_id)
+            if self._deck_pallet_id is not None
+            else None
+        )
+        pallet = (
+            self._stage.GetPrimAtPath(pallet_path)
+            if pallet_path is not None
+            else None
+        )
+        try:
+            if (
+                pallet is not None
+                and pallet.IsValid()
+                and pallet.HasAPI(UsdPhysics.RigidBodyAPI)
+            ):
+                # kinematic body에는 속도를 쓸 수 없다. 먼저 dynamic으로
+                # 되돌린 뒤 잔여 속도를 0으로 만들어야 release가 중간에
+                # 예외로 끊기지 않고 포크가 실제 팔레트를 넘겨받는다.
+                UsdPhysics.RigidBodyAPI(
+                    pallet
+                ).CreateKinematicEnabledAttr(False).Set(False)
+            if self._deck_pallet_rigid is not None:
+                self._deck_pallet_rigid.set_linear_velocity(
+                    np.zeros(3, dtype=float)
+                )
+                self._deck_pallet_rigid.set_angular_velocity(
+                    np.zeros(3, dtype=float)
+                )
+        except Exception as exc:
+            print(f"[IW Deck] dynamic 복원 경고: {exc}")
+        self._deck_pallet_rigid = None
+        self._deck_root_relative = None
+
+    def update(self) -> None:
+        """도킹 중 속도를 정지하고 구형 kinematic 적재만 호환한다."""
+        if self.dock_locked:
+            # 포크 접촉력이 IW를 밀지 못하도록 인계가 끝날 때까지 승인된
+            # 도킹 pose를 매 physics frame 유지한다. 같은 pose만 반복 적용해
+            # 누적 이동은 만들지 않는다.
+            if (
+                self._locked_position is not None
+                and self._locked_orientation is not None
+            ):
+                self._robot.set_world_pose(
+                    position=self._locked_position,
+                    orientation=self._locked_orientation,
+                )
+            self._stop_robot()
+        if self._deck_pallet_id is None or not self.pallet_on_deck:
+            return
+        # 정상 운반 경로는 실제 FixedJoint다. PhysX가 차체와 팔레트를 함께
+        # 적분하므로 set_world_pose 추종을 절대 섞지 않는다.
+        for joint_path in (IW_PALLET_JOINT, INITIAL_IW_DECK_JOINT):
+            joint_prim = self._stage.GetPrimAtPath(joint_path)
+            if joint_prim.IsValid() and joint_prim.IsA(
+                UsdPhysics.FixedJoint
+            ):
+                return
+        if (
+            self._deck_pallet_rigid is None
+            or self._deck_root_relative is None
+        ):
+            if not self._begin_deck_follow(self._deck_pallet_id):
+                return
+        root_position, root_quat = self._robot.get_world_pose()
+        root_world = self._pose_matrix(root_position, root_quat)
+        pallet_world = self._deck_root_relative * root_world
+        position = pallet_world.ExtractTranslation()
+        rotation = pallet_world.ExtractRotationQuat().GetNormalized()
+        imaginary = rotation.GetImaginary()
+        self._deck_pallet_rigid.set_world_pose(
+            position=np.asarray(position, dtype=float),
+            orientation=np.asarray(
+                [
+                    float(rotation.GetReal()),
+                    float(imaginary[0]),
+                    float(imaginary[1]),
+                    float(imaginary[2]),
+                ],
+                dtype=float,
+            ),
+        )
 
     @property
     def dock_locked(self) -> bool:
@@ -122,18 +240,97 @@ class WarehouseDockController:
 
     @property
     def pallet_on_deck(self) -> bool:
-        return self._stage.GetPrimAtPath(IW_PALLET_JOINT).IsValid()
+        return (
+            self._stage.GetPrimAtPath(IW_PALLET_JOINT).IsValid()
+            or self._stage.GetPrimAtPath(INITIAL_IW_DECK_JOINT).IsValid()
+        )
+
+    def set_pallet_deck_collision_filtered(
+        self, filtered: bool, pallet_id: int
+    ) -> bool:
+        """포크 인계 중에만 팔레트와 IW 전체의 상호 충돌을 차단한다.
+
+        DeckJoint를 제거한 뒤에도 팔레트는 섀시 상면과 접촉한다. 이 상태에서
+        포크 FixedJoint로 팔레트를 들어 올리면 접촉 솔버와 조인트/리프트
+        드라이브가 동시에 같은 강체를 구속해 30kN까지 힘이 포화될 수 있다.
+        chassis 하나만 필터하면 상승 중 팔레트가 lift/wheel/caster 링크와
+        접촉해 IW 전체를 들어 올릴 수 있으므로 articulation root 전체를
+        대상으로 한다. 포크가 소유하는 동안만 차단하고 데크로 돌려놓기
+        전에 반드시 복원한다.
+        """
+        iw_root = self._stage.GetPrimAtPath(self._art_path)
+        if not iw_root.IsValid():
+            print("[IW Deck] 충돌 필터 대상 IW articulation을 찾지 못했습니다")
+            return False
+        pallet_path = self._pallet_path(pallet_id)
+        pallet = self._stage.GetPrimAtPath(pallet_path)
+        if not pallet.IsValid():
+            print(
+                "[IW Deck] 충돌 필터 대상이 없습니다: "
+                f"{pallet_path} <-> {self._art_path}"
+            )
+            return False
+
+        api = UsdPhysics.FilteredPairsAPI.Apply(pallet)
+        rel = api.CreateFilteredPairsRel()
+        deck_path = Sdf.Path(self._art_path)
+        targets = rel.GetTargets()
+        if filtered:
+            if deck_path not in targets:
+                rel.AddTarget(deck_path)
+                print(
+                    "[IW Deck] 포크 인계 충돌 차단: "
+                    f"{pallet_path} <-> {self._art_path}"
+                )
+            return True
+
+        if deck_path in targets:
+            rel.RemoveTarget(deck_path)
+            print(
+                "[IW Deck] 데크 접촉 복원: "
+                f"{pallet_path} <-> {self._art_path}"
+            )
+        return True
+
+    def pallet_deck_collision_filtered(self, pallet_id: int) -> bool:
+        """현재 팔레트↔IW 섀시 충돌 필터가 적용됐는지 반환한다."""
+        if not self._stage.GetPrimAtPath(self._art_path).IsValid():
+            return False
+        pallet = self._stage.GetPrimAtPath(self._pallet_path(pallet_id))
+        if (
+            not pallet.IsValid()
+            or not pallet.HasAPI(UsdPhysics.FilteredPairsAPI)
+        ):
+            return False
+        api = UsdPhysics.FilteredPairsAPI(pallet)
+        return bool(
+            api
+            and Sdf.Path(self._art_path)
+            in api.GetFilteredPairsRel().GetTargets()
+        )
+
+    def _pallet_path(self, pallet_id: int) -> str:
+        """Resolve the physical body for a logical warehouse pallet ID."""
+        warehouse_path = PALLET_PATH_FORMAT.format(pallet_id)
+        if self._stage.GetPrimAtPath(warehouse_path).IsValid():
+            return warehouse_path
+        if (
+            pallet_id == 0
+            and self._stage.GetPrimAtPath(INITIAL_IW_PALLET_PATH).IsValid()
+        ):
+            return INITIAL_IW_PALLET_PATH
+        return warehouse_path
 
     def _deck_surface(self) -> tuple[Gf.Vec3d, Gf.Quatd]:
         """실제 chassis 월드 bbox의 상면 중심과 월드 방향을 반환한다."""
         if self._deck_body is None:
             raise ValueError("IW chassis rigid body를 찾지 못했습니다")
         world_range = _world_bbox_range(self._stage, self._deck_body)
-        # chassis rigid-body bbox의 XY 중심은 에셋 원점에서 약 0.31m 치우쳐 있다.
-        # 실제 상하차 축은 검증된 canonical IW root XY이므로, bbox는 Z 상면 측정에만
-        # 사용하고 X/Y는 도킹 root 좌표를 유지한다.
+        # PhysX/Fabric으로 이동한 articulation의 USD bbox는 초기 스폰 좌표에
+        # 남을 수 있다. X는 Load 생성 때 측정한 root-relative 오프셋을 현재
+        # canonical dock root에 적용하고, bbox는 안정적인 상면 Z에만 사용한다.
         world_point = Gf.Vec3d(
-            float(self._dock_position[0]),
+            float(self._dock_position[0]) + IW_LOAD_MAP_X_OFFSET_M,
             float(self._dock_position[1]),
             float(world_range.GetMax()[2]),
         )
@@ -187,7 +384,7 @@ class WarehouseDockController:
         target_orientation = np.asarray(self._dock_orientation, dtype=float)
 
         position_error = float(np.linalg.norm(
-            position - np.asarray(self._dock_position, dtype=float)
+            position[:2] - np.asarray(self._dock_position, dtype=float)[:2]
         ))
         orientation_norm = float(np.linalg.norm(orientation))
         target_norm = float(np.linalg.norm(target_orientation))
@@ -197,7 +394,12 @@ class WarehouseDockController:
             orientation / orientation_norm,
             target_orientation / target_norm,
         )))
-        return position_error <= 0.01 and quaternion_alignment >= 0.99995
+        # X/Y/yaw를 한 번에 검사한다. 서비스에는 이 실제 yaw를 전달해
+        # 지게차가 동일한 축으로 접근하며, yaw만 따로 맞추지는 않는다.
+        return (
+            position_error <= DOCK_POSITION_TOLERANCE_M
+            and quaternion_alignment >= DOCK_QUATERNION_ALIGNMENT_MIN
+        )
 
     def set_dock_locked(
         self,
@@ -205,7 +407,7 @@ class WarehouseDockController:
         *,
         immediate: bool = False,
     ) -> bool:
-        """Snap and lock IW without mutating pose and constraints in one frame.
+        """Lock an IW that Nav2 has already driven to the dock.
 
         ``immediate`` is reserved for scene construction before physics starts.
         Runtime callers repeatedly request ``locked=True``; each call advances
@@ -223,12 +425,7 @@ class WarehouseDockController:
                         orientation=self._dock_orientation.copy(),
                     )
                     self._stop_robot()
-                    body_path = self._deck_body
-                    if body_path is None or not _fix_body_to_world(
-                        self._stage, body_path
-                    ):
-                        print("[IW Dock] 월드 고정용 rigid body를 찾지 못했습니다")
-                        return False
+                    UsdGeom.Scope.Define(self._stage, IW_WORLD_JOINT)
                     self._dock_lock_phase = "idle"
                     print(
                         "[IW Dock] 초기 canonical pose 고정 완료: "
@@ -247,32 +444,47 @@ class WarehouseDockController:
                 if self._dock_lock_phase == "stopped":
                     self._stop_robot()
                     if not self._at_canonical_dock():
-                        self._robot.set_world_pose(
-                            position=self._dock_position.copy(),
-                            orientation=self._dock_orientation.copy(),
+                        position, _ = self._robot.get_world_pose()
+                        position = np.asarray(position, dtype=float)
+                        error = float(np.linalg.norm(
+                            position[:2] - self._dock_position[:2]
+                        ))
+                        print(
+                            "[IW Dock] 도킹 잠금 거부: Nav2 정밀도 미달 "
+                            f"(xy_error={error:.3f}m, "
+                            f"허용={DOCK_POSITION_TOLERANCE_M:.3f}m) — "
+                            "순간이동하지 않음"
                         )
-                        self._stop_robot()
-                        print("[IW Dock] 도킹 고정 2/3: canonical pose 보정")
-                    else:
-                        print("[IW Dock] 도킹 고정 2/3: 현재 pose 유지")
+                        self._dock_lock_phase = "idle"
+                        return False
+                    print("[IW Dock] 도킹 고정 2/3: Nav2 도착 pose 유지")
                     self._dock_lock_phase = "pose_settled"
                     return False
 
-                # A world.step() has now occurred after the optional pose snap.
-                # Only in this later frame is the PhysX constraint authored.
+                # Nav2가 저속 정렬을 끝낸 현재 X/Y/yaw를 그대로 고정한다.
+                # canonical 좌표로 다시 덮어쓰면 GUI에서 순간이동으로 보인다.
                 self._stop_robot()
-                body_path = self._deck_body
-                if body_path is None or not _fix_body_to_world(
-                    self._stage, body_path
-                ):
-                    print("[IW Dock] 월드 고정용 rigid body를 찾지 못했습니다")
-                    self._dock_lock_phase = "idle"
-                    return False
+                position, orientation = self._robot.get_world_pose()
+                locked_position = np.asarray(position, dtype=float).copy()
+                # Nav2 도착 직후에는 휠/서스펜션 접촉 반력으로 chassis Z가
+                # 잠깐 튈 수 있다. 그 순간의 Z까지 매 프레임 고정하면 인계
+                # 동안 IW가 바닥에서 떠 보인다. X/Y는 스냅 없이 현재값을
+                # 유지하되 Z는 씬 생성 시 확보한 정상 접지 높이를 사용한다.
+                measured_z = float(locked_position[2])
+                locked_position[2] = self._dock_position[2]
+                self._locked_position = locked_position
+                self._locked_orientation = np.asarray(
+                    orientation, dtype=float
+                ).copy()
+                self._stop_robot()
+                UsdGeom.Scope.Define(self._stage, IW_WORLD_JOINT)
                 self._dock_lock_phase = "idle"
                 print(
-                    "[IW Dock] 도킹 고정 3/3 완료: "
-                    f"x={self._dock_position[0]:.5f}, "
-                    f"y={self._dock_position[1]:.5f}"
+                    "[IW Dock] 현재 pose 고정 완료(스냅 없음, 포크 밀림 차단): "
+                    f"x={float(self._locked_position[0]):.5f}, "
+                    f"y={float(self._locked_position[1]):.5f}, "
+                    f"z={float(self._locked_position[2]):.5f} "
+                    f"(측정 {measured_z:.5f})"
                 )
                 return True
             except Exception as exc:
@@ -281,9 +493,11 @@ class WarehouseDockController:
                 return False
 
         self._dock_lock_phase = "idle"
+        self._locked_position = None
+        self._locked_orientation = None
         if self.dock_locked:
             self._stage.RemovePrim(IW_WORLD_JOINT)
-            print("[IW Dock] 월드 FixedJoint 해제 — IW 이동 가능")
+            print("[IW Dock] 자세 유지 잠금 해제 — IW 이동 가능")
         return True
 
     def set_pallet_on_deck(
@@ -291,11 +505,17 @@ class WarehouseDockController:
     ) -> bool:
         """Attach a warehouse pallet to the IW at one canonical deck frame."""
         if not attached:
-            if self.pallet_on_deck:
-                self._stage.RemovePrim(IW_PALLET_JOINT)
+            self._stop_deck_follow()
+            removed = []
+            for joint_path in (IW_PALLET_JOINT, INITIAL_IW_DECK_JOINT):
+                if self._stage.GetPrimAtPath(joint_path).IsValid():
+                    self._stage.RemovePrim(joint_path)
+                    removed.append(joint_path)
+            if removed:
                 print(
                     "[IW Deck] 팔레트 연결 해제: "
-                    f"Pallet_{self._deck_pallet_id or 0:02d}"
+                    f"Pallet_{self._deck_pallet_id or 0:02d} "
+                    f"({', '.join(removed)})"
                 )
             self._deck_pallet_id = None
             return True
@@ -312,7 +532,7 @@ class WarehouseDockController:
             print("[IW Deck] IW chassis rigid body를 찾지 못했습니다")
             return False
 
-        pallet_path = PALLET_PATH_FORMAT.format(pallet_id)
+        pallet_path = self._pallet_path(pallet_id)
         pallet = self._stage.GetPrimAtPath(pallet_path)
         if not pallet.IsValid() or not pallet.HasAPI(UsdPhysics.RigidBodyAPI):
             print(f"[IW Deck] 팔레트 강체 없음: {pallet_path}")
@@ -354,16 +574,43 @@ class WarehouseDockController:
             print(f"[IW Deck] 팔레트 안착 검증 실패: {exc}")
             return False
 
-        joint = physics.create_fixed_joint(
-            self._stage,
-            IW_PALLET_JOINT,
-            self._deck_body,
-            pallet_path,
-        )
-        joint.CreateJointEnabledAttr(True)
+        try:
+            from isaacsim.core.prims import SingleRigidPrim
+
+            # 지게차와 동일하게 런타임 PhysX 자세로 local joint frame을
+            # 계산한다. USD authoring pose를 쓰면 이동 후 결속 순간 스냅한다.
+            deck_rigid = SingleRigidPrim(
+                self._deck_body, name="iwhub_deck_body_probe"
+            )
+            pallet_rigid = SingleRigidPrim(
+                pallet_path, name="iwhub_deck_pallet_probe"
+            )
+            deck_rigid.initialize()
+            pallet_rigid.initialize()
+            deck_position, deck_quat = deck_rigid.get_world_pose()
+            pallet_position, pallet_quat = pallet_rigid.get_world_pose()
+            UsdPhysics.RigidBodyAPI(
+                pallet
+            ).CreateKinematicEnabledAttr(False).Set(False)
+            physics.create_fixed_joint(
+                self._stage,
+                IW_PALLET_JOINT,
+                self._deck_body,
+                pallet_path,
+                body0_world=self._pose_matrix(
+                    deck_position, deck_quat
+                ),
+                body1_world=self._pose_matrix(
+                    pallet_position, pallet_quat
+                ),
+                exclude_from_articulation=True,
+            )
+        except Exception as exc:
+            print(f"[IW Deck] FixedJoint 결속 실패: {exc}")
+            return False
         self._deck_pallet_id = pallet_id
         print(
             f"[IW Deck] Pallet_{pallet_id:02d} 고정 완료 "
-            "(현재 물리 자세 유지)"
+            "(현재 물리 자세 유지, excludeFromArticulation FixedJoint)"
         )
         return True

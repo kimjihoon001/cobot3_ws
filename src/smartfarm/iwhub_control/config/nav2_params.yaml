@@ -39,6 +39,7 @@ amcl:
     beam_skip_distance: 0.5
     beam_skip_threshold: 0.3
     beam_skip_error_threshold: 0.9
+    # map→odom의 단일 발행자는 AMCL이다. 고정 TF와 중복 발행하지 않는다.
     tf_broadcast: true
 
 map_server:
@@ -74,15 +75,17 @@ controller_server:
       movement_time_allowance: 15.0
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
+      # FOLLOW에는 현재 브랜치의 안정적인 허용오차를 유지한다. FORKLIFT는 이
+      # 반경에 들어온 뒤 별도 저속 폐루프가 위치·yaw를 정밀하게 마무리한다.
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
       stateful: true
     FollowPath:
-      # DWB는 로컬 costmap의 장애물을 반영해 여러 전진/회전 속도 궤적을 비교한다.
-      # 충돌 시 정지만 하던 RPP와 달리 유효한 좌우 원호를 선택해 능동 회피한다.
+      # 레인·swept-footprint가 안전한 전역 경로를 만들고 DWB가 로컬 장애물
+      # 궤적을 비교한다. 긴 후방 오버행의 임의 후진을 막기 위해 min_vel_x=0이다.
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: false
-      min_vel_x: -0.25
+      min_vel_x: 0.0
       max_vel_x: 0.50
       max_vel_theta: 0.80
       min_speed_xy: 0.0
@@ -170,10 +173,10 @@ local_costmap:
           raytrace_max_range: 25.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 최고속도를 일괄 제한하지 않고 장애물 근처 궤적의 비용을 미리 높인다.
-        # 35cm는 치명영역이 아니라 완만한 비용 띠이며 좁은 통로도 통과 가능하다.
-        cost_scaling_factor: 7.0
-        inflation_radius: 0.35
+        # 로컬 안전 여유 띠. inscribed_radius(local footprint 0.376) 이상이어야 유효 —
+        # 0.55로. 그라디언트라 조기정지 아님(레인 중심선은 배드서 1.24m라 무비용).
+        cost_scaling_factor: 6.0
+        inflation_radius: 0.55
 
 global_costmap:
   global_costmap:
@@ -216,8 +219,12 @@ global_costmap:
           raytrace_max_range: 25.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 12.0
-        inflation_radius: 0.05
+        # inflation_radius는 반드시 inscribed_radius(global footprint 0.436) 이상이어야 충돌모델이
+        # 유효하다(Nav2 경고). 배드 회피는 레인 경로(lanes.py, 1.24m 클리어)가 담당하므로 여유는
+        # 크게 두지 않되, 로봇 반경보단 크게 0.55로. (이전 0.12는 라이다 self-return 오판 근거였음 —
+        # 실제 -1.0은 Isaac no-hit 센티넬로 costmap이 버림. 정지 원인은 BT 프레임 버그였고 수정됨.)
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
 
 planner_server:
   ros__parameters:
@@ -236,7 +243,7 @@ behavior_server:
   ros__parameters:
     use_sim_time: true
     # Humble 기본 BT는 활성화할 때 spin action server의 존재를 요구한다. 서버는 등록하되
-    # 정상 경로 추종은 Smac+PurePursuit 원호 주행이며, spin은 BT 복구 단계에서만 저속 사용한다.
+    # 이 병합의 전진 전용 BT에서는 실패 복구용 Spin/BackUp을 호출하지 않는다.
     behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
     spin:
       plugin: "nav2_behaviors/Spin"
@@ -261,8 +268,9 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.50, 0.0, 0.80]
-    min_velocity: [-0.25, 0.0, -0.80]
+    max_velocity: [0.65, 0.0, 0.80]
+    # DWB min_vel_x=0.0과 함께 후진 속도를 막는다. 좁은 아일서 임의 후진 불가.
+    min_velocity: [0.0, 0.0, -0.80]
     max_accel: [1.2, 0.0, 1.6]
     max_decel: [-1.5, 0.0, -2.0]
     odom_topic: "odom"

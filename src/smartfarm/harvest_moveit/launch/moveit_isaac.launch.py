@@ -200,8 +200,10 @@ def generate_launch_description():
     isolated = GroupAction([
         PushRosNamespace(LaunchConfiguration("ns")),
         control_node, rsp, move_group, servo, rviz,
-        # 서비스가 뜬 뒤 한 번에 로드·설정·활성화한다.
-        TimerAction(period=4.0, actions=[spawner_controllers]),
+        # GPU 씬과 Nav2를 함께 띄우면 controller_manager 플러그인 초기화가
+        # 10초 가까이 걸릴 수 있다. 너무 일찍 요청하면 load 응답이 늦게 도착해
+        # joint_state_broadcaster만 unconfigured로 남는 레이스가 발생한다.
+        TimerAction(period=12.0, actions=[spawner_controllers]),
     ])
 
     return LaunchDescription([

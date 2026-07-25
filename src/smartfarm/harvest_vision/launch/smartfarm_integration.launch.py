@@ -56,9 +56,8 @@ def generate_launch_description():
         DeclareLaunchArgument("moveit_rviz", default_value="true"),
         DeclareLaunchArgument("iw_rviz", default_value="true"),
         DeclareLaunchArgument("use_debug", default_value="true"),
-        # Ridgeback-IW 외곽 사이 0.50m를 확보하는 중심거리.
-        DeclareLaunchArgument("iw_follow_offset_x", default_value="1.6955"),
-        DeclareLaunchArgument("iw_follow_offset_y", default_value="0.0"),
+        # MM 중심에서 현재 IW 접근 방향으로 유지할 비접촉 플레이스 거리.
+        DeclareLaunchArgument("iw_dock_standoff", default_value="1.2"),
 
         # 1) 현재 성공한 MM MoveIt 파이프라인 + 고정 Nav2 goal 코디네이터.
         IncludeLaunchDescription(
@@ -106,11 +105,8 @@ def generate_launch_description():
                     use_sim_time, value_type=bool),
                 "mm_map_frame": "map",
                 "mm_base_frame": "base_link",
-                "follow_offset_x": ParameterValue(
-                    LaunchConfiguration("iw_follow_offset_x"),
-                    value_type=float),
-                "follow_offset_y": ParameterValue(
-                    LaunchConfiguration("iw_follow_offset_y"),
+                "dock_standoff": ParameterValue(
+                    LaunchConfiguration("iw_dock_standoff"),
                     value_type=float),
             }],
             # MM 파이프라인은 TF를 /harvester_0 아래에 격리한다.

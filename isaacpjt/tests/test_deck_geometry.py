@@ -1,10 +1,15 @@
 import pytest
 
 from pjt_utils.deck_geometry import (
+    IW_LOAD_MAP_X_OFFSET_M,
     PALLET_HOLE_CENTER_Z,
     supported_pallet_hole_center_z,
     supported_pallet_origin_z,
 )
+
+
+def test_iw_load_map_x_offset_matches_measured_chassis_center():
+    assert IW_LOAD_MAP_X_OFFSET_M == pytest.approx(0.3171)
 
 
 def test_pallet_bottom_is_placed_on_deck_with_clearance():

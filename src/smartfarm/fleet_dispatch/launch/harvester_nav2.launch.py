@@ -270,9 +270,9 @@ def generate_launch_description():
         # map=Isaac 월드 프레임. 새 Isaac 실행의 MM 스폰과 같은 베이스 자세.
         # 주행 후 Nav2만 재시작할 때는 현재 위치를 launch 인자로 덮어쓴다.
         DeclareLaunchArgument("set_initial_pose", default_value="true"),
-        DeclareLaunchArgument("initial_pose_x", default_value="-3.3"),
-        DeclareLaunchArgument("initial_pose_y", default_value="-9.77"),
-        DeclareLaunchArgument("initial_pose_yaw", default_value="3.141592653589793"),
+        DeclareLaunchArgument("initial_pose_x", default_value="0.0"),
+        DeclareLaunchArgument("initial_pose_y", default_value="-12.0"),
+        DeclareLaunchArgument("initial_pose_yaw", default_value="0.0"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=os.path.join(
             get_package_share_directory("fleet_dispatch"), "rviz",

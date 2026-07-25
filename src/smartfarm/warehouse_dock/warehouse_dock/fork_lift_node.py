@@ -126,10 +126,10 @@ class ForkLiftNode(Node):
     FORK_BLADE_CENTER_Z_AT_ZERO = (
         FORK_BLADE_BOTTOM_Z_AT_ZERO + FORK_BLADE_TOP_Z_AT_ZERO
     ) / 2.0
-    # 랙 삽입 때 포크 중심을 구멍 중심보다 6cm 낮춰 잡은 상태로 팔레트가
-    # 연결된다. 따라서 IW에 내려놓을 때도 목표 구멍 높이보다 6cm 낮은 포크
-    # 자세를 사용해야 팔레트 하면이 실제 데크 상면에 닿는다.
-    RACK_PICKUP_UNDERSHOOT = 0.06
+    # 포크 중심과 팔레트 구멍 중심을 일치시킨다. 과거 6cm undershoot는
+    # 포크 날 하단을 팔레트 하부 데크에 관통시킨 직접 원인이었다. 최종 수 mm
+    # 오차는 Isaac의 실제 강체 자세를 읽는 Pickup Gate가 결합 전에 보정한다.
+    RACK_PICKUP_UNDERSHOOT = 0.0
 
     def __init__(
         self,
@@ -160,9 +160,13 @@ class ForkLiftNode(Node):
         super().__init__(node_name)
 
         # 좌표 파라미터. 실제 도킹 위치가 정해지면 이 세 항목을 먼저 보정한다.
-        self.declare_parameter("initial_pose", [0.0, 14.5, -math.pi / 2.0])
+        self.declare_parameter(
+            "initial_pose", [0.3171, 14.5, -math.pi / 2.0]
+        )
         # 창고 입구 중앙 대기점. 여기서 월드 -Y로 2m 이동하면 AMR 삽입 pose다.
-        self.declare_parameter("wait_pose", [0.0, 14.5, -math.pi / 2.0])
+        self.declare_parameter(
+            "wait_pose", [0.3171, 14.5, -math.pi / 2.0]
+        )
         # [팔레트 중심 X, 팔레트 중심 Y, 구멍 중심 월드 Z]
         self.declare_parameter("amr_hole_center", [0.0, 10.84885, 0.45])
         self.declare_parameter("rack_front_y", 19.99885)
@@ -175,14 +179,19 @@ class ForkLiftNode(Node):
         self.declare_parameter(
             "fork_center_z_at_zero", self.FORK_BLADE_CENTER_Z_AT_ZERO
         )
+        # IW와 랙 모두 실측상 0.65m 삽입에서 Y 벽면 정렬과 포크 겹침이
+        # 정확하다. 2층 충돌 여유는 진입 깊이가 아니라 결속 후 Z 상승량으로
+        # 관리한다.
         self.declare_parameter("insertion_depth", 0.65)
+        self.declare_parameter("rack_insertion_depth", 0.65)
         # 팔레트 정면 대기점에서 조향 0°로 이 거리만큼 전진하면 포크 삽입점이다.
         self.declare_parameter("rack_fork_insert_travel", 0.95)
         self.declare_parameter("staging_distance", 1.0)
         # 포크를 구멍에 끝까지 삽입해 팔레트를 연결한 뒤 20cm 들어 올린다.
         self.declare_parameter("pickup_raise", 0.20)
-        # 2층 팔레트는 상부 기둥과 충돌하지 않도록 랙 안에서 5cm만 든다.
-        self.declare_parameter("upper_rack_pickup_raise", 0.05)
+        # 2층은 위쪽 보와의 여유가 작다. 지지면만 벗어나는 2cm만 들어
+        # 랙 밖으로 인출한 뒤 안전 지점에서 운반 높이로 조정한다.
+        self.declare_parameter("upper_rack_pickup_raise", 0.02)
 
         # ForkliftB 운동 파라미터. main.py TransporterController와 같은 값이어야 한다.
         self.declare_parameter("wheel_radius", 0.22)
@@ -218,6 +227,16 @@ class ForkLiftNode(Node):
         self.declare_parameter("insertion_tolerance", 0.025)
         self.declare_parameter("yaw_tolerance", math.radians(8.0))
         self.declare_parameter("lift_tolerance", 0.015)
+        # 목표 높이를 한 번에 보내면 강한 PhysX drive 때문에 적재물이
+        # 튀어 오르는 것처럼 보인다. 적재 중에는 5cm/s, 빈 포크는
+        # 15cm/s로 명령 목표 자체를 연속 보간한다.
+        self.declare_parameter("loaded_lift_speed", 0.05)
+        self.declare_parameter("empty_lift_speed", 0.15)
+        # 현재 ForkliftB/랙 실측에서 계산 높이로 접근하면 포크 날이
+        # Pallet_01 구멍보다 5.4cm 높았다. 삽입 전에 보정한다.
+        # 랙 Y 삽입 0.65m에서 포크 처짐까지 포함한 실측 보정값.
+        # 진입 순간 상단 접촉을 피하면서 실물리 포크 처짐을 보상하는 높이.
+        self.declare_parameter("rack_pickup_height_correction", 0.020)
         self.declare_parameter("step_timeout", 60.0)
         self.declare_parameter("u_turn_timeout", 60.0)
         self.declare_parameter("connection_timeout", 1.0)
@@ -258,6 +277,19 @@ class ForkLiftNode(Node):
         self._pallet_on_iw_pub = self.create_publisher(
             Int32, "/forklift/pallet_on_iw", 10
         )
+        self._handoff_owner: str | None = None
+        self._handoff_pallet_id = -1
+        self._handoff_dock_locked = False
+        self._handoff_iw_available = False
+        self._handoff_deck_collision_filtered = False
+        self._handoff_fork_collision_filtered = False
+        self._handoff_pallet_rise: float | None = None
+        self._handoff_expected_rise: float | None = None
+        self._handoff_carry_pose_error: float | None = None
+        self._handoff_iw_tilt_deg: float | None = None
+        self._handoff_pallet_position: tuple[float, float, float] | None = None
+        self._handoff_pallet_target_position: tuple[float, float, float] | None = None
+        self._handoff_state_time: float | None = None
 
         self.create_subscription(
             JointState,
@@ -272,6 +304,12 @@ class ForkLiftNode(Node):
             String,
             "/iwhub_0/deck_geometry",
             self._on_iw_deck_geometry,
+            10,
+        )
+        self.create_subscription(
+            String,
+            "/forklift/handoff_state",
+            self._on_handoff_state,
             10,
         )
         self.create_subscription(
@@ -381,6 +419,11 @@ class ForkLiftNode(Node):
             self.get_parameter("fork_center_z_at_zero").value
         )
         self._insert_depth = float(self.get_parameter("insertion_depth").value)
+        self._rack_insert_depth = float(
+            self.get_parameter("rack_insertion_depth").value
+        )
+        if self._insert_depth <= 0.0 or self._rack_insert_depth <= 0.0:
+            raise ValueError("insertion depth는 0보다 커야 합니다")
         self._rack_fork_insert_travel = float(
             self.get_parameter("rack_fork_insert_travel").value
         )
@@ -443,6 +486,21 @@ class ForkLiftNode(Node):
         )
         self._yaw_tol = float(self.get_parameter("yaw_tolerance").value)
         self._lift_tol = float(self.get_parameter("lift_tolerance").value)
+        self._loaded_lift_speed = float(
+            self.get_parameter("loaded_lift_speed").value
+        )
+        self._empty_lift_speed = float(
+            self.get_parameter("empty_lift_speed").value
+        )
+        self._rack_pickup_height_correction = float(
+            self.get_parameter("rack_pickup_height_correction").value
+        )
+        if self._loaded_lift_speed <= 0.0 or self._empty_lift_speed <= 0.0:
+            raise ValueError("lift speed는 0보다 커야 합니다")
+        if not 0.0 <= self._rack_pickup_height_correction <= 0.10:
+            raise ValueError(
+                "rack_pickup_height_correction은 0~0.10m 사이여야 합니다"
+            )
         self._step_timeout = float(self.get_parameter("step_timeout").value)
         self._u_turn_timeout = float(
             self.get_parameter("u_turn_timeout").value
@@ -609,6 +667,69 @@ class ForkLiftNode(Node):
                 f"place_lift={self._amr_place_lift_target():.5f}"
             )
 
+    def _on_handoff_state(self, msg: String) -> None:
+        """Isaac이 확인한 실제 deck/fork Joint 상태를 상태기에 반영한다."""
+        try:
+            payload = json.loads(msg.data)
+            owner = str(payload["owner"])
+            pallet_id = int(payload["pallet_id"])
+            dock_locked = bool(payload["dock_locked"])
+            iw_available = bool(payload.get("iw_available", False))
+            deck_collision_filtered = bool(
+                payload.get("deck_collision_filtered", False)
+            )
+            fork_collision_filtered = bool(
+                payload.get("fork_collision_filtered", False)
+            )
+
+            def optional_float(name: str) -> float | None:
+                value = payload.get(name)
+                if value is None:
+                    return None
+                result = float(value)
+                if not math.isfinite(result):
+                    raise ValueError(f"{name}가 유한수가 아님")
+                return result
+
+            pallet_rise = optional_float("pallet_rise")
+            expected_rise = optional_float("expected_rise")
+            carry_pose_error = optional_float("carry_pose_error")
+            iw_tilt_deg = optional_float("iw_tilt_deg")
+
+            def optional_vec3(name: str) -> tuple[float, float, float] | None:
+                value = payload.get(name)
+                if value is None:
+                    return None
+                if not isinstance(value, list) or len(value) != 3:
+                    raise ValueError(f"{name}가 vec3가 아님")
+                result = tuple(float(item) for item in value)
+                if not all(math.isfinite(item) for item in result):
+                    raise ValueError(f"{name}에 유한수가 아닌 값이 있음")
+                return result
+
+            pallet_position = optional_vec3("pallet_position")
+            pallet_target_position = optional_vec3("pallet_target_position")
+            if owner not in ("none", "deck", "fork", "conflict"):
+                raise ValueError(f"알 수 없는 owner={owner}")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.get_logger().warning(
+                f"/forklift/handoff_state 잘못된 값 무시: {exc}"
+            )
+            return
+        self._handoff_owner = owner
+        self._handoff_pallet_id = pallet_id
+        self._handoff_dock_locked = dock_locked
+        self._handoff_iw_available = iw_available
+        self._handoff_deck_collision_filtered = deck_collision_filtered
+        self._handoff_fork_collision_filtered = fork_collision_filtered
+        self._handoff_pallet_rise = pallet_rise
+        self._handoff_expected_rise = expected_rise
+        self._handoff_carry_pose_error = carry_pose_error
+        self._handoff_iw_tilt_deg = iw_tilt_deg
+        self._handoff_pallet_position = pallet_position
+        self._handoff_pallet_target_position = pallet_target_position
+        self._handoff_state_time = time.monotonic()
+
     def _on_handoff(self, msg: HandoffEvent) -> None:
         self.get_logger().info(
             f"AMR 도킹 이벤트: tray_id={msg.tray_id}, amr_id={msg.amr_id}"
@@ -730,9 +851,12 @@ class ForkLiftNode(Node):
             return
         self._publish_clear(False)
         pre_y, insert_y, stage_y = self._approach_y(self._rack_front_y)
-        # 검증 경로에서는 GPU 기하 중심값보다 포크를 6cm 낮춰 삽입한다.
+        # 메시 중심값으로 먼저 이동하고, 결합 직전에는 Isaac 내부 좌표로
+        # 포크 날 전체가 실제 구멍 안인지 다시 검증·미세 보정한다.
         lift = clamp(
-            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
+            self._rack_lift_target(pallet)
+            - self.RACK_PICKUP_UNDERSHOOT
+            - self._rack_pickup_height_correction,
             0.0,
             2.0,
         )
@@ -1012,6 +1136,10 @@ class ForkLiftNode(Node):
                 steer,
                 self._amr_heading,
                 f"U-turn from Pallet_{pallet:02d} toward AMR",
+                # 적재 복귀 U턴은 누적 180° 부근에서 먼저 종료하고, 남은
+                # yaw 오차는 바로 뒤의 wait-pose 저속 정렬에서 보정한다.
+                # 3°를 U턴 자체에서 강제하면 관성으로 190°까지 넘어간다.
+                yaw_tolerance=math.radians(8.0),
             ),
         ]
 
@@ -1319,32 +1447,31 @@ class ForkLiftNode(Node):
         rack_x = self.RACK_CENTER_X[pallet]
         pre_y, insert_y, stage_y = self._approach_y(self._rack_front_y)
         rack_lift = clamp(
-            self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
+            self._rack_lift_target(pallet)
+            - self.RACK_PICKUP_UNDERSHOOT
+            - self._rack_pickup_height_correction,
             0.0,
             2.0,
         )
         pickup_raise = self._rack_pickup_raise(pallet)
         rack_carry_lift = rack_lift + pickup_raise
-        amr_carry_lift = self._amr_place_lift_target() + pickup_raise
+        # 2층 랙에서는 보 충돌 때문에 랙 안에서 2cm만 들지만, 랙을 완전히
+        # 빠져나온 뒤에는 팔레트를 바닥 가까이 낮추지 않는다. 1층 팔레트와
+        # 같은 20cm 운반 여유를 유지하고 IW 바로 앞에서만 천천히 내린다.
+        amr_carry_lift = self._amr_place_lift_target() + self._pickup_raise
 
         slow_raise = [
             self._lift(
-                rack_lift + pickup_raise * index / 10.0,
-                f"rack {pallet} pallet slow raise "
-                f"{pickup_raise * index / 10.0 * 100.0:.1f}cm",
+                rack_carry_lift,
+                f"rack {pallet} pallet continuous raise",
             )
-            for index in range(1, 11)
         ]
         lower_distance = abs(rack_carry_lift - amr_carry_lift)
-        lower_steps = max(1, math.ceil(lower_distance / 0.02))
         lower_for_transport = [
             self._lift(
-                rack_carry_lift
-                + (amr_carry_lift - rack_carry_lift) * index / lower_steps,
-                f"Pallet_{pallet:02d} lower to IW carry height "
-                f"{index}/{lower_steps}",
+                amr_carry_lift,
+                f"Pallet_{pallet:02d} continuous lower to IW carry height",
             )
-            for index in range(1, lower_steps + 1)
         ]
 
         # 0번에서 포크를 뺀 직후에는 pre-pick 위치에 있다. 상단
@@ -1498,13 +1625,14 @@ class ForkLiftNode(Node):
         ]
 
         return [
-            self._straight_y(
-                insert_y,
-                +self._creep_drive,
-                "IW loaded straight approach 2m",
-                expected_x=wait_x,
-                expected_yaw=self._amr_heading,
-                precise=True,
+            Step(
+                kind="handoff_align",
+                label="IW pallet-center closed-loop X/Y/yaw alignment",
+                yaw=self._amr_heading,
+                max_drive=self._creep_drive,
+                position_tolerance=self._insert_tol,
+                yaw_tolerance=self._yaw_tol,
+                timeout=90.0,
             ),
             self._wait(0.5, "IW loaded placement settle"),
         ] + slow_lower + [
@@ -1545,13 +1673,26 @@ class ForkLiftNode(Node):
 
     def _move_wait_steps(self) -> list[Step]:
         x, y, yaw = self._wait_pose
-        return [self._move(x, y, yaw, "return wait pose")]
+        return [
+            self._move(
+                x,
+                y,
+                yaw,
+                "return wait pose with exact X/Y/yaw alignment",
+                creep=True,
+                precise=True,
+            )
+        ]
 
     def _approach_y(self, pallet_front_y: float) -> tuple[float, float, float]:
         # 지게차 로컬 +X가 월드 +Y를 향한다고 가정한다. 먼저 포크 끝이
         # insertion_depth만큼 들어간 베이스 위치를 구한 뒤, 그곳에서 정확히
         # rack_fork_insert_travel만큼 떨어진 지점을 팔레트 정면 대기점으로 삼는다.
-        insert_y = pallet_front_y + self._insert_depth - self._fork_tip_offset
+        insert_y = (
+            pallet_front_y
+            + self._rack_insert_depth
+            - self._fork_tip_offset
+        )
         pre_y = insert_y - self._rack_fork_insert_travel
         stage_y = pre_y - self._staging_distance
         return pre_y, insert_y, stage_y
@@ -1576,7 +1717,7 @@ class ForkLiftNode(Node):
         return clamp(self._amr_hole[2] - self._fork_zero_z, 0.0, 2.0)
 
     def _amr_place_lift_target(self) -> float:
-        """랙에서 6cm 낮게 연결된 팔레트를 IW 데크에 놓는 포크 높이."""
+        """팔레트 구멍 중심을 IW 데크의 실측 구멍 중심에 맞추는 높이."""
         return clamp(
             self._amr_lift_target() - self.RACK_PICKUP_UNDERSHOOT,
             0.0,
@@ -1595,6 +1736,8 @@ class ForkLiftNode(Node):
         *,
         creep: bool = False,
         precise: bool = False,
+        position_tolerance: float | None = None,
+        yaw_tolerance: float | None = None,
     ) -> Step:
         return Step(
             kind="move",
@@ -1603,8 +1746,13 @@ class ForkLiftNode(Node):
             y=y,
             yaw=yaw,
             max_drive=self._creep_drive if creep else self._max_drive,
-            position_tolerance=self._insert_tol if precise else self._position_tol,
-            yaw_tolerance=self._yaw_tol,
+            position_tolerance=(
+                (self._insert_tol if precise else self._position_tol)
+                if position_tolerance is None else position_tolerance
+            ),
+            yaw_tolerance=(
+                self._yaw_tol if yaw_tolerance is None else yaw_tolerance
+            ),
             timeout=self._step_timeout,
         )
 
@@ -1624,19 +1772,13 @@ class ForkLiftNode(Node):
         label: str,
         *,
         rotation: float = math.pi,
+        yaw_tolerance: float = math.radians(3.0),
     ) -> Step:
-        yaw_rate = abs(
-            drive
-            * self._wheel_radius
-            / self._wheelbase
-            * math.tan(steering)
-        )
-        # 요청 회전각에 필요한 이론 시간에 2초 여유를 둔 watchdog이다. 이 시간이
-        # 지났다고 성공으로 처리하지 않고, 실제 pose가 목표에 도달하지
-        # 못했으면 안전 실패시킨다.
-        hard_stop = (
-            rotation / yaw_rate + 2.0 if yaw_rate > 1e-6 else 1.0
-        )
+        # ForkliftB의 실제 회전 속도는 바퀴 기하로 계산한 이론값보다 느리다.
+        # 이론 시간(기존 13.4초)을 hard stop으로 쓰면 실제 61° 부근에서 정상
+        # U턴을 잘라 버린다. 실제 pose의 180° 도달 조건은 _run_arc가 계속
+        # 검사하므로 여기서는 설정된 최대 60초를 안전 watchdog으로 사용한다.
+        hard_stop = self._u_turn_timeout
         return Step(
             kind="arc",
             label=label,
@@ -1645,7 +1787,7 @@ class ForkLiftNode(Node):
             steering=steering,
             max_rotation=rotation,
             duration=min(hard_stop, self._u_turn_timeout),
-            yaw_tolerance=math.radians(3.0),
+            yaw_tolerance=yaw_tolerance,
             timeout=self._u_turn_timeout,
         )
 
@@ -1675,7 +1817,9 @@ class ForkLiftNode(Node):
             position_tolerance=self._insert_tol,
             x_tolerance=self._rack_entry_x_tol,
             yaw_tolerance=self._rack_entry_yaw_tol,
-            timeout=min(30.0, self._step_timeout),
+            # 실제 ForkliftB는 U턴 뒤 랙 중심선까지 약 45초가 걸린다.
+            # 기존 30초 제한은 정상 주행 중간에서 작업을 잘랐다.
+            timeout=self._step_timeout,
             attempt=attempt,
         )
 
@@ -1818,7 +1962,7 @@ class ForkLiftNode(Node):
             label=label,
             attached=attached,
             pallet_id=pallet,
-            timeout=5.0,
+            timeout=12.0 if attached else 5.0,
         )
 
     @staticmethod
@@ -1925,6 +2069,8 @@ class ForkLiftNode(Node):
             done = self._run_lane_align(step, now)
         elif step.kind == "iw_axis_gate":
             done = self._run_iw_axis_gate(step)
+        elif step.kind == "handoff_align":
+            done = self._run_handoff_align(step, now)
         elif step.kind == "pose_check":
             done = self._run_pose_check(step, now)
         elif step.kind == "lift":
@@ -1933,17 +2079,33 @@ class ForkLiftNode(Node):
             self._pallet_target_command = step.pallet_id
             self._pallet_attached_command = step.attached
             self._publish_command(0.0, 0.0)
-            done = elapsed >= 0.25
+            expected_owner = "fork" if step.attached else "none"
+            done = self._handoff_state_matches(
+                expected_owner, step.pallet_id, now
+            )
         elif step.kind == "pallet_owner":
             self._pallet_target_command = step.pallet_id
             self._pallet_attached_command = step.attached
             self._pallet_deck_attached_command = step.deck_attached
             self._publish_command(0.0, 0.0)
-            done = elapsed >= 0.25
+            expected_owner = (
+                "fork" if step.attached
+                else "deck" if step.deck_attached
+                else "none"
+            )
+            done = self._handoff_state_matches(
+                expected_owner, step.pallet_id, now
+            )
         elif step.kind == "dock_lock":
             self._iw_dock_locked_command = step.attached
             self._publish_command(0.0, 0.0)
-            done = elapsed >= 0.25
+            done = (
+                self._handoff_state_time is not None
+                and self._handoff_state_time >= self._step_started
+                and now - self._handoff_state_time
+                <= self._connection_timeout
+                and self._handoff_dock_locked == step.attached
+            )
         elif step.kind == "wait":
             self._publish_command(0.0, 0.0)
             done = elapsed >= step.duration
@@ -1960,6 +2122,33 @@ class ForkLiftNode(Node):
                 self._begin_step()
             else:
                 self._finish_queue()
+
+    def _handoff_state_matches(
+        self, owner: str, pallet_id: int, now: float
+    ) -> bool:
+        """현재 단계가 보낸 명령 이후 Isaac의 실제 Joint 상태가 도달했는지 확인."""
+        if self._handoff_owner == "conflict":
+            self._fail("팔레트가 IW deck과 fork에 동시에 연결됐습니다")
+            return False
+        if (
+            self._handoff_state_time is None
+            or self._handoff_state_time < self._step_started
+            or now - self._handoff_state_time > self._connection_timeout
+        ):
+            return False
+        if self._handoff_owner != owner:
+            return False
+        if owner != "none" and self._handoff_pallet_id != pallet_id:
+            return False
+        if owner == "fork":
+            if not self._handoff_fork_collision_filtered:
+                return False
+            if (
+                self._handoff_iw_available
+                and not self._handoff_deck_collision_filtered
+            ):
+                return False
+        return True
 
     def _run_move(self, step: Step, now: float) -> bool:
         dx = step.x - self._x
@@ -2004,6 +2193,37 @@ class ForkLiftNode(Node):
         drive = clamp(linear / self._wheel_radius, -step.max_drive, step.max_drive)
         self._publish_command(drive, steering)
         return False
+
+    def _run_handoff_align(self, step: Step, now: float) -> bool:
+        """포크에 결속된 팔레트의 실제 중심을 IW 데크 중심으로 직접 맞춘다."""
+        if (
+            self._handoff_owner != "fork"
+            or self._handoff_pallet_position is None
+            or self._handoff_state_time is None
+            or now - self._handoff_state_time > self._connection_timeout
+        ):
+            self._publish_command(0.0, 0.0)
+            return False
+        pallet = self._handoff_pallet_position
+        # Isaac 상태 메시지의 동적 목표가 일시적으로 비어도, 별도
+        # /iwhub_0/deck_geometry에서 받은 실측 데크 중심은 계속 유효하다.
+        # 목표가 없다는 이유로 현재 위치에서 타임아웃하지 않도록 같은 실측
+        # X/Y를 대체값으로 사용한다.
+        target = self._handoff_pallet_target_position
+        if target is None:
+            target = (self._amr_hole[0], self._amr_hole[1], 0.0)
+        dynamic = Step(
+            kind="move",
+            label=step.label,
+            x=self._x + target[0] - pallet[0],
+            y=self._y + target[1] - pallet[1],
+            yaw=step.yaw,
+            max_drive=step.max_drive,
+            position_tolerance=step.position_tolerance,
+            yaw_tolerance=step.yaw_tolerance,
+            timeout=step.timeout,
+        )
+        return self._run_move(dynamic, now)
 
     def _run_arc(self, step: Step, now: float) -> bool:
         if self._arc_last_yaw is None:
@@ -2405,14 +2625,23 @@ class ForkLiftNode(Node):
         return now - self._step_stable_since >= 0.25
 
     def _run_lift(self, step: Step, now: float, elapsed: float) -> bool:
-        self._lift_target = step.lift
+        lift_speed = (
+            self._loaded_lift_speed
+            if self._pallet_attached_command
+            else self._empty_lift_speed
+        )
+        max_delta = lift_speed / self._control_rate
+        lift_error = step.lift - self._lift_target
+        self._lift_target += clamp(lift_error, -max_delta, max_delta)
         self._publish_command(0.0, 0.0)
         if self._lift_feedback is not None:
             reached = abs(self._lift_feedback - step.lift) <= self._lift_tol
             if reached:
                 if self._step_stable_since is None:
                     self._step_stable_since = now
-                return now - self._step_stable_since >= 0.3
+                if now - self._step_stable_since < 0.3:
+                    return False
+                return self._carried_pallet_state_valid(now, step)
             self._step_stable_since = None
             return False
 
@@ -2421,8 +2650,54 @@ class ForkLiftNode(Node):
             self.get_logger().warning(
                 f"lift_joint 피드백 없음: {step.label}을 시간 기준으로 통과"
             )
-            return True
+            return self._carried_pallet_state_valid(now, step)
         return False
+
+    def _carried_pallet_state_valid(self, now: float, step: Step) -> bool:
+        """포크 소유 중에는 명령이 아니라 실제 팔레트 추종과 IW 자세를 확인한다."""
+        if self._handoff_owner != "fork":
+            return True
+        if (
+            self._handoff_state_time is None
+            or self._handoff_state_time < self._step_started
+            or now - self._handoff_state_time > self._connection_timeout
+        ):
+            return False
+        if (
+            self._handoff_iw_tilt_deg is not None
+            and self._handoff_iw_tilt_deg > 5.0
+        ):
+            self._fail(
+                "IW가 팔레트 인계 중 기울어졌습니다: "
+                f"tilt={self._handoff_iw_tilt_deg:.1f}deg"
+            )
+            return False
+        if (
+            self._handoff_carry_pose_error is None
+            or self._handoff_pallet_rise is None
+            or self._handoff_expected_rise is None
+        ):
+            # Isaac의 실제 ForkJoint 소유는 이미 owner="fork"로 확인됐다.
+            # 일부 실행 경로는 추가 추종 진단값을 발행하지 않으므로, 없는
+            # 선택 진단값 때문에 정상 FixedJoint 운반을 영구 대기시키지 않는다.
+            return True
+        if self._handoff_carry_pose_error > 0.015:
+            self._fail(
+                "팔레트가 포크 추종 목표에서 이탈했습니다: "
+                f"error={self._handoff_carry_pose_error:.3f}m"
+            )
+            return False
+        rise_error = abs(
+            self._handoff_pallet_rise - self._handoff_expected_rise
+        )
+        if rise_error > 0.015:
+            self._fail(
+                "리프트는 도달했지만 팔레트가 실제 높이만큼 상승하지 않았습니다: "
+                f"step={step.label}, actual={self._handoff_pallet_rise:.3f}m, "
+                f"expected={self._handoff_expected_rise:.3f}m"
+            )
+            return False
+        return True
 
     def _run_event(self, step: Step) -> None:
         if step.label == "task_complete":

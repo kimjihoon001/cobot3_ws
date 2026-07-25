@@ -50,7 +50,7 @@ KLT_PIVOT_Z = KLT_SIZE[2] / 2.0        # KLT 는 내가 만드는 큐브(피벗=
 BASE_Z = 0.35        # m. 1단 선반 높이. ForkliftB 포크 하한(-0.15m, 실측)보다 위 [2]
 RACK_DEPTH = 1.00    # m. 선반 깊이 = 팔레트 깊이 0.802 + 포크/앞뒤 여유 [2]
 POST_T = 0.08        # m. 기둥 두께 (온실 프레임과 동일 규격)
-TOP_MARGIN = 0.45    # m. 최상단 선반 위 여유 (팔레트 출입 공간)
+TOP_MARGIN = 1.00    # m. 최상단 선반 위 여유 (상단 팔레트/포크 간섭 방지)
 
 
 class Warehouse:
@@ -169,7 +169,12 @@ class Warehouse:
         log(f"[Warehouse] 배경 건물: {url}  @ {origin}")
         return True
 
-    def load_crates(self, stage: Usd.Stage, log=print) -> None:
+    def load_crates(
+        self,
+        stage: Usd.Stage,
+        log=print,
+        empty_slots: set[int] | frozenset[int] = frozenset(),
+    ) -> None:
         """슬롯에 '나무 팔레트 + KLT 빈 세트'를 얹어 '적재된 창고' 모습을 만든다.
 
         물류 루프(2026-07-19): 지게차가 팔레트째(위에 MM 이 채운 KLT) 랙에 올린다.
@@ -195,7 +200,10 @@ class Warehouse:
         pmat = physics.create_physics_material(
             stage, f"{self._root}/PhysMat/pallet",
             pp.static_friction, pp.dynamic_friction)
-        for s in self._slots:                    # 활성 슬롯(뒷벽): 팔레트 + 실제 KLT 빈
+        loaded_slots = [
+            s for s in self._slots if s["index"] not in empty_slots
+        ]
+        for s in loaded_slots:                   # 활성 슬롯(뒷벽): 팔레트 + 실제 KLT 빈
             self._place_pallet(stage, add_reference_to_stage, set_pose, set_scale,
                                f"{self._root}/Pallet_{s['index']:02d}", s["local"],
                                pallet_url, klt_url, pmat, yaw=0.0)
@@ -203,8 +211,15 @@ class Warehouse:
             self._place_pallet(stage, add_reference_to_stage, set_pose, set_scale,
                                f"{self._root}/Decor_{j:02d}", (dx, dy, dz),
                                pallet_url, klt_url, pmat, yaw=dyaw)
-        log(f"[Warehouse] 팔레트 {len(self._slots) + len(self._decor)}개 + 실제 KLT 8/팔레트 "
-            f"(활성 {len(self._slots)}+장식 {len(self._decor)}, 3면 랙 — 할당은 ROS2)")
+        empty_text = (
+            ", 빈 슬롯 "
+            + ",".join(f"{index:02d}" for index in sorted(empty_slots))
+            if empty_slots
+            else ""
+        )
+        log(f"[Warehouse] 팔레트 {len(loaded_slots) + len(self._decor)}개 + 실제 KLT 8/팔레트 "
+            f"(활성 {len(loaded_slots)}+장식 {len(self._decor)}{empty_text}, "
+            "3면 랙 — 할당은 ROS2)")
 
     def _place_pallet(self, stage, add_ref, set_ps, set_sc, path, local,
                       pallet_url, klt_url, pmat, yaw: float = 0.0) -> None:

@@ -15,6 +15,7 @@
   <depend>tf2_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>smartfarm_interfaces</depend>
   <depend>tf2_ros</depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_smac_planner</exec_depend>

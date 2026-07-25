@@ -5,7 +5,7 @@
 머지할 때 사용한다.
 
 - 기준 브랜치: `harvest/rmp-mm-suction`
-- 기준 커밋: `b235251`
+- 기준: `b235251` 이후 `iw-lane-nav` 병합 해소안 반영 중
 - 대상: IW Nav2, 도킹 목표 생성, 라이다 자기반사 필터, 팔레트·KLT·토마토 물리
 - 주의: 빈 KLT 충돌체 수정은 코드·정적 테스트까지 완료했으며, Isaac Sim 재시작 후
   실제 토마토 안착 여부는 통합 재검증이 필요하다.
@@ -31,7 +31,7 @@ ROS2 iwhub_control
     ├─ AMCL: map → odom
     ├─ Nav2: map/scan/goal → cmd_vel
     ├─ base_node: cmd_vel → wheel joint_command
-    └─ mission_nav_node: IDLE/FOLLOW/FORKLIFT → NavigateToPose
+    └─ mission_nav_node: IDLE/FOLLOW/FORKLIFT → 레인 NavigateThroughPoses
              │
              ▼
 warehouse_dock / forklift
@@ -296,8 +296,8 @@ footprint_padding: 0.0
 - layers: static + obstacle + inflation
 - obstacle range: `20 m`
 - raytrace range: `25 m`
-- inflation radius: `0.35 m`
-- cost scaling factor: `7.0`
+- inflation radius: `0.55 m`
+- cost scaling factor: `6.0`
 
 Local costmap에도 static layer를 유지한다. 전·후방 라이다 최소 감지거리 때문에
 차체 중앙 측면의 정적 벽이 scan에서 사라지는 구간을 보완하기 위한 것이다.
@@ -329,7 +329,7 @@ tolerance: 0.25
 
 | 항목 | 값 |
 |---|---:|
-| min/max linear velocity | `-0.25 / 0.50 m/s` |
+| min/max linear velocity | `0.00 / 0.50 m/s` |
 | max angular velocity | `0.80 rad/s` |
 | linear acceleration/deceleration | `1.2 / -1.5 m/s²` |
 | angular acceleration/deceleration | `1.6 / -2.0 rad/s²` |
@@ -339,7 +339,9 @@ tolerance: 0.25
 | BaseObstacle scale | `2.0` |
 
 기존 `BaseObstacle.scale=0.05`는 경로 critic에 비해 장애물을 사실상 무시해 회피가
-늦었으므로 `2.0`을 보존한다. velocity smoother도 같은 속도·가속도 한계를 사용한다.
+늦었으므로 `2.0`을 보존한다. 레인 생성과 swept-footprint 검사가 전역 안전 경로를
+만들고 DWB가 로컬 궤적을 선택한다. `min_vel_x=0.0`과 velocity smoother 하한 0으로
+일반 주행 중 임의 후진은 금지한다.
 
 ### 6.6 라이다 자기반사 필터
 
@@ -365,7 +367,7 @@ y: -0.4510 ~ +0.4510 m
 
 - `IDLE`: 목표를 보내지 않음
 - `FOLLOW`: MM 근처로 이동
-- `FORKLIFT`: 창고 도킹점으로 1회 이동
+- `FORKLIFT`: 레인 도크 접근→정밀 정렬→팔레트 교환→MM 복귀
 
 초기 상태는 반드시 `IDLE`이다. 수확 코디네이터가 `FOLLOW`를 발행하기 전에 IW가
 MM과 동시에 출발하지 않도록 한다.
@@ -380,14 +382,24 @@ dock_standoff = 1.2 m
 이 로직은 IW가 MM의 베드 쪽이 아니라 자신이 접근한 쪽에 비접촉 정차하게 한다.
 기존 `MM +X × 1.6955 m` 방식으로 되돌리면 IW가 베드 안으로 들어갈 수 있다.
 
+FOLLOW 목표는 레인 경로로 연결하되 최종 1.2m 위치는 X 레인으로 스냅하지 않는다.
+최종 접근 구간도 swept-footprint 검사를 통과해야 하며 배드를 가로지르면 goal을
+거부한다.
+
 FOLLOW 목표 갱신 임계값:
 
 - 위치 변화 `0.30 m`
 - yaw 변화 `30°`
 
-창고 목표:
+창고 목표와 인계 흐름:
 
-- `(x=0.0, y=10.84885, yaw=π/2)`
+- canonical dock: `(x=0.0, y=10.85, yaw=π)`
+- 레인 `NavigateThroughPoses`로 접근
+- 저속 폐루프로 위치·yaw 정밀 정렬
+- `/forklift/start_cycle` 서비스로 현재 pallet ID와 실제 dock pose 전달
+- `/forklift/clear=True`까지 정차
+- 레인으로 MM 부근 복귀 후 `RETURNED`, `/iw/resume_harvest=True`
+- 지게차 잠금 실패 시 `/iw/request_dock_adjust`로 제한된 재정렬
 
 ### 6.8 Nav2 기동 순서와 자동 복구
 
@@ -461,9 +473,9 @@ Tomatoes/T_* (각 토마토는 Load 밖의 별도 dynamic rigid body)
 | 배열 | `4 × 2` |
 | 간격 | x `0.31 m`, y `0.25 m` |
 | scale | `0.85` |
-| collider | 8개 모두 `convexDecomposition` |
-| 초기 채움 슬롯 | `(0,0)`, `(1,1)`, `(3,0)` |
-| 초기 토마토 수 | 슬롯당 5개, 총 15개 |
+| collider | 8개 모두 명시적 바닥+4벽 열린 shell |
+| 초기 채움 슬롯 | 없음 |
+| 초기 토마토 수 | `0` |
 
 **반드시 보존할 수정:** 초기 채움 여부와 관계없이 8개 KLT 모두 collider를 가져야
 한다. `filled` 조건 안에서만 collider를 추가하면 빈 플레이스 대상 `KLT_31`이
@@ -473,7 +485,7 @@ Tomatoes/T_* (각 토마토는 Load 밖의 별도 dynamic rigid body)
 
 1. KLT USD 참조 및 pose/scale 설정
 2. 에셋 자체 물리 제거
-3. 모든 KLT에 `convexDecomposition` collider 적용
+3. 모든 KLT에 입구가 열린 바닥+4벽 shell collider 적용
 4. `filled`이면 초기 토마토만 생성
 
 빈 슬롯 release pose는 초기 채움 슬롯을 제외한 후보 중 데크 로컬 x가 가장 큰
@@ -618,7 +630,9 @@ ros2 launch iwhub_control iwhub_nav2.launch.py
 - MM 수확 후 앞쪽 빈 KLT release pose 전달
 - MM의 `BASKET_APPROACH → BASKET_PLACE → RELEASE → RETRACT`
 - chassis deck geometry 발행
-- Python 문법 검사와 deck geometry 테스트 5개
+- Python/YAML/XML 정적 검사와 deck geometry 핵심 5개 케이스
+- 레인·swept-footprint·deadband 핵심 케이스
+- 관련 ROS 패키지 6개 격리 빌드
 
 ### 수정 후 재검증할 항목
 
@@ -639,10 +653,8 @@ ros2 launch iwhub_control iwhub_nav2.launch.py
 
 ### 현재 코드에서 발견되는 비교 포인트
 
-`smartfarm_integration.launch.py`는 mission node에 과거 파라미터
-`follow_offset_x/y`를 아직 전달한다. 현재 mission node의 실제 동작 파라미터는
-`dock_standoff=1.2`이며 과거 offset은 도킹 계산에 사용되지 않는다. 다른 브랜치와
-머지할 때 이 launch override를 신규 `dock_standoff` 인자로 정리할 필요가 있다.
+`smartfarm_integration.launch.py`도 `iw_dock_standoff=1.2`를 mission node의
+`dock_standoff`로 전달하도록 정리했다.
 
 `src/smartfarm/INTERFACES.md` 일부 설명은 “IW Nav2가 아직 없음”이라고 적힌 과거
 상태일 수 있다. 비교 기준은 현재 실행 코드와 이 문서이며, 인터페이스 문서는 별도
@@ -657,7 +669,7 @@ ros2 launch iwhub_control iwhub_nav2.launch.py
 3. scan self-filter 노드, entry point, launch 연결
 4. localization/navigation 지연 기동과 lifecycle 재시도
 5. 팔레트 `convexDecomposition`과 chassis FixedJoint
-6. 8개 KLT 전체의 `convexDecomposition` collider
+6. 8개 KLT 전체의 명시적 열린 shell collider
 7. 토마토 독립 dynamic rigid body·밀도·마찰 설정
 8. 앞쪽 빈 KLT 슬롯 선택과 release pose 발행
 

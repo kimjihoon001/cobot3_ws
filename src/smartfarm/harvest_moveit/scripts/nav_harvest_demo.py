@@ -12,6 +12,7 @@ import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from grasp_proto import HOME_Q, Grasp, harvest_once
@@ -50,12 +51,28 @@ class NavHarvestDemo:
         node.declare_parameter("start_x", float("nan"))
         node.declare_parameter("start_y", float("nan"))
         node.declare_parameter("start_yaw", float("nan"))
+        node.declare_parameter("iw_handoff_on_success", False)
+        node.declare_parameter("klt_base_reposition", True)
+        node.declare_parameter("klt_reposition_m", 0.20)
+        node.declare_parameter("klt_reposition_yaw_deg", 25.0)
 
         # 상대 토픽은 PushRosNamespace(harvester_moveit)가 격리한다.
         # 이 PC의 Fast-DDS에서는 외부 NavigateToPose goal response가 서버에 도착한 뒤
         # 응답만 timeout 나는 현상이 있다. bt_navigator가 기본 제공하는 goal_pose 입력은
         # 내부 액션 클라이언트를 사용하므로 RViz와 통합 데모 모두 이 경로로 통일한다.
         self.goal_pub = node.create_publisher(PoseStamped, "goal_pose", 10)
+        latched = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.iw_mission_pub = node.create_publisher(
+            String, "/iw/mission", latched)
+        self.iw_status: str | None = None
+        node.create_subscription(
+            String, "/iw/status",
+            lambda msg: setattr(self, "iw_status", msg.data.strip().upper()),
+            latched)
         self.amcl_pose: PoseStamped | None = None
         node.create_subscription(
             PoseWithCovarianceStamped, "amcl_pose", self._amcl_pose, 10)
@@ -197,6 +214,87 @@ class NavHarvestDemo:
                          + orientation.z * orientation.z),
         )
 
+    def _pose_relative_to(
+            self, origin: PoseStamped, forward: float,
+            lateral: float, yaw_delta: float) -> PoseStamped:
+        """origin 기준 로봇 좌표 이동량을 map PoseStamped로 변환한다."""
+        yaw = self._yaw(origin.pose.orientation)
+        pose = PoseStamped()
+        pose.header.frame_id = origin.header.frame_id
+        pose.header.stamp = self.node.get_clock().now().to_msg()
+        pose.pose.position.x = (
+            origin.pose.position.x
+            + math.cos(yaw) * forward - math.sin(yaw) * lateral)
+        pose.pose.position.y = (
+            origin.pose.position.y
+            + math.sin(yaw) * forward + math.cos(yaw) * lateral)
+        target_yaw = yaw + yaw_delta
+        pose.pose.orientation.z = math.sin(target_yaw * 0.5)
+        pose.pose.orientation.w = math.cos(target_yaw * 0.5)
+        return pose
+
+    def ensure_klt_place_reachable(self) -> bool:
+        """정상 IK가 없을 때만 베이스를 제한된 후보 pose로 미세 재정렬한다."""
+        self.node.klt_targets.clear()
+        if self.node.klt_place_reachable(0):
+            self.node.get_logger().info(
+                "현재 도킹 자세에서 정상 KLT 적재 IK 확인")
+            return True
+        if not bool(
+                self.node.get_parameter("klt_base_reposition").value):
+            return False
+        if self.amcl_pose is None:
+            self.node.get_logger().error(
+                "KLT IK 불량이며 AMCL pose가 없어 베이스 재정렬 불가")
+            return False
+
+        origin = PoseStamped()
+        origin.header.frame_id = str(
+            self.node.get_parameter("nav_frame").value)
+        origin.pose = self.amcl_pose.pose
+        shift = float(
+            self.node.get_parameter("klt_reposition_m").value)
+        turn = math.radians(float(
+            self.node.get_parameter("klt_reposition_yaw_deg").value))
+
+        # MoveIt-MM은 holonomic base라 좁은 통로에서 회전보다 횡이동이 안전하다.
+        # 먼저 KLT 쪽/반대쪽 20cm 후보를 쓰고, 그래도 안 될 때만 costmap 검사를
+        # 거치는 회전 후보를 사용한다. (Nav2 goal tolerance 15cm보다 큰 goal이어야
+        # 실제 재정렬 명령이 발생한다.)
+        candidates = [
+            (0.0, shift, 0.0),
+            (0.0, -shift, 0.0),
+            (0.0, shift, turn),
+            (0.0, shift, -turn),
+            (0.0, 0.0, turn),
+            (0.0, 0.0, -turn),
+        ]
+        for number, (forward, lateral, yaw_delta) in enumerate(
+                candidates, start=1):
+            target = self._pose_relative_to(
+                origin, forward, lateral, yaw_delta)
+            self.node.get_logger().warn(
+                "정상 KLT IK 없음 → 베이스 미세 재정렬 "
+                f"{number}/{len(candidates)} "
+                f"(전후={forward:+.2f}m, yaw={math.degrees(yaw_delta):+.1f}°)")
+            if not self.navigate(
+                    target, f"KLT 재정렬 {number}",
+                    stop_on_detection=False):
+                continue
+            # 이동 뒤 기존 좌표를 쓰지 않고 Isaac이 새 mm_base 기준으로 발행한
+            # KLT 8개를 다시 받은 다음 IK를 재검사한다.
+            self.node.klt_targets.clear()
+            if self.node.klt_place_reachable(0):
+                self.node.get_logger().info(
+                    f"KLT 적재용 정상 IK 확보: 베이스 후보 {number}")
+                return True
+
+        self.node.get_logger().error(
+            "제한된 베이스 재정렬 후보에서도 정상 KLT IK를 찾지 못했습니다")
+        # 실패 시에도 임의 pose에 두지 않고 원래 도킹 자세 복귀를 시도한다.
+        self.navigate(origin, "KLT 재정렬 원위치 복귀", stop_on_detection=False)
+        return False
+
     def navigate(
             self, pose: PoseStamped, label: str,
             stop_on_detection: bool = False) -> bool:
@@ -330,6 +428,13 @@ class NavHarvestDemo:
         if self.stopped_for_detection:
             self.node.get_logger().info(
                 "베이스 정지 완료 — 팔 수확 시퀀스로 전환합니다")
+
+        # 현재 FOLLOW 자체가 MM 접근 방향 1.2m의 플레이스 위치를 유지한다.
+        # 별도 LOAD 미션 없이 현 자세에서 KLT 도달성을 확인한다.
+        if not self.ensure_klt_place_reachable():
+            self.node.get_logger().error(
+                "안전한 KLT 적재 자세를 확보하지 못해 수확을 시작하지 않음")
+            return False
         if not self.wait_for_fruit():
             return False
 
@@ -351,14 +456,25 @@ class NavHarvestDemo:
                 self.node.get_logger().info("[YOLO] tomato 탐지! → 파지")
             if not harvest_once(self.node):
                 break
+            if attach:
+                # 수확한 과실을 허공/팔레트 위에 놓지 않고, 실제 IW 자세에서
+                # 도달 가능한 KLT 내부로 팔을 이동해 플레이스한다.
+                if not self.node.place_held_fruit_in_klt(done % 8):
+                    self.node.get_logger().error(
+                        "KLT 플레이스 실패 — 과실을 임의 해제하지 않고 사이클 중단")
+                    break
             done += 1
-            if attach:      # 다음 과실 위해 놓기
-                self.node.cmd.publish(String(data=json.dumps({"detach_grasp": True})))
-                self.node.spin_for(1.5)
         self.node.get_logger().info(f"총 {done}/{n} 수확 완료")
         if done == 0:
             self.node.get_logger().error("수확 0 — 복귀 안 함")
             return False
+
+        if bool(self.node.get_parameter("iw_handoff_on_success").value):
+            # 풀 파이프라인 검증에서는 HARVEST_N을 IW 만재 기준으로 취급한다.
+            # 수확 성공 전에 도크 미션이 나가지 않도록 이 지점에서만 전환한다.
+            self.iw_mission_pub.publish(String(data="FORKLIFT"))
+            self.node.get_logger().info(
+                "MoveIt 수확 완료 → /iw/mission=FORKLIFT (IW 인계 시작)")
 
         if (start is not None
                 and bool(self.node.get_parameter("return_to_start").value)):

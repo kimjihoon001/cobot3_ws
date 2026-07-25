@@ -1240,6 +1240,12 @@ class TransporterController:
         """구동 바퀴 각속도[rad/s]. 0 이면 정지."""
         self._drive_vel = vel
 
+    def fork_position(self) -> float:
+        """PhysX가 보고하는 현재 lift_joint 위치[m]."""
+        positions = np.asarray(self._robot.get_joint_positions(), dtype=float)
+        value = float(positions[self._lift_i])
+        return value if np.isfinite(value) else float(self._lift)
+
     # ---- 반영 ----
     def apply(
         self,
