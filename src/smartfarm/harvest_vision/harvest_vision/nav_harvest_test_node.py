@@ -115,7 +115,9 @@ class NavHarvestTestNode(Node):
                                  self._iw_status_callback, latched)
         self._iw_full = False
         self._placed = False
-        self._iw_mission_pub.publish(String(data="FOLLOW"))   # 시작=추종
+        # IW는 MM과 동시에 출발시키지 않는다. MM이 수확 위치에 도착하고 실제
+        # 매니퓰레이터 시퀀스(APPROACH)를 시작할 때 FOLLOW를 한 번만 보낸다.
+        self._iw_follow_started = False
         self._buffer = Buffer()
         self._listener = TransformListener(self._buffer, self)
         self._nav_client = ActionClient(
@@ -475,6 +477,12 @@ class NavHarvestTestNode(Node):
         }:
             if state == "APPROACH":
                 self._cycle_failed = False
+                if not self._iw_follow_started:
+                    self._iw_follow_started = True
+                    self._iw_mission_pub.publish(String(data="FOLLOW"))
+                    self._publish_status("HARVEST_STARTED_IW_FOLLOW")
+                    self.get_logger().info(
+                        "MM 수확 시퀀스 시작 → IW FOLLOW 이동 지시")
             self._search_deadline_ns = 0
             self._publish_status(f"HARVEST_{state}")
         elif state == "HARVEST_FAILED":
@@ -500,11 +508,11 @@ class NavHarvestTestNode(Node):
                 self._publish_status("IW_FULL_TO_FORKLIFT")
                 self.get_logger().info("적재 1개(만재) → iw 지게차 이동 지시")
         elif state == "RETRY_VISION":
-            # 실패 후 홈에 도달한 경우에는 원샷 게이트를 끄지 않는다. 홈 카메라의
-            # 새로운 YOLO 프레임을 받도록 탐색 타이머와 수확 게이트를 다시 연다.
+            # 실패 후 홈에 도달한 경우에는 원샷 게이트를 끄지 않는다. 홈 카메라 대신
+            # Nav 도착 때와 동일하게 홈→베드뷰로 재관측한 뒤 새 YOLO 프레임을 받는다.
             self._basket_sent = False
-            self._start_search()
-            self._publish_status("RETRY_SEARCHING_TOMATO")
+            self._begin_post_nav_home()
+            self._publish_status("RETRY_REOBSERVE_BED_VIEW")
         elif state == "NAV_REPOSITION_REQUIRED":
             self._search_deadline_ns = 0
             self._publish_enable(False)

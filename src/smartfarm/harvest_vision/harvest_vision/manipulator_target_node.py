@@ -28,6 +28,7 @@ ACTIVE_SEQUENCE_STATES = {
     "RETRACT_CIRC", "RETRACT_LIN",
     "RETRACT", "PRE_PLACE",
     "WAIT_BASKET", "BASKET_APPROACH", "BASKET_PLACE", "PLACE_RELEASING",
+    "BASKET_RETRACT",
     "GO_HOME",
     "NAV_REPOSITION_REQUIRED",
 }
@@ -78,6 +79,11 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("use_sim_ground_truth", False)
         self.declare_parameter("sim_tomato_topic", "/harvester_0/sim/tomato")
         self.declare_parameter("sim_match_radius_m", 0.35)
+        # 수확 목표와 바스켓 적재 목표는 허용 높이가 다르다. 기존 workspace_min.z=0.15는
+        # 낮은 KLT 적재를 위해 필요하지만, 이를 과실 선택에도 공유하면 바닥 가까이 내려간
+        # 과실(z≈0.42)의 safe approach(z≈0.25)를 정상 목표로 승인해 팔이 베이스 쪽으로
+        # 크게 접힌다. 시뮬 GT 후보 단계에서 수확 과실만 별도로 제한한다.
+        self.declare_parameter("harvest_target_min_z_m", 0.70)
         # 시뮬 통합시험에서는 검출 광선 매칭이 일시적으로 실패해도, 검출점과 가장
         # 가까운 fresh GT 과실을 선택해 수확을 계속한다.
         self.declare_parameter("direct_sim_grasp", False)
@@ -166,8 +172,13 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("grasp_one_side_yaw_deg", 5.0)
         self.declare_parameter("grasp_one_side_max_retries", 1)
         self.declare_parameter("basket_approach_height_m", 0.15)
-        self.declare_parameter("basket_workspace_min", [-0.80, -0.80, 0.15])
+        # X 하한은 옛 UR10e 기준 -0.80이었다. m0617은 리치가 길어 MM 뒤쪽(음수 X)
+        # 앞 데크 슬롯(KLT_31 ≈ X -0.95, 반경 0.98m)까지 닿는다. -1.05로 넓혀 통과시킨다.
+        self.declare_parameter("basket_workspace_min", [-1.05, -0.80, 0.15])
         self.declare_parameter("basket_workspace_max", [1.35, 0.80, 1.80])
+        # 스쿱 릴리즈가 목표보다 바깥(MM 반대편)에 떨어져 옆 칸 사이에 놓이는 것을
+        # 보정한다. 릴리즈 목표를 MM 쪽(수평 반경 안쪽)으로 이만큼 당겨 중심에 놓는다.
+        self.declare_parameter("basket_place_toward_mm_m", 0.06)
         self.declare_parameter("workspace_min", [0.15, -1.05, 0.15])
         self.declare_parameter("workspace_max", [1.25, 1.05, 1.80])
         # 데모: 성공/실패 무관 매 시도 후 홈 복귀 → 팔이 안 굳고 다음 과실을 계속 시도한다.
@@ -177,6 +188,14 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("single_shot_harvest", True)
         # 실패 후에도 명시적 요청 없이 새 과실을 자동으로 쫓지 않는다.
         self.declare_parameter("retry_after_failure", False)
+        # 수확 실패 시 홈까지 가지 않고 APPROACH 안전점으로 후퇴해 재파지하는 최대 횟수.
+        # 소진하면 베드뷰 재관측으로 에스컬레이션한다. 0이면 즉시 베드뷰/홈 복귀.
+        self.declare_parameter("approach_retry_max", 1)
+        # 접근점 재시도까지 소진한 뒤 베드뷰로 돌아가 좌표를 다시 받는 최대 횟수.
+        self.declare_parameter("bed_view_retry_max", 1)
+        # 타겟 좌표 안정화: 파지 시작 전, 좌표가 eps_m 이내로 N프레임 연속 고정돼야 수락.
+        self.declare_parameter("target_stable_frames", 5)
+        self.declare_parameter("target_stable_eps_m", 0.01)
 
         self._buffer = Buffer()
         self._listener = TransformListener(self._buffer, self)
@@ -204,6 +223,10 @@ class ManipulatorTargetNode(Node):
         self._cut_check_id = 0
         self._cut_check_sent = False
         self._grasp_yaw_retry_count = 0
+        self._approach_retry_count = 0
+        self._bed_view_retry_count = 0
+        self._stable_count = 0
+        self._stable_ref: tuple[float, float, float] | None = None
         self._follow_check_id = 0
         self._basket_place: np.ndarray | None = None
         self._basket_received_ns = 0
@@ -323,6 +346,33 @@ class ManipulatorTargetNode(Node):
         self._latest_target = (p.x, p.y, p.z)
         self._latest_camera = (cp.x, cp.y, cp.z)
         self._validated_pub.publish(target)
+        # 타겟 좌표 안정화: eps_m 이내로 연속 유지되는 프레임 수를 센다. 흔들리면 리셋.
+        pos = (p.x, p.y, p.z)
+        eps = float(self.get_parameter("target_stable_eps_m").value)
+        if (self._stable_ref is not None
+                and abs(pos[0] - self._stable_ref[0]) <= eps
+                and abs(pos[1] - self._stable_ref[1]) <= eps
+                and abs(pos[2] - self._stable_ref[2]) <= eps):
+            self._stable_count += 1
+        else:
+            self._stable_count = 1
+            self._stable_ref = pos
+        # 게이트가 열린 순간 class가 Pose보다 먼저 도착할 수 있다. 그 경우
+        # ERROR_NO_TARGET로 사이클을 닫지 않고 첫 유효 Pose가 들어온 여기서 시작한다.
+        if (self._state == "WAIT_TARGET"
+                and self._harvest_enabled
+                and self._target_class in ("tomato", "ripe")
+                and bool(self.get_parameter("command_enabled").value)
+                and bool(self.get_parameter("auto_grasp_enabled").value)):
+            need_stable = int(self.get_parameter("target_stable_frames").value)
+            if self._stable_count < need_stable:
+                self.get_logger().info(
+                    f"타겟 좌표 안정화 대기 {self._stable_count}/{need_stable}",
+                    throttle_duration_sec=1.0)
+                return
+            self._transition("RIPE_READY", stop=True)
+            self._start_grasp_sequence()
+            return
         if (bool(self.get_parameter("command_enabled").value)
                 and self._harvest_enabled
                 and self._target_class == "tomato"
@@ -362,6 +412,11 @@ class ManipulatorTargetNode(Node):
             # Nav2 주행 중에는 검출/좌표 시각화만 유지하고 팔 명령은 완전히 차단한다.
             self._deadline_ns = 0
             self._transition("WAIT_NAV", stop=True)
+            return
+        if (self._state == "WAIT_TARGET"
+                and target_class in ("tomato", "ripe")
+                and (self._latest_target is None or self._latest_camera is None)):
+            # 첫 유효 Pose는 _target_callback에서 시퀀스를 시작한다.
             return
         if self._state in ACTIVE_SEQUENCE_STATES:
             # 파지 중 검출 흔들림으로 시퀀스를 재시작하지 않는다.
@@ -446,7 +501,9 @@ class ManipulatorTargetNode(Node):
 
     def _start_grasp_sequence(self) -> None:
         if self._latest_target is None or self._latest_camera is None:
-            self._transition("ERROR_NO_TARGET", stop=True)
+            # RGB class와 TF 변환된 Pose는 서로 다른 콜백에서 도착한다. 통합 실행은
+            # 부하가 커 gate-open 직후 class가 먼저 오는 일이 흔하므로 정상 대기한다.
+            self._transition("WAIT_TARGET", stop=True)
             return
         target = np.asarray(self._latest_target, dtype=float)
         if bool(self.get_parameter("use_sim_ground_truth").value):
@@ -556,6 +613,7 @@ class ManipulatorTargetNode(Node):
         self._circ_interim = interim
         self._fruit_target = target.copy()
         self._grasp_yaw_retry_count = 0
+        self._approach_retry_count = 0    # 새 과실 시퀀스 시작 — 재접근 카운터 초기화
         # 파지 전 그리퍼를 연다 — 닫힌 채로 다가가면 손가락이 과실을 못 감싼다.
         self._isaac_command_pub.publish(
             String(data=json.dumps({
@@ -690,12 +748,13 @@ class ManipulatorTargetNode(Node):
     def _nearest_sim_tomato(
         self, vision_target: np.ndarray
     ) -> tuple[np.ndarray, int] | None:
-        """fresh GT 중 검출된 3D 점에 가장 가까운 과실을 선택한다."""
+        """fresh하고 안전한 GT 중 검출된 3D 점에 가장 가까운 과실을 선택한다."""
         now = self.get_clock().now().nanoseconds
         fresh = [
             (float(np.linalg.norm(position - vision_target)), fruit_id, position)
             for fruit_id, (position, stamp) in self._sim_fruits.items()
-            if now - stamp <= int(30.0e9)
+            if (now - stamp <= int(30.0e9)
+                and self._sim_harvest_height_ok(position))
         ]
         if not fresh:
             return None
@@ -707,7 +766,9 @@ class ManipulatorTargetNode(Node):
     ) -> tuple[np.ndarray, int] | None:
         now = self.get_clock().now().nanoseconds
         fresh = [(fruit_id, position) for fruit_id, (position, stamp)
-                 in self._sim_fruits.items() if now - stamp <= int(30.0e9)]
+                 in self._sim_fruits.items()
+                 if (now - stamp <= int(30.0e9)
+                     and self._sim_harvest_height_ok(position))]
         if not fresh:
             return None
         # depth는 앞쪽 잎 때문에 크게 틀릴 수 있지만 검출 중심의 카메라 광선은
@@ -736,6 +797,15 @@ class ManipulatorTargetNode(Node):
             return None
         return nearest.copy(), fruit_id
 
+    def _sim_harvest_height_ok(self, position: np.ndarray) -> bool:
+        """낮은 적재 workspace와 분리된 수확 과실 높이 안전조건."""
+        return (
+            position.shape == (3,)
+            and np.all(np.isfinite(position))
+            and float(position[2]) >= float(
+                self.get_parameter("harvest_target_min_z_m").value)
+        )
+
     def _send_rmp_goal(self, position: np.ndarray, phase: str) -> None:
         self._sequence_id += 1
         self._pending_id = self._sequence_id
@@ -755,6 +825,10 @@ class ManipulatorTargetNode(Node):
             # 베드뷰 방향을 유지한 채 충돌회피한다. motion bridge가 현재 joint_1
             # 주변으로 OMPL 경로를 제한해 제자리에서 크게 도는 IK 해를 차단한다.
             command["rmp_target"]["motion"] = "OMPL"
+        elif phase == "BASKET_APPROACH":
+            # 바스켓은 등 뒤(약 joint_1 180°)라 자유 IK면 팔이 크게 뒤집힌다.
+            # 랭크드 IK로 joint_1 위주 최소변화 해를 골라 방향만 맞춘 뒤 place 한다.
+            command["rmp_target"]["motion"] = "OMPL"
         elif phase in {"GRASP", "RETRACT_CIRC"}:
             # 축방향 직선 삽입/후퇴 — CIRC 원호를 쓰지 않는다.
             command["rmp_target"]["motion"] = "LIN"
@@ -762,6 +836,7 @@ class ManipulatorTargetNode(Node):
                 command["rmp_target"]["velocity_scale"] = 0.05
         elif phase in {
             "PREGRASP", "CAPTURE_TRIM", "RETRACT_LIN",
+            "BASKET_PLACE", "BASKET_RETRACT",
         }:
             command["rmp_target"]["motion"] = "LIN"
             if phase == "PREGRASP":
@@ -779,7 +854,7 @@ class ManipulatorTargetNode(Node):
             "APPROACH", "PREGRASP", "GRASP",
             "CAPTURE_TRIM", "VERIFY_RETRACT",
             "RETRACT_CIRC", "RETRACT_LIN", "RETRACT",
-            "BASKET_APPROACH", "BASKET_PLACE",
+            "BASKET_APPROACH", "BASKET_PLACE", "BASKET_RETRACT",
         }:
             orientation = self._harvest_orientation
             if orientation is None:
@@ -982,6 +1057,7 @@ class ManipulatorTargetNode(Node):
                 self.get_logger().info(
                     "GRASP TCP 근접 + 수용 확인 "
                     f"{float(status.get('d', 999.0)):.3f}m — 칼날 절단 시작")
+                self._bed_view_retry_count = 0   # 파지 성공 — 재관측 재시도 카운터 리셋
                 self._begin_cut()
             else:
                 self._deadline_ns = 0
@@ -1013,7 +1089,9 @@ class ManipulatorTargetNode(Node):
             except (TypeError, ValueError):
                 return
             if gripper <= 0.08:
-                self._send_home()
+                # KLT 안에서 곧바로 PTP 홈 복귀를 시작하면 스쿱이 바스켓 벽을
+                # 가로지를 수 있다. 접근점을 LIN으로 되짚어 빠져나온다.
+                self._start_basket_retract()
             return
         try:
             status_id = int(status.get("id", -1))
@@ -1081,18 +1159,18 @@ class ManipulatorTargetNode(Node):
         elif self._state == "RETRACT_CIRC":
             self._send_rmp_goal(self._approach_target, "RETRACT_LIN")
         elif self._state in ("RETRACT_LIN", "RETRACT", "PRE_PLACE"):
-            if (not self._basket_available()
-                    and bool(self.get_parameter(
-                        "use_iw_tf_basket_fallback").value)):
-                self._acquire_nearby_iw_basket()
-            if self._basket_available():
+            # 파지·절단·안전 후퇴가 모두 끝난 지금부터만 바스켓 좌표를 받는다.
+            # 주행/수확 중 들어온 좌표는 이동 중인 IW의 과거 위치일 수 있으므로 폐기한다.
+            self._basket_place = None
+            self._basket_received_ns = 0
+            self._transition("WAIT_BASKET", stop=True)
+            self._deadline_ns = (
+                self.get_clock().now().nanoseconds
+                + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+            )
+            if (bool(self.get_parameter("use_iw_tf_basket_fallback").value)
+                    and self._acquire_nearby_iw_basket()):
                 self._start_place()
-            else:
-                # 실제 IW 좌표가 없거나 오래됐으면 다른 자세를 만들지 않고 홈으로 간다.
-                self._basket_place = None
-                self._basket_received_ns = 0
-                self._deadline_ns = 0
-                self._send_home()
         elif self._state == "BASKET_APPROACH":
             self._send_rmp_goal(self._basket_place, "BASKET_PLACE")
         elif self._state == "BASKET_PLACE":
@@ -1103,6 +1181,8 @@ class ManipulatorTargetNode(Node):
             )
             self._isaac_command_pub.publish(
                 String(data=json.dumps({"gripper": {"closed": False}})))
+        elif self._state == "BASKET_RETRACT":
+            self._send_home()
         elif self._state == "GO_HOME":
             self._deadline_ns = 0
             self._mobility_pub.publish(Bool(data=True))
@@ -1117,6 +1197,8 @@ class ManipulatorTargetNode(Node):
                 self._grasp_fruit_id = None
                 self._reposition_fruit_id = None
                 self._reposition_requested_ns = 0
+                self._stable_count = 0        # 재관측 — 5프레임 안정도 처음부터
+                self._stable_ref = None
                 self._transition("RETRY_VISION", stop=True)
                 self.get_logger().info("홈 복귀 완료 — 비전 재탐색 후 자동 재시도")
             else:
@@ -1125,6 +1207,10 @@ class ManipulatorTargetNode(Node):
 
     def _basket_callback(self, msg: PoseStamped) -> None:
         """IW가 선택한 빈 바스켓 슬롯의 tool-release pose를 base 좌표로 저장한다."""
+        # 바스켓 위치는 수확·절단·후퇴가 끝난 뒤에만 사용한다. 통합 시작부터
+        # 변환하면 이동 중 IW 좌표가 캐시되고 불필요한 TF/작업영역 경고도 폭주한다.
+        if self._state != "WAIT_BASKET":
+            return
         if not msg.header.frame_id or self._is_stale(msg):
             return
         base_frame = str(self.get_parameter("base_frame").value)
@@ -1215,10 +1301,31 @@ class ManipulatorTargetNode(Node):
             self._basket_received_ns = 0
             self._send_home()
             return
+        # 바스켓 중심 보정: 릴리즈 목표를 MM 쪽(수평 반경 안쪽)으로 당겨 옆 칸 사이가
+        # 아니라 슬롯 중심에 떨어지게 한다. BASKET_APPROACH·BASKET_PLACE 공통 반영.
+        shift = float(self.get_parameter("basket_place_toward_mm_m").value)
+        if shift > 0.0:
+            xy = self._basket_place[:2]
+            r = float(np.linalg.norm(xy))
+            if r > 1e-6:
+                self._basket_place[:2] = xy * (1.0 - shift / r)
+                self.get_logger().info(
+                    f"바스켓 중심 보정: MM 쪽으로 {shift:.3f} m 당김 → "
+                    f"({self._basket_place[0]:.3f}, {self._basket_place[1]:.3f})")
         approach = self._basket_place.copy()
         approach[2] += float(
             self.get_parameter("basket_approach_height_m").value)
         self._send_rmp_goal(approach, "BASKET_APPROACH")
+
+    def _start_basket_retract(self) -> None:
+        """릴리스 위치에서 같은 수직 경로로 KLT 위까지 안전하게 빠져나온다."""
+        if self._basket_place is None:
+            self._send_home()
+            return
+        retract = self._basket_place.copy()
+        retract[2] += float(
+            self.get_parameter("basket_approach_height_m").value)
+        self._send_rmp_goal(retract, "BASKET_RETRACT")
 
     def _begin_preplace(self) -> None:
         """레거시 진입점. 큰 HOME 왕복 대신 접근 경로를 그대로 되짚어 후퇴한다."""
@@ -1262,8 +1369,47 @@ class ManipulatorTargetNode(Node):
     def _abort_to_home(self, reason: str) -> None:
         """실패해도 팔을 홈으로 돌려 다음 과실을 계속 시도하게 한다(데모 연속 사이클).
         이미 홈 복귀 중(GO_HOME)에 또 실패하면 무한루프 방지로 멈추기만 한다."""
-        self.get_logger().warning(f"수확 실패({reason}) — 홈 복귀 후 다음 시도")
         was_going_home = self._state == "GO_HOME"
+        # 재접근 재시도: 홈까지 가지 않고 APPROACH 안전점으로 후퇴한 뒤 다시 파지한다.
+        # 도달하면 기존 흐름(APPROACH→PREGRASP→GRASP)이 그대로 이어진다.
+        retry_max = int(self.get_parameter("approach_retry_max").value)
+        if (not was_going_home
+                and self._state != "APPROACH"
+                and self._approach_retry_count < retry_max):
+            self._approach_retry_count += 1
+            self.get_logger().warning(
+                f"수확 실패({reason}) — 접근지점 복귀 후 재시도 "
+                f"{self._approach_retry_count}/{retry_max}")
+            self._deadline_ns = 0
+            self._grasp_check_sent = False
+            # 부분 파지 해제: 그리퍼 개방 + 칼날 개방 후 접근점으로 되짚어 나온다.
+            self._isaac_command_pub.publish(String(data=json.dumps({
+                "gripper": {"closed": False},
+                "blade": float(self.get_parameter("blade_open_deg").value),
+            })))
+            self._send_rmp_goal(self._approach_target, "APPROACH")
+            return
+        # 2단계: 접근점 재시도 소진 → 베드뷰로 재관측한다. retry_after_home=True로
+        # 홈→(코디네이터가)베드뷰→좌표 재수신 경로를 탄다. 새 좌표는 WAIT_TARGET의
+        # 5프레임 고정 게이트를 다시 통과해야 파지를 시작한다.
+        bed_max = int(self.get_parameter("bed_view_retry_max").value)
+        if not was_going_home and self._bed_view_retry_count < bed_max:
+            self._bed_view_retry_count += 1
+            self.get_logger().warning(
+                f"수확 실패({reason}) — 접근점 재시도 소진, 베드뷰 재관측 "
+                f"{self._bed_view_retry_count}/{bed_max}")
+            self._deadline_ns = 0
+            self._grasp_check_sent = False
+            self._transition("HARVEST_FAILED")
+            self._isaac_command_pub.publish(String(data=json.dumps({
+                "gripper": {"closed": False},
+                "blade": float(self.get_parameter("blade_open_deg").value),
+            })))
+            self._send_home(retry_after_home=True)
+            return
+        # 3단계: 모든 재시도 소진 — 최종 홈 복귀. 다음 사이클 위해 카운터 리셋.
+        self._bed_view_retry_count = 0
+        self.get_logger().warning(f"수확 실패({reason}) — 홈 복귀 후 다음 시도")
         # 홈 복귀 자체의 성공을 수확 사이클 성공으로 오인하지 않도록 상위 시험
         # 노드에 실패를 먼저 명시한다. 이어지는 GO_HOME은 안전 복귀 동작일 뿐이다.
         self._transition("HARVEST_FAILED")

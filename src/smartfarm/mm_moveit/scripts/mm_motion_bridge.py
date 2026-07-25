@@ -12,11 +12,13 @@ import json
 import math
 
 import rclpy
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (BoundingVolume, Constraints, JointConstraint,
                              OrientationConstraint, PositionConstraint)
+from moveit_msgs.srv import GetPositionIK
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
@@ -41,7 +43,8 @@ class MMMotionBridge(Node):
         # 기존 harvest_moveit/grasp_proto의 스쿱 수용 정밀도와 동일하다.
         self.declare_parameter("position_tolerance_m", 0.0025)
         self.declare_parameter("planning_time_sec", 8.0)
-        self.declare_parameter("velocity_scale", 0.30)
+        self.declare_parameter("velocity_scale", 0.50)
+        self.declare_parameter("acceleration_scale", 0.30)
         self.declare_parameter(
             "planning_pipeline", "pilz_industrial_motion_planner")
         self.declare_parameter("planner_id", "PTP")
@@ -50,10 +53,20 @@ class MMMotionBridge(Node):
         # BED_VIEW 방향에서 1축이 크게 돌아 반대 IK 해로 넘어가지 않도록
         # APPROACH OMPL 경로의 joint_1 허용 범위를 현재각 주변으로 제한한다.
         self.declare_parameter("approach_joint_1_tolerance_rad", 0.55)
+        self.declare_parameter("rank_approach_ik", True)
+        self.declare_parameter("ik_candidate_timeout_sec", 0.15)
+        self.declare_parameter(
+            "ik_joint_change_weights", [2.0, 1.5, 1.5, 2.0, 3.0, 3.0])
+        # 바스켓 접근은 joint_1 을 싸게(회전 허용), 나머지는 비싸게(고정) 둬서
+        # 방향만 joint_1 회전으로 맞추고 다른 관절은 최소로 움직이게 한다.
+        self.declare_parameter(
+            "basket_ik_joint_change_weights", [0.3, 3.0, 3.0, 3.0, 4.0, 4.0])
+        self.declare_parameter("ik_max_single_joint_change_rad", 2.40)
         self.declare_parameter("joint_state_max_age_sec", 0.5)
         self.declare_parameter("control_failure_retries", 2)
 
         self._move = ActionClient(self, MoveGroup, "move_action")
+        self._compute_ik = self.create_client(GetPositionIK, "compute_ik")
         self._status_pub = self.create_publisher(String, "pipeline_status", 20)
         self.create_subscription(String, "status", self._forward_isaac_status, 20)
         self.create_subscription(String, "cmd", self._command, 20)
@@ -68,6 +81,11 @@ class MMMotionBridge(Node):
         self._last_joint_state_stamp_ns = 0
         self._active_goal_message: MoveGroup.Goal | None = None
         self._control_retry_count = 0
+        self._ik_generation = 0
+        self._ik_active_key: tuple[int, str] | None = None
+        self._ik_pending = 0
+        self._ik_candidates: list[dict[str, float]] = []
+        self._ik_context: tuple[int, str, MoveGroup.Goal] | None = None
         self.create_subscription(
             JointState, "joint_states", self._joint_state, 20)
         self.create_timer(0.1, self._dispatch)
@@ -130,11 +148,16 @@ class MMMotionBridge(Node):
                 return
             frame = str(target.get(
                 "frame_id", self.get_parameter("planning_frame").value))
-            self._queue(
-                request_id, phase,
-                self._pose_goal(
-                    position, frame, direction, orientation, motion, interim,
-                    velocity_scale, lock_joint_1))
+            pose_goal = self._pose_goal(
+                position, frame, direction, orientation, motion, interim,
+                velocity_scale, lock_joint_1)
+            if (phase in ("APPROACH", "BASKET_APPROACH") and motion == "OMPL"
+                    and bool(self.get_parameter("rank_approach_ik").value)):
+                self._start_ranked_approach_ik(
+                    request_id, phase, position, frame, direction, orientation,
+                    pose_goal)
+            else:
+                self._queue(request_id, phase, pose_goal)
             return
         home = command.get("rmp_home")
         if isinstance(home, dict):
@@ -178,11 +201,193 @@ class MMMotionBridge(Node):
         request.num_planning_attempts = 3
         request.max_velocity_scaling_factor = float(
             self.get_parameter("velocity_scale").value)
-        request.max_acceleration_scaling_factor = 0.15
+        request.max_acceleration_scaling_factor = float(
+            self.get_parameter("acceleration_scale").value)
         request.pipeline_id = str(
             self.get_parameter("planning_pipeline").value)
         request.planner_id = str(self.get_parameter("planner_id").value)
         return goal
+
+    def _start_ranked_approach_ik(
+        self,
+        request_id: int,
+        phase: str,
+        position: list[float],
+        frame: str,
+        approach_direction: list[float] | None,
+        tool_orientation: list[float] | None,
+        fallback_goal: MoveGroup.Goal,
+    ) -> None:
+        """여러 IK seed의 충돌 없는 해 중 현재 관절 변화가 가장 작은 해를 고른다."""
+        key = (request_id, phase)
+        if self._ik_active_key == key:
+            return
+        if not self._joint_state_ready():
+            self.get_logger().warning(
+                "APPROACH IK용 최신 joint_states 없음 — 기존 Pose 계획으로 시도")
+            self._queue(request_id, phase, fallback_goal)
+            return
+        if not self._compute_ik.service_is_ready():
+            self.get_logger().warning(
+                "MoveIt compute_ik 서비스 없음 — 기존 Pose 계획으로 시도")
+            self._queue(request_id, phase, fallback_goal)
+            return
+
+        joint_names = [f"joint_{index}" for index in range(1, 7)]
+        current = [float(self._joint_positions[name]) for name in joint_names]
+        seeds = self._ik_seeds(current)
+        target = PoseStamped()
+        target.header.frame_id = frame
+        target.header.stamp = self.get_clock().now().to_msg()
+        (target.pose.position.x,
+         target.pose.position.y,
+         target.pose.position.z) = position
+        if tool_orientation is not None:
+            norm = math.sqrt(sum(value * value for value in tool_orientation))
+            quaternion = tuple(value / norm for value in tool_orientation)
+        elif approach_direction is not None:
+            quaternion = self._approach_quaternion(approach_direction)
+        else:
+            quaternion = (0.0, 0.0, 0.0, 1.0)
+        (target.pose.orientation.x,
+         target.pose.orientation.y,
+         target.pose.orientation.z,
+         target.pose.orientation.w) = quaternion
+
+        self._ik_generation += 1
+        generation = self._ik_generation
+        self._ik_active_key = key
+        self._ik_context = (request_id, phase, fallback_goal)
+        self._ik_candidates = []
+        self._ik_pending = len(seeds)
+        for seed in seeds:
+            request = GetPositionIK.Request()
+            request.ik_request.group_name = str(
+                self.get_parameter("group_name").value)
+            request.ik_request.ik_link_name = "harvest_tcp"
+            request.ik_request.pose_stamped = target
+            request.ik_request.robot_state.joint_state.name = joint_names
+            request.ik_request.robot_state.joint_state.position = seed
+            request.ik_request.avoid_collisions = True
+            request.ik_request.timeout = Duration(
+                seconds=float(self.get_parameter(
+                    "ik_candidate_timeout_sec").value)).to_msg()
+            future = self._compute_ik.call_async(request)
+            future.add_done_callback(
+                lambda done, token=generation:
+                self._ranked_ik_response(done, token))
+        self.get_logger().info(
+            f"APPROACH IK 후보 탐색: {len(seeds)}개 seed, "
+            "현재 자세 최소변화 해 선택")
+
+    @staticmethod
+    def _ik_seeds(current: list[float]) -> list[list[float]]:
+        """현재 해와 대표적인 어깨·팔꿈치·손목 IK 가지를 탐색할 seed 집합."""
+        limits = [
+            (-2.0 * math.pi, 2.0 * math.pi),
+            (-2.0 * math.pi, 2.0 * math.pi),
+            (-2.8798, 2.8798),
+            (-2.0 * math.pi, 2.0 * math.pi),
+            (-2.0 * math.pi, 2.0 * math.pi),
+            (-2.0 * math.pi, 2.0 * math.pi),
+        ]
+        offsets = [
+            {},
+            {0: math.pi},
+            {0: -math.pi},
+            {1: 1.2, 2: -1.2},
+            {1: -1.2, 2: 1.2},
+            {3: math.pi},
+            {3: -math.pi},
+            {5: math.pi},
+            {5: -math.pi},
+        ]
+        seeds: list[list[float]] = []
+        seen: set[tuple[float, ...]] = set()
+        for changes in offsets:
+            seed = current.copy()
+            for index, offset in changes.items():
+                lower, upper = limits[index]
+                seed[index] = min(upper, max(lower, seed[index] + offset))
+            signature = tuple(round(value, 4) for value in seed)
+            if signature not in seen:
+                seen.add(signature)
+                seeds.append(seed)
+        return seeds
+
+    def _ranked_ik_response(self, future, generation: int) -> None:
+        if generation != self._ik_generation:
+            return
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.get_logger().warning(f"APPROACH IK 후보 호출 실패: {exc}")
+            response = None
+        if response is not None and int(response.error_code.val) == 1:
+            solution = {
+                name: float(value)
+                for name, value in zip(
+                    response.solution.joint_state.name,
+                    response.solution.joint_state.position)
+                if name.startswith("joint_") and math.isfinite(value)
+            }
+            if all(f"joint_{index}" in solution for index in range(1, 7)):
+                normalized = {
+                    name: self._nearest_joint_equivalent(name, value)
+                    for name, value in solution.items()
+                }
+                self._ik_candidates.append(normalized)
+        self._ik_pending -= 1
+        if self._ik_pending <= 0:
+            self._finish_ranked_ik(generation)
+
+    def _finish_ranked_ik(self, generation: int) -> None:
+        if generation != self._ik_generation or self._ik_context is None:
+            return
+        request_id, phase, fallback_goal = self._ik_context
+        self._ik_active_key = None
+        self._ik_context = None
+        if not self._ik_candidates:
+            self.get_logger().warning(
+                "APPROACH 사전 IK 후보 없음 — 기존 Pose 계획으로 시도")
+            self._queue(request_id, phase, fallback_goal)
+            return
+        weight_param = ("basket_ik_joint_change_weights"
+                        if phase == "BASKET_APPROACH"
+                        else "ik_joint_change_weights")
+        weights = list(self.get_parameter(weight_param).value)
+        if len(weights) != 6:
+            weights = [1.0] * 6
+
+        def changes(solution: dict[str, float]) -> list[float]:
+            return [
+                abs(float(solution[f"joint_{index}"])
+                    - float(self._joint_positions[f"joint_{index}"]))
+                for index in range(1, 7)
+            ]
+
+        def cost(solution: dict[str, float]) -> float:
+            return sum(
+                float(weight) * delta * delta
+                for weight, delta in zip(weights, changes(solution)))
+
+        selected = min(self._ik_candidates, key=cost)
+        deltas = changes(selected)
+        max_change = float(
+            self.get_parameter("ik_max_single_joint_change_rad").value)
+        if max(deltas) > max_change:
+            self.get_logger().warning(
+                "APPROACH 최소변화 IK도 단일 관절 제한 초과: "
+                f"max={math.degrees(max(deltas)):.1f}° > "
+                f"{math.degrees(max_change):.1f}° — 유일한 최소비용 해로 실행")
+        self.get_logger().info(
+            "APPROACH IK 선택: "
+            f"{len(self._ik_candidates)}개 유효 후보, "
+            f"cost={cost(selected):.3f}, "
+            "Δq=[" + ", ".join(
+                f"{math.degrees(delta):.1f}°" for delta in deltas) + "]")
+        self._queue(
+            request_id, phase, self._joint_goal(selected, motion="OMPL"))
 
     def _pose_goal(
         self,
@@ -204,11 +409,13 @@ class MMMotionBridge(Node):
             goal.request.planner_id = motion
         # grasp_proto의 접근 속도를 그대로 사용한다. 원호 수용은 천천히 받쳐 올리고
         # LIN 진입/후퇴는 더 느리게 해 과실과 잎을 옆으로 밀지 않는다.
+        # 전반적으로 조금 빠르게. GRASP(0.05)·CAPTURE_TRIM(0.035)은 명시 velocity_scale
+        # 오버라이드라 그대로 저속 유지된다. LIN 은 삽입/후퇴 공용이므로 과하지 않게.
         goal.request.max_velocity_scaling_factor = {
-            "OMPL": 0.20,
-            "PTP": 0.25,
-            "LIN": 0.08,
-            "CIRC": 0.10,
+            "OMPL": 0.35,
+            "PTP": 0.40,
+            "LIN": 0.15,
+            "CIRC": 0.15,
         }[motion] if velocity_scale is None else velocity_scale
         goal.request.max_acceleration_scaling_factor = 0.30
         constraint = Constraints()
