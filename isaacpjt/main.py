@@ -80,11 +80,14 @@ if MM_TELEOP and NAV_DRIVE:
 # 지게차+운반 AMR만 선택하고 수확 MM이 없으면 창고 자동화 단독 시험으로 본다. 이 모드에서는
 # iw.py가 AMR을 창고 도킹 위치에 빈 상태로 놓아 첫 팔레트 상차를 바로 시험한다.
 WAREHOUSE_TEST = (
-    "--iw" in sys.argv
-    and "--fork" in sys.argv
-    and not (NAV_DRIVE or NAV_ODOM or NAV_SCAN)
-    and "--mm" not in sys.argv
-    and "--moveit" not in sys.argv
+    "--warehouse-test" in sys.argv
+    or (
+        "--iw" in sys.argv
+        and "--fork" in sys.argv
+        and not (NAV_DRIVE or NAV_ODOM or NAV_SCAN)
+        and "--mm" not in sys.argv
+        and "--moveit" not in sys.argv
+    )
 )
 
 # Warehouse 자동화의 공통 도메인은 108이다. ~/.bashrc가 109를 기본으로 내보내므로

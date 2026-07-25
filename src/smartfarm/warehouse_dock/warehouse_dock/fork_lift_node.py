@@ -262,8 +262,12 @@ class ForkLiftNode(Node):
         # IW가 Isaac에서 측정해 보내는 실제 chassis 상면/팔레트 구멍 높이를
         # 받은 뒤에만 작업한다. 예전 고정 Z=0.45m로 상차하면 팔레트가 뜬다.
         self.declare_parameter("require_iw_deck_geometry", True)
+        self.declare_parameter("pause_before_handoff", False)
 
         self._load_parameters()
+        self._pause_before_handoff = bool(
+            self.get_parameter("pause_before_handoff").value
+        )
         self._iw_deck_geometry_received = False
 
         self._command_pub = self.create_publisher(
@@ -327,6 +331,7 @@ class ForkLiftNode(Node):
         self._pose_feedback_time: float | None = None
         self._pose_feedback_logged = False
         self._lift_feedback: float | None = None
+        self._lift_velocity_feedback = 0.0
         self._joint_state_time: float | None = None
         self._lift_target = 0.0
         self._drive_command = 0.0
@@ -606,6 +611,10 @@ class ForkLiftNode(Node):
             value = float(msg.position[index])
             if math.isfinite(value):
                 self._lift_feedback = value
+                if index < len(msg.velocity):
+                    velocity = float(msg.velocity[index])
+                    if math.isfinite(velocity):
+                        self._lift_velocity_feedback = velocity
                 if self._mode == self.MODE_WAIT_INITIAL and not self._steps:
                     self._lift_target = value
         except (ValueError, IndexError):
@@ -1624,18 +1633,30 @@ class ForkLiftNode(Node):
             for index in range(1, lower_steps + 1)
         ]
 
-        return [
-            Step(
-                kind="handoff_align",
-                label="IW pallet-center closed-loop X/Y/yaw alignment",
-                yaw=self._amr_heading,
-                max_drive=self._creep_drive,
-                position_tolerance=self._insert_tol,
-                yaw_tolerance=self._yaw_tol,
-                timeout=90.0,
-            ),
+        handoff_alignment = (
+            [
+                Step(
+                    kind="wait",
+                    label="manual handoff position check",
+                    duration=3600.0,
+                    timeout=3601.0,
+                )
+            ]
+            if self._pause_before_handoff
+            else self._handoff_prealign_steps(pallet)
+        )
+
+        return handoff_alignment + [
             self._wait(0.5, "IW loaded placement settle"),
         ] + slow_lower + [
+            Step(
+                kind="handoff_lower",
+                label=(
+                    f"Pallet_{pallet:02d} actual bottom align "
+                    "to IW deck support"
+                ),
+                timeout=40.0,
+            ),
             self._wait(0.8, f"Pallet_{pallet:02d} supported on IW"),
             self._pallet_owner(
                 "deck",
@@ -1669,6 +1690,21 @@ class ForkLiftNode(Node):
             self._dock_lock(
                 False, "release IW after forklift clears handoff axis"
             ),
+        ]
+
+    def _handoff_prealign_steps(self, pallet: int) -> list[Step]:
+        """기본 단독 시연은 기존 지게차 폐루프 정렬을 사용한다."""
+        del pallet
+        return [
+            Step(
+                kind="handoff_align",
+                label="IW pallet-center closed-loop X/Y/yaw alignment",
+                yaw=self._amr_heading,
+                max_drive=self._creep_drive,
+                position_tolerance=self._insert_tol,
+                yaw_tolerance=self._yaw_tol,
+                timeout=90.0,
+            )
         ]
 
     def _move_wait_steps(self) -> list[Step]:
@@ -2071,6 +2107,10 @@ class ForkLiftNode(Node):
             done = self._run_iw_axis_gate(step)
         elif step.kind == "handoff_align":
             done = self._run_handoff_align(step, now)
+        elif step.kind == "iw_adjust":
+            done = self._run_iw_adjust(step, now)
+        elif step.kind == "handoff_lower":
+            done = self._run_handoff_lower(step, now)
         elif step.kind == "pose_check":
             done = self._run_pose_check(step, now)
         elif step.kind == "lift":
@@ -2122,6 +2162,11 @@ class ForkLiftNode(Node):
                 self._begin_step()
             else:
                 self._finish_queue()
+
+    def _run_iw_adjust(self, step: Step, now: float) -> bool:
+        del step, now
+        self._fail("이 노드에는 IW 능동 재정렬 서비스가 연결되지 않았습니다")
+        return False
 
     def _handoff_state_matches(
         self, owner: str, pallet_id: int, now: float
@@ -2212,11 +2257,18 @@ class ForkLiftNode(Node):
         target = self._handoff_pallet_target_position
         if target is None:
             target = (self._amr_hole[0], self._amr_hole[1], 0.0)
+        if step.attempt == 0:
+            # 현재 팔레트 오차를 지게차 base 목표로 최초 한 번만 환산한다.
+            # 매 틱 self._x에 다시 더하면 팔레트 추종 지연이 누적돼 목표가
+            # 계속 멀어지고 지게차가 IW를 지나 창고 밖으로 나간다.
+            step.x = self._x + target[0] - pallet[0]
+            step.y = self._y + target[1] - pallet[1]
+            step.attempt = 1
         dynamic = Step(
             kind="move",
             label=step.label,
-            x=self._x + target[0] - pallet[0],
-            y=self._y + target[1] - pallet[1],
+            x=step.x,
+            y=step.y,
             yaw=step.yaw,
             max_drive=step.max_drive,
             position_tolerance=step.position_tolerance,
@@ -2224,6 +2276,71 @@ class ForkLiftNode(Node):
             timeout=step.timeout,
         )
         return self._run_move(dynamic, now)
+
+    def _run_handoff_lower(self, step: Step, now: float) -> bool:
+        """실제 팔레트 바닥을 IW 데크 지지면까지 연속으로 내린다."""
+        if (
+            self._handoff_owner != "fork"
+            or self._handoff_pallet_position is None
+            or self._lift_feedback is None
+            or self._handoff_state_time is None
+            or now - self._handoff_state_time > self._connection_timeout
+        ):
+            self._publish_command(0.0, 0.0)
+            return False
+
+        target_z = (
+            self._handoff_pallet_target_position[2]
+            if self._handoff_pallet_target_position is not None
+            else self._amr_hole[2] - self.PALLET_LOCAL_HOLE_CENTER_Z
+        )
+        pallet_z = self._handoff_pallet_position[2]
+        z_error = target_z - pallet_z
+        if step.attempt == 0:
+            # 현재 팔레트 바닥 오차를 lift 축의 고정 목표로 환산한다.
+            step.lift = clamp(self._lift_feedback + z_error, 0.0, 2.0)
+            step.attempt = 1
+
+        max_delta = self._loaded_lift_speed / self._control_rate
+        self._lift_target += clamp(
+            step.lift - self._lift_target, -max_delta, max_delta
+        )
+        self._publish_command(0.0, 0.0)
+
+        # 데크 접촉 뒤에는 PhysX 반력 때문에 lift 속도가 0.005m/s 아래로
+        # 완전히 가라앉지 않을 수 있다. 실제 바닥 오차가 20mm 이내로
+        # 0.4초 유지되면 이미 내려온 상태로 판정한다.
+        if abs(z_error) <= 0.020:
+            if self._step_stable_since is None:
+                self._step_stable_since = now
+            return now - self._step_stable_since >= 0.4
+
+        if (
+            abs(self._lift_feedback - step.lift) > self._lift_tol
+            or abs(self._lift_velocity_feedback) > 0.005
+        ):
+            self._step_stable_since = None
+            return False
+
+        if abs(z_error) > 0.020:
+            if step.attempt >= 4:
+                return False
+            # 포크가 목표에서 완전히 멈춘 뒤에만 잔여 오차를 다음 고정
+            # 목표에 반영한다. 이동 중 연속 재보정으로 생기던 왕복을 막는다.
+            step.lift = clamp(step.lift + z_error, 0.0, 2.0)
+            step.attempt += 1
+            self._step_stable_since = None
+            self.get_logger().info(
+                f"[IW SUPPORT Z] settled correction {step.attempt}/4: "
+                f"error={z_error:+.5f}m"
+            )
+            return False
+
+        if self._step_stable_since is None:
+            self._step_stable_since = now
+        if now - self._step_stable_since >= 0.4:
+            return True
+        return False
 
     def _run_arc(self, step: Step, now: float) -> bool:
         if self._arc_last_yaw is None:

@@ -326,12 +326,20 @@ class WarehouseDockController:
         if self._deck_body is None:
             raise ValueError("IW chassis rigid body를 찾지 못했습니다")
         world_range = _world_bbox_range(self._stage, self._deck_body)
-        # PhysX/Fabric으로 이동한 articulation의 USD bbox는 초기 스폰 좌표에
-        # 남을 수 있다. X는 Load 생성 때 측정한 root-relative 오프셋을 현재
-        # canonical dock root에 적용하고, bbox는 안정적인 상면 Z에만 사용한다.
+        # 적재 중심은 IW root에서 로컬 +X로 0.3171m 떨어져 있다. 이를 월드
+        # X에 그대로 더하면 yaw=180°인 실제 도킹 자세에서 반대쪽으로
+        # 0.6342m 어긋난다. 초기 적재 팔레트와 동일하게 root orientation으로
+        # 로컬 오프셋을 회전해 맵 좌표로 변환한다.
+        w, x, y, z = (float(value) for value in self._dock_orientation)
+        offset_x = IW_LOAD_MAP_X_OFFSET_M * (
+            1.0 - 2.0 * (y * y + z * z)
+        )
+        offset_y = IW_LOAD_MAP_X_OFFSET_M * (
+            2.0 * (x * y + w * z)
+        )
         world_point = Gf.Vec3d(
-            float(self._dock_position[0]) + IW_LOAD_MAP_X_OFFSET_M,
-            float(self._dock_position[1]),
+            float(self._dock_position[0]) + offset_x,
+            float(self._dock_position[1]) + offset_y,
             float(world_range.GetMax()[2]),
         )
         body = self._stage.GetPrimAtPath(self._deck_body)
@@ -558,7 +566,10 @@ class WarehouseDockController:
             # 프레임에 Joint를 만들면 Fabric/PhysX 포인터가 어긋나 네이티브 크래시가
             # 발생한다. 지게차가 실측 높이로 물리적으로 내려놓게 하고 여기서는 현재
             # 자세를 절대 변경하지 않는다.
-            if abs(z_error) > 0.025:
+            # 2.5cm까지 허용하면 팔레트가 눈에 띄게 떠 있는 자세에서도
+            # FixedJoint가 생성된다. ROS 제어기가 실제 팔레트 바닥을 지지면
+            # ±3mm로 맞추므로 여기서는 물리/측정 여유를 포함해 6mm만 허용한다.
+            if abs(z_error) > 0.006:
                 print(
                     "[IW Deck] 팔레트가 데크 지지면에서 너무 멀어 연결을 거부합니다: "
                     f"z_error={z_error:+.5f}m"

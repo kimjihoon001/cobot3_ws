@@ -99,6 +99,8 @@ class MissionNavNode(Node):
         # 서비스만 호출해 중복 사이클이 시작되지 않게 한다.
         self._amr_docked_pub = self.create_publisher(
             Bool, "/forklift/amr_docked", latched)
+        self._dock_adjusted_pub = self.create_publisher(
+            Bool, "/iw/dock_adjusted", latched)
         self._dock_cmd_pub = self.create_publisher(
             Twist, "/iwhub_0/cmd_vel", 10
         )
@@ -162,6 +164,7 @@ class MissionNavNode(Node):
         self._current_pallet = 0
         self._forklift_request_pending = False
         self._dock_adjust_attempts = 0
+        self._dock_adjust_target: tuple[float, float, float] | None = None
         self._dock_align_started: float | None = None
         self._dock_align_stable_since: float | None = None
         self._dock_align_log_at = 0.0
@@ -205,10 +208,32 @@ class MissionNavNode(Node):
             response.message = f"도킹 재정렬 최대 횟수({limit}) 초과"
             return response
 
+        # 지게차 최종 인계 재조정은 IW의 현재 방향을 건드리지 않는다.
+        # 팔레트 삽입축에 필요한 평면 위치 X/Y만 맞추고 yaw는 요청 순간
+        # 실측값으로 고정해 불필요한 회전과 왕복을 막는다.
+        current_yaw = (
+            self._iw_pose[2]
+            if self._iw_pose is not None
+            else self._wrap(float(request.target_yaw))
+        )
+        target = (
+            float(request.target_x),
+            float(request.target_y),
+            current_yaw,
+        )
+        if not all(math.isfinite(value) for value in target):
+            response.accepted = False
+            response.message = "IW 재정렬 목표 pose가 유한수가 아닙니다"
+            return response
+
         self._dock_adjust_attempts += 1
+        self._dock_adjust_target = target
+        self._dock_adjusted_pub.publish(Bool(data=False))
         self._dock_goal_sent = False
         self._forklift_request_pending = False
-        if self._dock_alignment_capturable():
+        # 지게차가 팔레트를 들고 기다리는 중간 인계 보정은 Nav2 goal이
+        # 아니다. 현재 IW pose에서 곧바로 1축 전후진 제어를 시작한다.
+        if self._iw_pose is not None:
             self._start_dock_alignment(
                 f"지게차 재조정 요청 {self._dock_adjust_attempts}/{limit}"
             )
@@ -219,7 +244,8 @@ class MissionNavNode(Node):
             f"IW Nav2 도킹 재정렬 {self._dock_adjust_attempts}/{limit} 접수"
         )
         self.get_logger().warning(
-            f"{response.message}: 지게차 사유={request.reason}"
+            f"{response.message}: target=({target[0]:.3f}, {target[1]:.3f}, "
+            f"{math.degrees(target[2]):.1f}deg), 지게차 사유={request.reason}"
         )
         return response
 
@@ -435,10 +461,11 @@ class MissionNavNode(Node):
         if self._iw_pose is None:
             return False
         x, y, _ = self._iw_pose
-        dx, dy, _ = lanes.DOCK
-        return math.hypot(x - dx, y - dy) <= float(
-            self.get_parameter("dock_align_capture_radius").value
-        )
+        dx, dy, _ = self._dock_adjust_target or lanes.DOCK
+        radius = float(self.get_parameter("dock_align_capture_radius").value)
+        if self._dock_adjust_target is not None:
+            radius = max(radius, 1.0)
+        return math.hypot(x - dx, y - dy) <= radius
 
     def _start_dock_alignment(self, reason: str) -> None:
         """Nav2 주행이 끝난 도크 근처에서만 저속 pose 폐루프를 시작한다."""
@@ -468,7 +495,8 @@ class MissionNavNode(Node):
 
         now = time.monotonic()
         x, y, yaw = self._iw_pose
-        target_x, target_y, target_yaw = lanes.DOCK
+        dynamic_adjust = self._dock_adjust_target is not None
+        target_x, target_y, target_yaw = self._dock_adjust_target or lanes.DOCK
         error_x = target_x - x
         error_y = target_y - y
         position_error = math.hypot(error_x, error_y)
@@ -479,6 +507,67 @@ class MissionNavNode(Node):
         yaw_tolerance = float(
             self.get_parameter("dock_align_yaw_tolerance").value
         )
+
+        if dynamic_adjust:
+            # 최종 팔레트 인계 보정은 IW 진행축 1자유도만 사용한다.
+            # 회전하거나 옆으로 경로를 만들지 않고 좌우 바퀴에 같은 속도를
+            # 보내 전진/후진만 한다.
+            longitudinal_error = (
+                error_x * math.cos(yaw) + error_y * math.sin(yaw)
+            )
+            axis_tolerance = min(position_tolerance, 0.015)
+            if abs(longitudinal_error) <= axis_tolerance:
+                self._publish_dock_cmd(0.0, 0.0)
+                if self._dock_align_stable_since is None:
+                    self._dock_align_stable_since = now
+                if now - self._dock_align_stable_since >= float(
+                    self.get_parameter("dock_align_settle_sec").value
+                ):
+                    self._stop_dock_alignment()
+                    self._dock_phase = "WAITING_CLEAR"
+                    self._dock_goal_sent = False
+                    self._dock_adjust_target = None
+                    self._dock_adjusted_pub.publish(Bool(data=True))
+                    self.get_logger().info(
+                        "IW 직선 보정 완료: "
+                        f"axis_error={longitudinal_error:.3f}m "
+                        "→ 지게차 직선 인계 허가"
+                    )
+                return
+
+            self._dock_align_stable_since = None
+            timeout = float(
+                self.get_parameter("dock_align_timeout_sec").value
+            )
+            if now - self._dock_align_started > timeout:
+                self._stop_dock_alignment()
+                self._dock_phase = "WAITING_CLEAR"
+                self._dock_goal_sent = False
+                self._dock_adjust_target = None
+                self.get_logger().warning(
+                    "IW 직선 전후진 보정 시간 초과: "
+                    f"axis_error={longitudinal_error:.3f}m"
+                )
+                return
+
+            max_linear = float(
+                self.get_parameter("dock_align_max_linear_speed").value
+            )
+            linear = max(
+                -max_linear,
+                min(max_linear, 0.7 * longitudinal_error),
+            )
+            if abs(linear) < 0.02:
+                linear = math.copysign(0.02, longitudinal_error)
+            self._publish_dock_cmd(linear, 0.0)
+            if now - self._dock_align_log_at >= 1.0:
+                self._dock_align_log_at = now
+                self.get_logger().info(
+                    "IW 직선 전후진 보정: "
+                    f"axis_error={longitudinal_error:.3f}m, "
+                    f"cmd_linear={linear:.3f}m/s, cmd_angular=0"
+                )
+            return
 
         if (
             position_error <= position_tolerance
@@ -491,13 +580,22 @@ class MissionNavNode(Node):
                 self.get_parameter("dock_align_settle_sec").value
             ):
                 self._stop_dock_alignment()
-                self._dock_phase = "REQUESTING_SERVICE"
+                self._dock_phase = (
+                    "WAITING_CLEAR" if dynamic_adjust else "REQUESTING_SERVICE"
+                )
                 self._dock_goal_sent = False
+                if dynamic_adjust:
+                    self._dock_adjust_target = None
+                    self._dock_adjusted_pub.publish(Bool(data=True))
                 self.get_logger().info(
                     "IW DOCK_ALIGN 완료: "
                     f"xy_error={position_error:.3f}m, "
                     f"yaw_error={math.degrees(yaw_error):.1f}deg "
-                    "안정 유지 → 지게차 서비스 요청"
+                    + (
+                        "안정 유지 → 대기 중인 지게차에 재정렬 완료 통보"
+                        if dynamic_adjust
+                        else "안정 유지 → 지게차 서비스 요청"
+                    )
                 )
             return
         self._dock_align_stable_since = None
@@ -505,13 +603,19 @@ class MissionNavNode(Node):
         capture_radius = float(
             self.get_parameter("dock_align_capture_radius").value
         )
+        if dynamic_adjust:
+            capture_radius = max(capture_radius, 1.0)
         timeout = float(
             self.get_parameter("dock_align_timeout_sec").value
         )
         if position_error > capture_radius or now - self._dock_align_started > timeout:
             self._stop_dock_alignment()
-            self._dock_phase = "APPROACH"
+            self._dock_phase = (
+                "WAITING_CLEAR" if dynamic_adjust else "APPROACH"
+            )
             self._dock_goal_sent = False
+            if dynamic_adjust:
+                self._dock_adjust_target = None
             self.get_logger().warning(
                 "IW DOCK_ALIGN 범위/시간 초과 → Nav2 도크 접근부터 재시도: "
                 f"xy_error={position_error:.3f}m, "

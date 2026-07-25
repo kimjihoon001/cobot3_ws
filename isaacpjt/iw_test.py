@@ -36,7 +36,10 @@ class IwDriver(Driver):
 
     def spawn(self, stage):
         pose = WAREHOUSE_DOCK_POSE if self._warehouse_test else POSE
-        self._iw.spawn(stage, self.root, pose)
+        # 마지막 인계 단독 시험도 통합 실행의 실제 도킹 자세와 같아야
+        # 팔레트 로컬 데크 오프셋 방향이 동일하게 보인다.
+        yaw_deg = 180.0 if self._warehouse_test else 0.0
+        self._iw.spawn(stage, self.root, pose, yaw_deg=yaw_deg)
         if self._warehouse_test:
             print("[WarehouseTest] 빈 AMR을 창고 도킹 위치에 배치했습니다")
 
