@@ -77,6 +77,26 @@ def generate_launch_description():
             }.items(),
         ),
 
+        # Isaac chassis odom은 스폰 자세를 (0,0,0)으로 삼는 상대 좌표다.
+        # 월드/map의 IW 스폰 자세 (1.6955,-12,pi)를 map→odom으로 고정한다.
+        # 대칭 온실에서 AMCL이 다른 통로로 수렴해 이 변환을 흔들지 않도록
+        # AMCL은 관찰에 남기되 config의 tf_broadcast=false로 덮어쓰지 않는다.
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="map_to_odom_identity",
+            namespace=namespace,
+            remappings=tf_remaps,
+            arguments=[
+                "--x", "1.6955", "--y", "-12.0", "--z", "0.0",
+                "--yaw", "3.141592653589793",
+                "--pitch", "0.0", "--roll", "0.0",
+                "--frame-id", "iwhub_0/map",
+                "--child-frame-id", "iwhub_0/odom",
+            ],
+            parameters=[{"use_sim_time": use_sim_time}],
+        ),
+
         # 2~3. Humble의 개별 localization/navigation launch는 namespace 인자를
         # 파라미터 root_key에만 쓰고 PushRosNamespace는 하지 않는다. 여기서 두 스택을
         # 명시적으로 감싸야 노드·액션·costmap·TF가 MM의 전역 Nav2와 분리된다.

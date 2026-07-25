@@ -315,7 +315,9 @@ def dock_route(sx: float, sy: float, syaw: float, arc_r: float = 0.8,
     dock_x, dock_y, dock_yaw = DOCK
     start = (float(sx), float(sy))
     if abs(sx - dock_x) <= 0.15:
-        points = [start, (dock_x, dock_y)]
+        # AMCL/odom의 mm급 X 오차를 도크까지 대각선으로 직접 잇지 않는다.
+        # 먼저 같은 Y에서 중앙 레인 X=0에 붙은 뒤 축정렬 종주한다.
+        points = [start, (dock_x, float(sy)), (dock_x, dock_y)]
     else:
         connector_y = (
             float(sy)

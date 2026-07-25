@@ -20,7 +20,7 @@ import math
 import time
 
 import rclpy
-from smartfarm_interfaces.srv import ForkliftCycle
+from smartfarm_interfaces.srv import DockAdjust, ForkliftCycle
 from std_msgs.msg import Bool, Int32
 
 from warehouse_dock.fork_lift_node import ForkLiftNode, Step, wrap_angle
@@ -30,7 +30,6 @@ class ForkLiftReturnNode(ForkLiftNode):
     """가득 찬 팔레트 복귀와 다음 빈 팔레트 상차를 순환 실행한다."""
 
     INSTANCE_LOCK_PATH = "/tmp/warehouse_dock_fork_lift_return_node.lock"
-
     PHASE_WAITING = "WAITING_FOR_IW"
     PHASE_RETURNING = "RETURNING_TO_RACK"
     PHASE_LOADING_NEXT = "LOADING_NEXT_PALLET"
@@ -47,15 +46,30 @@ class ForkLiftReturnNode(ForkLiftNode):
         )
 
         self.declare_parameter("initial_pallet", 0)
-        # 통합 IW 팔레트의 옆면 실측에서 0.124m도 포크 상면이 슬롯 윗판에
-        # 걸쳤다. 슬롯 중앙에 여유를 두도록 약 0.104m 삽입 높이로 보정한다.
-        self.declare_parameter("iw_pickup_lift_offset", -0.056)
+        self.declare_parameter("resume_next_pallet", -1)
+        self.declare_parameter("resume_handoff_pallet", -1)
+        # /iwhub_0/deck_geometry가 이미 실제 팔레트 채널 중심을 반영한다.
+        # 예전 고정 높이용 -0.056m를 다시 빼면 포크가 홀보다 낮아져 IW
+        # 하부를 미므로 추가 오프셋 없이 실측 중심 목표를 그대로 사용한다.
+        self.declare_parameter("iw_pickup_lift_offset", 0.0)
         initial_pallet = int(self.get_parameter("initial_pallet").value)
+        self._resume_next_pallet = int(
+            self.get_parameter("resume_next_pallet").value
+        )
+        self._resume_handoff_pallet = int(
+            self.get_parameter("resume_handoff_pallet").value
+        )
         self._iw_pickup_lift_offset = float(
             self.get_parameter("iw_pickup_lift_offset").value
         )
         if not 0 <= initial_pallet < self.PALLET_COUNT:
             raise ValueError("initial_pallet은 0부터 5 사이여야 합니다")
+        if self._resume_next_pallet not in (-1, *range(self.PALLET_COUNT)):
+            raise ValueError("resume_next_pallet은 -1 또는 0부터 5 사이여야 합니다")
+        if self._resume_handoff_pallet not in (-1, *range(self.PALLET_COUNT)):
+            raise ValueError("resume_handoff_pallet은 -1 또는 0부터 5 사이여야 합니다")
+        if self._resume_next_pallet >= 0 and self._resume_handoff_pallet >= 0:
+            raise ValueError("두 resume 옵션은 동시에 사용할 수 없습니다")
         if not -0.070 <= self._iw_pickup_lift_offset <= 0.015:
             raise ValueError(
                 "iw_pickup_lift_offset은 포크 삽입 여유를 위해 "
@@ -64,13 +78,20 @@ class ForkLiftReturnNode(ForkLiftNode):
 
         self._expected_pallet = initial_pallet
         self._next_pallet = (initial_pallet + 1) % self.PALLET_COUNT
-        # 회수 노드가 움직일 때 팔레트는 IW DeckJoint에 연결돼 있다.
-        # 첫 명령에서 이를 실수로 해제하지 않도록 소유 상태를 이어받는다.
-        self._pallet_deck_attached_command = True
-        self._iw_dock_locked_command = False
-        self._pallet_target_command = initial_pallet
+        # 일반 시작은 팔레트가 IW에 있고, handoff 재개는 현재 포크에 이미
+        # 결속돼 있다. 첫 명령부터 실제 소유 상태를 유지해야 재시작 순간
+        # 팔레트가 떨어지지 않는다.
+        resume_handoff = self._resume_handoff_pallet >= 0
+        self._pallet_attached_command = resume_handoff
+        self._pallet_deck_attached_command = not resume_handoff
+        self._iw_dock_locked_command = resume_handoff
+        self._pallet_target_command = (
+            self._resume_handoff_pallet if resume_handoff else initial_pallet
+        )
         self._mode = self.MODE_WAIT_INITIAL
         self._auto_start_at = None
+        if self._resume_next_pallet >= 0 or self._resume_handoff_pallet >= 0:
+            self.create_timer(0.5, self._try_resume_next_pallet)
 
         self.create_subscription(
             Int32,
@@ -83,10 +104,62 @@ class ForkLiftReturnNode(ForkLiftNode):
             "/forklift/start_cycle",
             self._on_cycle_request,
         )
+        self._dock_adjust_client = self.create_client(
+            DockAdjust, "/iw/request_dock_adjust"
+        )
+        self._dock_adjust_attempt = 0
 
         self._publish_status(
             f"회수 노드 준비: IW의 Pallet_{self._expected_pallet:02d} "
             "귀환 신호 대기"
+        )
+
+    def _try_resume_next_pallet(self) -> None:
+        """시연 중 중단된 상단 팔레트 회수부터 현재 물리 장면에서 재개한다."""
+        pallet = max(self._resume_next_pallet, self._resume_handoff_pallet)
+        if pallet < 0 or self._mode != self.MODE_WAIT_INITIAL:
+            return
+        now = time.monotonic()
+        if (
+            self._joint_state_time is None
+            or self._pose_feedback_time is None
+            or not self._iw_deck_geometry_received
+            or now - self._joint_state_time > self._connection_timeout
+            or now - self._pose_feedback_time > self._connection_timeout
+        ):
+            return
+        self._resume_next_pallet = -1
+        resume_handoff = self._resume_handoff_pallet >= 0
+        self._resume_handoff_pallet = -1
+        self._next_pallet = pallet
+        self._current_pallet = pallet
+        self._return_phase = self.PHASE_LOADING_NEXT
+        self._pallet_target_command = pallet
+        self._pallet_attached_command = resume_handoff
+        self._pallet_deck_attached_command = False
+        self._iw_dock_locked_command = True
+        if resume_handoff:
+            # 실패 지점에서 팔레트는 포크에 결속된 채 운반 높이로 정지해
+            # 있다. 재그립/후진을 반복하지 않고 그 상태에서 중심 정렬만
+            # 곧바로 이어간다.
+            carry_lift = self._lift_feedback
+            steps = self._place_initial_pallet_on_amr(
+                pallet, carry_lift=carry_lift
+            )
+        else:
+            steps = self._take_next_pallet_to_amr(pallet)
+        steps += [
+            self._event("loaded_on_amr", pallet),
+            self._event("forklift_clear", pallet),
+        ]
+        self._start_queue(
+            steps,
+            result_mode=self.MODE_WAIT_RETURN,
+            status=(
+                f"Pallet_{pallet:02d} IW 중심 재정렬부터 인계 재개"
+                if resume_handoff
+                else f"Pallet_{pallet:02d} 랙 회수부터 IW 인계 재개"
+            ),
         )
 
     def _on_cycle_request(
@@ -101,6 +174,15 @@ class ForkLiftReturnNode(ForkLiftNode):
             response.accepted = False
             response.message = f"팔레트 번호 범위 오류: {pallet}"
             return response
+        dock_pose = (
+            float(request.dock_x),
+            float(request.dock_y),
+            float(request.dock_yaw),
+        )
+        if not all(math.isfinite(value) for value in dock_pose):
+            response.accepted = False
+            response.message = "IW dock pose가 유한수가 아닙니다"
+            return response
         if self._mode != self.MODE_WAIT_INITIAL:
             response.accepted = False
             response.message = f"지게차가 요청을 받을 수 없는 상태입니다: {self._mode}"
@@ -108,6 +190,23 @@ class ForkLiftReturnNode(ForkLiftNode):
 
         self._expected_pallet = pallet
         self._next_pallet = response.outbound_pallet
+        # 서비스 pose는 IW 차체의 최종 위치/yaw다. 팔레트 중심은 chassis
+        # 실측 X 오프셋까지 포함한 /iwhub_0/deck_geometry 값을 유지한다.
+        # canonical IW yaw=pi일 때 포크 heading은 -pi/2가 된다.
+        self._amr_hole = (
+            self._amr_hole[0],
+            self._amr_hole[1],
+            self._amr_hole[2],
+        )
+        self._amr_heading = wrap_angle(dock_pose[2] + math.pi / 2.0)
+        self.get_logger().info(
+            "서비스 IW pose 적용: "
+            f"pallet_center=({self._amr_hole[0]:.3f}, "
+            f"{self._amr_hole[1]:.3f}), "
+            f"IW center=({dock_pose[0]:.3f}, {dock_pose[1]:.3f}), "
+            f"IW yaw={math.degrees(dock_pose[2]):.1f}deg, "
+            f"fork heading={math.degrees(self._amr_heading):.1f}deg"
+        )
         self._pallet_target_command = pallet
         self._pallet_deck_attached_command = True
         self._iw_dock_locked_command = False
@@ -120,6 +219,63 @@ class ForkLiftReturnNode(ForkLiftNode):
             else "실행 전 연결/초기 자세 검증에서 거부됐습니다"
         )
         return response
+
+    def _request_iw_dock_adjust(self, reason: str) -> None:
+        """잠금 실패를 IW에 돌려보내 Nav2 재정렬을 요청한다."""
+        if not self._dock_adjust_client.service_is_ready():
+            super()._fail(
+                f"{reason}; IW 도킹 재정렬 서비스가 준비되지 않았습니다"
+            )
+            return
+        self._dock_adjust_attempt += 1
+        request = DockAdjust.Request()
+        request.attempt = self._dock_adjust_attempt
+        request.reason = reason
+        future = self._dock_adjust_client.call_async(request)
+        future.add_done_callback(self._on_dock_adjust_response)
+        self._publish_status(
+            f"IW 도킹 잠금 실패 → Nav2 재정렬 요청 "
+            f"{self._dock_adjust_attempt}회"
+        )
+
+    def _on_dock_adjust_response(self, future) -> None:
+        try:
+            response = future.result()
+        except Exception as exc:
+            super()._fail(f"IW 도킹 재정렬 서비스 응답 실패: {exc}")
+            return
+        if response is None or not response.accepted:
+            message = "응답 없음" if response is None else response.message
+            super()._fail(f"IW 도킹 재정렬 거부: {message}")
+            return
+        self.get_logger().warning(
+            f"{response.message}; 지게차는 재도킹 서비스 요청을 기다립니다"
+        )
+
+    def _fail(self, reason: str) -> None:
+        """IW 정렬 관련 실패는 재도킹 요청으로 되돌리고 나머지는 안전 정지한다."""
+        iw_alignment_timeout = (
+            "단계 시간 초과: lock IW after verified final dock alignment"
+            in reason
+            or "단계 시간 초과: transfer IW Pallet_" in reason
+        )
+        if not iw_alignment_timeout:
+            super()._fail(reason)
+            return
+
+        self._steps.clear()
+        self._mode = self.MODE_WAIT_INITIAL
+        self._iw_dock_locked_command = False
+        # Isaac 사전 결속 게이트가 불합격이면 DeckJoint를 유지한다. 재정렬 중에도
+        # 팔레트가 IW를 따라가도록 명령 상태를 명시적으로 되돌린다.
+        self._pallet_attached_command = False
+        self._pallet_deck_attached_command = True
+        self._publish_command(0.0, 0.0)
+        self._publish_clear(False)
+        self.get_logger().warning(
+            f"{reason} — 팔레트를 IW 데크에 유지하고 Nav2 재정렬 요청"
+        )
+        self._request_iw_dock_adjust(reason)
 
     def _on_pallet_on_iw(self, msg: Int32) -> None:
         pallet = int(msg.data)
@@ -192,7 +348,17 @@ class ForkLiftReturnNode(ForkLiftNode):
         pallet = self._expected_pallet
         self._next_pallet = (pallet + 1) % self.PALLET_COUNT
         self._publish_clear(False)
-        self._return_phase = self.PHASE_RETURNING
+        direct_upper_pick = (
+            pallet % 2 == 0
+            and self._next_pallet == pallet + 1
+            and self.RACK_CENTER_X[pallet]
+            == self.RACK_CENTER_X[self._next_pallet]
+        )
+        self._return_phase = (
+            self.PHASE_LOADING_NEXT
+            if direct_upper_pick
+            else self.PHASE_RETURNING
+        )
         self._start_queue(
             self._return_pallet_to_slot_steps(pallet),
             result_mode=self.MODE_WAIT_RETURN,
@@ -208,16 +374,9 @@ class ForkLiftReturnNode(ForkLiftNode):
         target: float,
         label: str,
     ) -> list[Step]:
-        """리프트 목표를 최대 2cm 간격으로 나눠 급격한 하중 변화를 막는다."""
-        distance = abs(target - start)
-        count = max(1, math.ceil(distance / 0.02))
-        return [
-            self._lift(
-                start + (target - start) * index / count,
-                f"{label} {index}/{count}",
-            )
-            for index in range(1, count + 1)
-        ]
+        """물리 드라이브가 속도를 제한하므로 단일 목표로 연속 승강한다."""
+        del start
+        return [self._lift(target, label)]
 
     def _rack_to_wait_steps(self, pallet: int) -> list[Step]:
         """팔레트별로 검증된 랙→공통 대기 위치 경로를 반환한다."""
@@ -227,29 +386,53 @@ class ForkLiftReturnNode(ForkLiftNode):
             return self._stable_right_rack_to_wait(pallet)
         return self._turn_from_rack_to_wait(pallet) + self._move_wait_steps()
 
+    def _safe_iw_pickup_lift_target(self) -> float:
+        """GUI 측면에서 실제 채널 진입이 확인된 IW 리프트 목표."""
+        return min(
+            2.0,
+            max(0.0, self._amr_lift_target() + self._iw_pickup_lift_offset),
+        )
+
     def _return_pallet_to_slot_steps(self, pallet: int) -> list[Step]:
         """IW의 Pallet_n을 n번 랙 슬롯에 내려놓고 대기점으로 복귀한다."""
         wait_x, wait_y, wait_yaw = self._wait_pose
-        _, amr_center_y, _ = self._amr_hole
+        amr_center_x, amr_center_y, _ = self._amr_hole
         amr_insert_y = self._amr_insert_y(amr_center_y)
+        # 지게차 대기 차선 X 자체를 고정된 IW Load 중심에 맞춘다. 멀리서
+        # 팔레트 상대각을 계산하지 않고, 마지막 1.5m에서만 실제 IW yaw를
+        # 사용해 작은 조향으로 근접 정렬한다.
+        amr_lane_align_y = wait_y - 1.5
+        # IW가 최종 yaw를 약간 보정한 경우 팔레트 중심과 대기점의 월드 X는
+        # 같아도 실제 포크 삽입축은 비스듬하다. 멀리서 각을 추정하지 않고
+        # 마지막 1.5m 목표점만 서비스로 받은 실제 yaw의 축 위에 놓는다.
+        heading_sin = math.sin(self._amr_heading)
+        if abs(heading_sin) < 0.5:
+            raise ValueError("IW 포크 삽입 heading이 Y축 방향이 아닙니다")
+        axis_distance = (
+            (amr_center_y - amr_lane_align_y) / heading_sin
+        )
+        amr_lane_align_x = (
+            amr_center_x
+            - axis_distance * math.cos(self._amr_heading)
+        )
         pre_y, rack_insert_y, stage_y = self._approach_y(self._rack_front_y)
         rack_x = self.RACK_CENTER_X[pallet]
 
-        amr_lift = min(
-            2.0,
-            self._amr_lift_target() + self._iw_pickup_lift_offset,
-        )
+        amr_lift = self._safe_iw_pickup_lift_target()
         amr_carry_lift = amr_lift + self._pickup_raise
         rack_place_lift = max(
             0.0,
             self._rack_lift_target(pallet) - self.RACK_PICKUP_UNDERSHOOT,
         )
+        # 선반을 누른 채 Joint를 끊으면 충돌 복원 순간 위로 튄다.
+        # 1cm 위에서 해제해 중력으로 짧게 내려앉게 한다.
+        rack_release_lift = rack_place_lift + 0.010
         rack_raise = self._rack_pickup_raise(pallet)
         rack_carry_lift = rack_place_lift + rack_raise
 
         steps: list[Step] = [
             self._dock_lock(
-                True, "snap and lock IW at canonical handoff pose"
+                True, "lock IW after verified final dock alignment"
             ),
             self._pose_check(
                 wait_x,
@@ -259,12 +442,26 @@ class ForkLiftReturnNode(ForkLiftNode):
                 position_tolerance=0.03,
                 yaw_tolerance=math.radians(1.0),
             ),
+            # 포크 날이 차체 앞쪽으로 길게 돌출되므로 근접 이동 전에
+            # 팔레트 채널 높이를 먼저 맞춘다. 낮은 포크로 IW 하부를
+            # 밀고 들어가는 순서를 금지한다.
             self._lift(amr_lift, f"IW Pallet_{pallet:02d} hole height"),
+            self._lane_align(
+                amr_lane_align_x,
+                amr_lane_align_y,
+                self._amr_heading,
+                +self._creep_drive,
+                f"Pallet_{pallet:02d} close-range IW pose alignment",
+                steering_limit=math.radians(8.0),
+                position_tolerance=0.04,
+                yaw_tolerance=math.radians(2.0),
+                validate_alignment=False,
+            ),
             self._straight_y(
                 amr_insert_y,
                 +self._creep_drive,
                 f"IW Pallet_{pallet:02d} fork insert straight",
-                expected_x=wait_x,
+                expected_x=amr_lane_align_x,
                 expected_yaw=self._amr_heading,
                 precise=True,
             ),
@@ -287,8 +484,16 @@ class ForkLiftReturnNode(ForkLiftNode):
                 wait_y,
                 -self._creep_drive,
                 f"IW Pallet_{pallet:02d} reverse to wait pose",
-                expected_x=wait_x,
+                expected_x=amr_center_x,
                 expected_yaw=self._amr_heading,
+                precise=True,
+            ),
+            self._move(
+                wait_x,
+                wait_y,
+                wait_yaw,
+                f"Pallet_{pallet:02d} return to canonical wait axis",
+                creep=True,
                 precise=True,
             ),
             self._pose_check(
@@ -330,7 +535,7 @@ class ForkLiftReturnNode(ForkLiftNode):
         ]
         steps += self._lift_ramp(
             rack_carry_lift,
-            rack_place_lift,
+            rack_release_lift,
             f"Pallet_{pallet:02d} slow lower into rack",
         )
         steps += [
@@ -349,6 +554,23 @@ class ForkLiftReturnNode(ForkLiftNode):
                 expected_yaw=self._rack_heading,
                 precise=True,
             ),
+        ]
+        direct_upper_pick = (
+            pallet % 2 == 0
+            and self._next_pallet == pallet + 1
+            and self.RACK_CENTER_X[pallet]
+            == self.RACK_CENTER_X[self._next_pallet]
+        )
+        if direct_upper_pick:
+            steps += [self._event("task_complete", pallet)]
+            steps += self._take_next_pallet_to_amr(self._next_pallet)
+            steps += [
+                self._event("loaded_on_amr", self._next_pallet),
+                self._event("forklift_clear", self._next_pallet),
+            ]
+            return steps
+
+        steps += [
             self._straight_y(
                 stage_y,
                 -self._creep_drive,

@@ -82,6 +82,7 @@ if MM_TELEOP and NAV_DRIVE:
 WAREHOUSE_TEST = (
     "--iw" in sys.argv
     and "--fork" in sys.argv
+    and not (NAV_DRIVE or NAV_ODOM or NAV_SCAN)
     and "--mm" not in sys.argv
     and "--moveit" not in sys.argv
 )

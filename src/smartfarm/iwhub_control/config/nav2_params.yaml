@@ -39,7 +39,10 @@ amcl:
     beam_skip_distance: 0.5
     beam_skip_threshold: 0.3
     beam_skip_error_threshold: 0.9
-    tf_broadcast: true
+    # 온실 배치가 앞뒤로 대칭이라 AMCL이 180도 반대 위치에 높은 확률로
+    # 수렴할 수 있다. Isaac odom은 월드 절대자세이므로 시뮬 통합에서는
+    # launch가 map→odom 항등 TF를 제공하고 AMCL의 잘못된 TF 보정은 막는다.
+    tf_broadcast: false
 
 map_server:
   ros__parameters:
@@ -74,8 +77,10 @@ controller_server:
       movement_time_allowance: 15.0
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      # 포크 삽입 시 긴 날 끝단의 Z 오차까지 억제하려면 최종 IW yaw가 1도
+      # 이하여야 한다. 서비스 인계 전 Nav2가 이 정밀도까지 실제 주행한다.
+      xy_goal_tolerance: 0.02
+      yaw_goal_tolerance: 0.017
       stateful: true
     FollowPath:
       # RPP(Regulated Pure Pursuit, 2026-07-24) — DWB 교체. DWB는 초기 heading(iw −X)에서

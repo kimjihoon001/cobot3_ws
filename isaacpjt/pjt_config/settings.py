@@ -671,7 +671,9 @@ class HarvesterNavConfig:
     # tf_namespace: "" = 전역 /tf. "harvester_0" 로 두면 /harvester_0/tf 로 쏜다.
     # 다중로봇으로 갈 때만 채울 것 — 그때는 slam_toolbox 리맵도 같이 해결해야 한다(위 주석).
     tf_namespace: str = ""
-    cmd_vel_topic: str = "/cmd_vel"
+    # fleet_dispatch cmd_vel_watchdog의 최종 안전 출력. controller_server의
+    # /cmd_vel_nav를 직접 구독하면 Nav2 종료 시 마지막 속도가 Isaac에 잔류한다.
+    cmd_vel_topic: str = "/cmd_vel_safe"
     odom_topic: str = "/odom"
     scan_topic: str = "/scan"
 

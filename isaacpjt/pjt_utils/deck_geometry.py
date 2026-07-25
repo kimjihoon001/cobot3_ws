@@ -15,6 +15,11 @@ PALLET_HOLE_CENTER_Z = (PALLET_HOLE_BOTTOM_Z + PALLET_HOLE_TOP_Z) / 2.0
 # 접촉 솔버가 팔레트와 데크를 관통 상태로 시작하지 않도록 주는 최소 간격.
 PALLET_SUPPORT_CLEARANCE = 0.002
 
+# iw.hub의 articulation/root 원점과 실제 적재면 중심 사이의 맵 X 오프셋.
+# 초기 스폰에서 chassis bbox를 실측한 값이며, 런타임 PhysX 이동 뒤 USD bbox가
+# 초기 좌표에 남아 있어도 Load 생성/창고 인계가 같은 중심을 사용하게 한다.
+IW_LOAD_MAP_X_OFFSET_M = 0.3171
+
 
 def supported_pallet_origin_z(
     deck_top_z: float,

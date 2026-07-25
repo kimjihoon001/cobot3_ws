@@ -211,8 +211,18 @@ class ManipulatorTargetNode(Node):
         target.header.frame_id = base_frame
         if not self._inside_workspace(target):
             p = target.pose.position
+            cp = camera.pose.position
+            # 팔 작업영역 밖의 비전 좌표도 Nav2 재접근 계산에는 필요하다.
+            # 여기서 좌표를 버리면 ripe 클래스 콜백이 _start_grasp_sequence()를
+            # 호출할 때 ERROR_NO_TARGET이 되어, 아래의 GT 작업영역 검사와
+            # /harvester_0/nav/reposition_request 경로에 영원히 도달하지 못한다.
+            # 팔 명령/validated 토픽은 계속 차단하고 재접근 입력으로만 보관한다.
+            self._latest_target = (p.x, p.y, p.z)
+            self._latest_camera = (cp.x, cp.y, cp.z)
             self.get_logger().warning(
-                f"작업영역 밖 목표 차단: ({p.x:.3f}, {p.y:.3f}, {p.z:.3f})"
+                "작업영역 밖 목표 — 팔 명령 차단, Nav2 재접근용으로 보관: "
+                f"({p.x:.3f}, {p.y:.3f}, {p.z:.3f})",
+                throttle_duration_sec=2.0,
             )
             return
         # Nav 대기 중에는 팔 명령이 나가지 않으므로 검출 대상이 바뀌어도 최신 좌표를

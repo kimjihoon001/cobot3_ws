@@ -21,7 +21,10 @@ import random
 from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from pjt_config.settings import RobotConfig
-from pjt_utils.deck_geometry import PALLET_SUPPORT_CLEARANCE
+from pjt_utils.deck_geometry import (
+    IW_LOAD_MAP_X_OFFSET_M,
+    PALLET_SUPPORT_CLEARANCE,
+)
 from pjt_utils.xform import set_pose, set_scale
 from robots import assets
 
@@ -284,7 +287,8 @@ class IwHub:
             log("[IwHub] ⚠ 좌우 구동 조인트를 못 찾아 토크 보강을 적용하지 못함")
 
     def load_cargo(self, stage: Usd.Stage, tomato_cfg, phys_cfg,
-                   deck_z: float = 0.225, log=print) -> int:
+                   deck_z: float = 0.225, log=print,
+                   pallet_phys_cfg=None) -> int:
         """iw.hub 데크에 '적재된 세트' — 팔레트 + KLT 8개 + 3칸에 토마토 5개씩(15개, 꼭지 포함).
 
         ★ 물리 구조 (사용자 정정 2026-07-20 "고정조인트로 결속 / 포크슬롯 살려야"):
@@ -333,7 +337,8 @@ class IwHub:
             src = self._root
         bp = UsdGeom.Xformable(stage.GetPrimAtPath(src)).ComputeLocalToWorldTransform(
             Usd.TimeCode.Default()).ExtractTranslation()
-        cargo_x, cargo_y = float(bp[0]), float(bp[1])
+        cargo_x = float(bp[0]) + IW_LOAD_MAP_X_OFFSET_M
+        cargo_y = float(bp[1])
         cargo_z = float(bp[2]) + deck_z
         cargo_quat = Gf.Quatd(1.0)
         chassis = f"{self._root}/chassis"
@@ -349,9 +354,13 @@ class IwHub:
                         chassis_prim
                     ).ComputeAlignedRange()
                 )
+                chassis_center = chassis_range.GetMidpoint()
                 chassis_world = UsdGeom.Xformable(
                     chassis_prim).ComputeLocalToWorldTransform(
                         Usd.TimeCode.Default())
+                # IW root/base_link 원점은 시각 차체의 길이 중심과 다르다.
+                # 팔레트 세트가 후방으로 치우치지 않도록 맵 X만 실제 chassis
+                # bbox 중심에 맞춘다. 횡방향 Y는 기존 도킹 축을 유지한다.
                 deck_top_z = float(chassis_range.GetMax()[2])
                 cargo_z = deck_top_z + PALLET_SUPPORT_CLEARANCE
                 cargo_quat = Gf.Quatd(
@@ -359,6 +368,7 @@ class IwHub:
                 log(
                     "[IwHub] 팔레트/IW 실측 데크 정렬: "
                     f"root 대비 dx={cargo_x - float(bp[0]):+.3f}m, "
+                    f"bbox dx={float(chassis_center[0]) - float(bp[0]):+.3f}m, "
                     f"dy={cargo_y - float(bp[1]):+.3f}m, "
                     f"deck_top_z={deck_top_z:.5f}m, "
                     f"pallet_base_z={cargo_z:.5f}m"
@@ -375,13 +385,13 @@ class IwHub:
         ident = Gf.Quatd(1.0, 0.0, 0.0, 0.0)
         rng = random.Random(7)
 
-        # ★ 적재 강체(팔레트+KLT) = 하나의 동적 강체 Load. 뒤에서 chassis 데크에 FixedJoint
-        #   로 결속해 로봇을 따라가게 한다(사용자 선택 2026-07-20). 토마토는 Load 에 안 넣는다
+        # ★ 적재 강체(팔레트+KLT) = 하나의 동적 강체 Pallet_00. 뒤에서 chassis 데크에 FixedJoint
+        #   로 결속해 로봇을 따라가게 한다(사용자 선택 2026-07-20). 토마토는 Pallet_00에 넣지 않는다
         #   — 별도 동적 강체로 KLT 안에서 흔들리며 접촉으로 실려간다(§5.1 진짜 물리 유지).
         #   팔레트는 convexDecomposition 콜라이더 → 포크 슬롯(구멍)을 살려 창고에서 지게차
         #   포크가 들어갈 수 있게 한다(스파이크 06 검증 방식). 결속 조인트는 창고 도착 시
         #   해제(SetActive False)하면 지게차가 팔레트를 넘겨받는다 — 루프 후속.
-        load = f"{root}/Load"
+        load = f"{root}/Pallet_00"
         UsdGeom.Xform.Define(stage, load)
         add_reference_to_stage(pallet_url, f"{load}/Pallet")
         set_pose(stage.GetPrimAtPath(f"{load}/Pallet"), (0.0, 0.0, 0.0), ident)
@@ -402,6 +412,20 @@ class IwHub:
         klt_height = KLT_SIZE[2] * klt_scale
         klt_wall_t = 0.010
         klt_floor_t = 0.012
+        klt_edge_margin_x = (
+            PALLET_SIZE[0] / 2.0
+            - ((nx - 1) / 2.0 * pitx + klt_outer_x / 2.0)
+        )
+        klt_edge_margin_y = (
+            PALLET_SIZE[1] / 2.0
+            - ((ny - 1) / 2.0 * pity + klt_outer_y / 2.0)
+        )
+        if klt_edge_margin_x < 0.0 or klt_edge_margin_y < 0.0:
+            raise RuntimeError(
+                "KLT 배치가 팔레트 바깥으로 나갑니다: "
+                f"margin_x={klt_edge_margin_x:.4f}m, "
+                f"margin_y={klt_edge_margin_y:.4f}m"
+            )
 
         def add_klt_box_collider(path: str,
                                  center: tuple[float, float, float],
@@ -495,29 +519,74 @@ class IwHub:
                     physics.bind_physics_material(tprim, tmat)
                     n_tom += 1
 
-        # ── Load 를 동적 강체로 확정 + chassis 데크에 FixedJoint 결속 ──
+        # ── Load 를 독립 강체로 확정 + 안전한 데크 소유 표식 생성 ──
         # Explicit mass가 PhysX의 복합 참조 collider에서 무시되는 경우에도
         # 분해 hull 부피로 수 톤이 계산되지 않도록 fallback density를 낮게 둔다.
         # 실제 동특성은 바로 아래의 mass=40kg 속성이 결정한다.
+        load_prim = stage.GetPrimAtPath(load)
+        # 참조 팔레트 USD의 하위 Mesh/Xform에 원본 MassAPI가 남아 있으면,
+        # Load 루트의 명시 질량과 별도로 convex-decomposition 부피 질량이
+        # 합산된다. 그러면 40kg 설정에도 리프트가 30kN에서 눌린다.
+        # 하나의 Load 강체는 루트 MassAPI 하나만 소유하게 정규화한다.
+        for child in Usd.PrimRange(load_prim):
+            if child != load_prim and child.HasAPI(UsdPhysics.MassAPI):
+                child.RemoveAPI(UsdPhysics.MassAPI)
         load_density = 1.0
-        physics.add_rigid_body(stage.GetPrimAtPath(load), load_density,
-                               kinematic=False)
+        # 팔레트는 실제 동적 강체로 두고, 아래의 excludeFromArticulation
+        # FixedJoint가 주행 중 데크에 결속한다. 매 프레임 set_world_pose로
+        # 따라오게 하면 Nav2 주행 중 팔레트만 뒤에 남거나 순간이동 상태가
+        # 누적될 수 있다.
+        physics.add_rigid_body(load_prim, load_density, kinematic=False)
         # 참조 팔레트 메시와 복합 KLT collider에 density만 지정하면 PhysX가
         # 에셋의 저자 단위/분해 hull 부피를 합산해 1t 이상으로 계산할 수 있다.
         # 실제 팔레트 약 25kg + 빈 소형 KLT 8개를 합친 운반 세트는 약 40kg으로
         # 고정한다. 그렇지 않으면 lift drive가 16kN 이상을 내도 상승하지 않는다.
-        UsdPhysics.MassAPI.Apply(
-            stage.GetPrimAtPath(load)
-        ).CreateMassAttr(40.0)
+        load_mass = UsdPhysics.MassAPI.Apply(load_prim)
+        load_mass.GetDensityAttr().Clear()
+        load_mass.CreateMassAttr(40.0).Set(40.0)
+        # 팔레트/KLT는 Load 하나의 복합 강체다. 참조 USD 하위에 남은 재질이
+        # 접촉마다 우선되는 일을 막고, 설정의 목재-강철 마찰값을 전체 복합
+        # 콜라이더에 일관되게 적용한다. 미지정 호출자는 창고 기본값과 같은
+        # μs=0.5, μd=0.35를 사용한다.
+        load_static_friction = float(
+            getattr(pallet_phys_cfg, "static_friction", 0.5)
+        )
+        load_dynamic_friction = float(
+            getattr(pallet_phys_cfg, "dynamic_friction", 0.35)
+        )
+        load_material = physics.create_physics_material(
+            stage,
+            f"{root}/PhysMat/pallet_klt",
+            load_static_friction,
+            load_dynamic_friction,
+        )
+        UsdShade.MaterialBindingAPI.Apply(load_prim).Bind(
+            load_material,
+            UsdShade.Tokens.strongerThanDescendants,
+            "physics",
+        )
         if stage.GetPrimAtPath(chassis).IsValid():
-            physics.create_fixed_joint(stage, f"{root}/DeckJoint", chassis, load)
-            bound = "chassis 결속(로봇 따라감·창고서 해제→지게차 인수)"
+            physics.create_fixed_joint(
+                stage,
+                f"{root}/DeckJoint",
+                chassis,
+                load,
+                exclude_from_articulation=True,
+            )
+            bound = (
+                "excludeFromArticulation FixedJoint 결속"
+                "(창고서 해제→지게차 인수)"
+            )
         else:
             bound = "⚠ chassis 링크 없음 → 데크 위 비결속 배치"
         log(
             f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 "
             f"{n_tom}개(동적강체). Load {bound}. "
-            f"pallet_base_z={cargo_z:.5f}"
+            f"pallet_base_z={cargo_z:.5f}, mass=40.0kg, "
+            f"friction=(static {load_static_friction:.2f}, "
+            f"dynamic {load_dynamic_friction:.2f}). "
+            f"KLT local z={kz:.5f}m, edge_margin="
+            f"({klt_edge_margin_x:.5f}, {klt_edge_margin_y:.5f})m"
         )
         return n_tom
 

@@ -50,7 +50,7 @@ KLT_PIVOT_Z = KLT_SIZE[2] / 2.0        # KLT 는 내가 만드는 큐브(피벗=
 BASE_Z = 0.35        # m. 1단 선반 높이. ForkliftB 포크 하한(-0.15m, 실측)보다 위 [2]
 RACK_DEPTH = 1.00    # m. 선반 깊이 = 팔레트 깊이 0.802 + 포크/앞뒤 여유 [2]
 POST_T = 0.08        # m. 기둥 두께 (온실 프레임과 동일 규격)
-TOP_MARGIN = 0.45    # m. 최상단 선반 위 여유 (팔레트 출입 공간)
+TOP_MARGIN = 1.00    # m. 최상단 선반 위 여유 (상단 팔레트/포크 간섭 방지)
 
 
 class Warehouse:

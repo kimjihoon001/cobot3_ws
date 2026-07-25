@@ -1,0 +1,10 @@
+<!-- 최종 도크 자세 전용. RemovePassedGoals를 쓰지 않아 위치가 가까워도
+     마지막 yaw 목표를 삭제하지 않는다. Spin/BackUp 복구도 없다. -->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <PipelineSequence name="DockFinalPose">
+      <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+      <FollowPath path="{path}" controller_id="FollowPath"/>
+    </PipelineSequence>
+  </BehaviorTree>
+</root>

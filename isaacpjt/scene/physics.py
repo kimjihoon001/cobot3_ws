@@ -124,7 +124,10 @@ def disable_physics(stage: Usd.Stage, root_path: str) -> int:
 
 
 def create_fixed_joint(stage: Usd.Stage, path: str,
-                       body0_path: str, body1_path: str):
+                       body0_path: str, body1_path: str,
+                       *,
+                       body0_world=None, body1_world=None,
+                       exclude_from_articulation: bool = False):
     """두 강체를 현재 상대 포즈로 고정. body0=기준(예: 로봇 링크), body1=붙일 강체.
 
     §8(MountJoint 폭발) 교훈: localPos/Rot 을 기본 identity 로 두면 PhysX 가 두 몸의
@@ -140,10 +143,26 @@ def create_fixed_joint(stage: Usd.Stage, path: str,
     # 묶인 두 몸(로봇 링크↔적재물)의 상호 충돌을 끈다. 데크 위 적재물 콜라이더가 로봇 자체
     # 콜라이더와 겹치면 조인트는 붙잡고 접촉force는 밀어내며 솔버가 싸워 로봇이 요동친다.
     j.CreateCollisionEnabledAttr(False)
-    cw = UsdGeom.Xformable(stage.GetPrimAtPath(body0_path)).ComputeLocalToWorldTransform(
-        Usd.TimeCode.Default())
-    lw = UsdGeom.Xformable(stage.GetPrimAtPath(body1_path)).ComputeLocalToWorldTransform(
-        Usd.TimeCode.Default())
+    # 외부 적재물을 로봇 링크에 임시 결속할 때는 그 강체를 로봇의
+    # articulation topology에 편입하면 안 된다. 편입되면 조인트를 지워도
+    # PhysX가 non-root articulation link로 계속 취급해 다음 소유권 전환과
+    # 런타임 자세 갱신이 실패한다.
+    j.CreateExcludeFromArticulationAttr().Set(
+        bool(exclude_from_articulation)
+    )
+    # 씬 구성 시에는 USD 변환이 곧 실제 자세다. 하지만 시뮬레이션 도중 움직인
+    # 동적 강체/아티큘레이션 링크는 Fabric/PhysX 자세가 USD authoring 값보다
+    # 앞서므로, 런타임 호출자는 실제 물리 월드 행렬을 넘겨야 한다.
+    cw = body0_world
+    if cw is None:
+        cw = UsdGeom.Xformable(
+            stage.GetPrimAtPath(body0_path)
+        ).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    lw = body1_world
+    if lw is None:
+        lw = UsdGeom.Xformable(
+            stage.GetPrimAtPath(body1_path)
+        ).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
 
     # 과실 USD는 최상위 Xform에 0.01 scale이 있다. scale이 포함된 행렬로 joint
     # local frame을 만들면 PhysX가 두 body transform을 서로 다른 프레임으로 판단해

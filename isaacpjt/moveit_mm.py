@@ -812,7 +812,7 @@ class MMDriver(Driver):
             return
         index = self._klt_cursor % 8
         ix, iy = divmod(index, 2)
-        path = f"/World/IwHubCargo/Load/KLT_{ix}{iy}"
+        path = f"/World/IwHubCargo/Pallet_00/KLT_{ix}{iy}"
         klt = self._stage.GetPrimAtPath(path)
         if not klt.IsValid():
             return
@@ -836,8 +836,8 @@ class MMDriver(Driver):
             return False
         index = max(0, min(7, int(index)))
         ix, iy = divmod(index, 2)
-        klt_path = f"/World/IwHubCargo/Load/KLT_{ix}{iy}"
-        load_path = "/World/IwHubCargo/Load"
+        klt_path = f"/World/IwHubCargo/Pallet_00/KLT_{ix}{iy}"
+        load_path = "/World/IwHubCargo/Pallet_00"
         fruit_path = self._grasped_fruit
         klt = self._stage.GetPrimAtPath(klt_path)
         fruit = self._stage.GetPrimAtPath(fruit_path)
