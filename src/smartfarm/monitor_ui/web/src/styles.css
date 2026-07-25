@@ -73,6 +73,28 @@ body {
   letter-spacing: 0.1em;
 }
 
+.rec-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.rec-btn:hover {
+  color: var(--text);
+}
+
+.rec-btn.on {
+  color: var(--live-badge);
+  border-color: var(--live-badge);
+  animation: textPulse 1.6s ease-in-out infinite;
+}
+
 .clock {
   margin-left: auto;
   font-size: 19px;
@@ -171,9 +193,11 @@ body {
 
 .pane-error {
   outline-color: var(--error);
+  /* 테두리만 깜빡인다. opacity를 건드리면 영상까지 같이 흐려진다. */
   animation: alertPulse 1.6s ease-in-out infinite;
 }
 
+/* 테두리 전용 — outline-color만 바꾼다. */
 @keyframes alertPulse {
   0%,
   100% {
@@ -181,6 +205,17 @@ body {
   }
   50% {
     outline-color: #ff453a55;
+  }
+}
+
+/* 글자·버튼용. alertPulse는 outline만 건드려서 텍스트엔 안 먹는다. */
+@keyframes textPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
   }
 }
 
@@ -219,7 +254,7 @@ body {
 }
 
 .blink {
-  animation: alertPulse 1.4s ease-in-out infinite;
+  animation: textPulse 1.4s ease-in-out infinite;
   color: var(--warn);
 }
 

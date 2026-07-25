@@ -23,8 +23,9 @@ ROOT = "/World/MonitorCams"
 # 입구를 통해서만 한 화면에 담긴다.
 IW_DOCK_Y = 10.85
 
-FIXED_RES = (640, 480)
-OVERVIEW_RES = (640, 360)
+# 화면 칸이 16:9라 4:3으로 뽑으면 좌우에 검은 여백이 크게 남는다. 16:9로
+# 맞추면 칸을 꽉 채우고 렌더 픽셀도 25% 줄어든다.
+RES = (640, 360)
 
 # 광각 CCTV 느낌. USD 기본값(focalLength 50 + aperture 20.955)은 화각이
 # 23°라 감시 화면에는 지나치게 좁다. 12mm면 약 82°.
@@ -51,7 +52,7 @@ def _look_at(eye, target, up_hint) -> Gf.Matrix4d:
 
 def _add_camera(stage: Usd.Stage, path: str, eye, target,
                 up_hint=(0.0, 0.0, 1.0), ortho_width: float | None = None,
-                res=FIXED_RES) -> str:
+                res=RES) -> str:
     cam = UsdGeom.Camera.Define(stage, path)
     UsdGeom.Xformable(cam.GetPrim()).AddTransformOp().Set(
         _look_at(eye, target, up_hint))
@@ -71,7 +72,7 @@ def _add_camera(stage: Usd.Stage, path: str, eye, target,
 
 
 def spawn(stage: Usd.Stage, cfg, publish: bool = True, log=print) -> list:
-    """고정 카메라 3대를 씬에 박고 ROS2 RGB 발행까지 건다."""
+    """고정 카메라 4대를 씬에 박고 ROS2 RGB 발행까지 건다."""
     g, wh = cfg.greenhouse, cfg.warehouse
     UsdGeom.Xform.Define(stage, ROOT)
 
@@ -90,18 +91,18 @@ def spawn(stage: Usd.Stage, cfg, publish: bool = True, log=print) -> list:
         (_add_camera(stage, f"{ROOT}/Greenhouse",
                      eye=(half_w - 1.5, -4.0, g.height - 0.3),
                      target=(0.0, 0.0, 1.0)),
-         "/cctv/greenhouse", FIXED_RES),
+         "/cctv/greenhouse", RES),
         # 인계: 창고 안에서 입구를 통해 온실 쪽 IW를 본다. 시선이 입구 폭
         # 안을 지나야 벽에 안 가리므로 카메라 X를 크게 잡으면 안 된다.
         (_add_camera(stage, f"{ROOT}/Unloading",
                      eye=(3.0, wh_front + 2.5, g.height - 0.7),
                      target=(0.0, IW_DOCK_Y + 0.65, 0.8)),
-         "/cctv/unloading", FIXED_RES),
+         "/cctv/unloading", RES),
         # 적재: 랙 정면을 비스듬히. 지게차 진입 경로와 랙이 같이 들어온다.
         (_add_camera(stage, f"{ROOT}/Storage",
                      eye=(half_w - 2.05, wh_front + 2.0, g.height - 0.6),
                      target=(0.0, rack_y, 1.2)),
-         "/cctv/storage", FIXED_RES),
+         "/cctv/storage", RES),
     ]
 
     # 조감도: 온실+창고 전체를 위에서. 긴 축(Y)이 화면 가로로 오게 돌려야
@@ -112,9 +113,8 @@ def spawn(stage: Usd.Stage, cfg, publish: bool = True, log=print) -> list:
                      eye=(0.0, center_y, 40.0),
                      target=(0.0, center_y, 0.0),
                      up_hint=(-1.0, 0.0, 0.0),
-                     ortho_width=g.length + wh.depth + 2.0,
-                     res=OVERVIEW_RES),
-         "/cctv/overview", OVERVIEW_RES),
+                     ortho_width=g.length + wh.depth + 2.0),
+         "/cctv/overview", RES),
     )
 
     log(f"[MonitorCam] 고정 카메라 {len(cams)}대: {ROOT}")
