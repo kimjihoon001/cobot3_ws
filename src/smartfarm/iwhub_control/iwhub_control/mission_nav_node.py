@@ -1,4 +1,4 @@
-"""FOLLOW/FORKLIFT 미션을 IW 전용 Nav2 NavigateToPose goal로 변환한다."""
+"""IDLE/FOLLOW/FORKLIFT 미션을 IW 전용 Nav2 NavigateToPose goal로 변환한다."""
 from __future__ import annotations
 
 import math
@@ -44,8 +44,9 @@ class MissionNavNode(Node):
         self.declare_parameter("mm_base_frame", "base_link")
         self.declare_parameter("iw_odom_topic", "/iwhub_0/odom")
         self.declare_parameter("iw_tf_topic", "/iwhub_0/tf")
-        self.declare_parameter("follow_offset_x", 1.6955)
-        self.declare_parameter("follow_offset_y", 0.0)
+        # 도킹 standoff: MM 중심에서 IW 접근 방향으로 이 거리에 비접촉 정차점을 둔다.
+        # 하한(비접촉) ≈ MM반경 + IW앞0.40 + 여유0.10, 상한 ≈ 팔 도달반경(~1.35).
+        self.declare_parameter("dock_standoff", 1.2)
         self.declare_parameter("follow_update_distance", 0.30)
         self.declare_parameter("follow_update_yaw", math.radians(30.0))
         self.declare_parameter("dock_x", 0.0)
@@ -83,7 +84,9 @@ class MissionNavNode(Node):
         )
         self._buffer = Buffer()
         self._listener = TransformListener(self._buffer, self)
-        self._mission = "FOLLOW"
+        # MM과 동시 출발하지 않는다. 수확 코디네이터가 APPROACH에 들어가
+        # /iw/mission FOLLOW를 보낼 때까지 Nav2 goal을 만들지 않는다.
+        self._mission = "IDLE"
         self._iw_pose: tuple[float, float, float] | None = None
         self._iw_odom_pose: tuple[float, float, float] | None = None
         self._map_to_odom: tuple[float, float, float] | None = None
@@ -96,7 +99,7 @@ class MissionNavNode(Node):
         self._startup_requested_at = 0.0
         self.create_timer(0.5, self._update_goal)
         self.get_logger().info(
-            "IW 미션 Nav2 연결: FOLLOW=MM 전방 목표 갱신, "
+            "IW 미션 Nav2 연결: IDLE=정지, FOLLOW=MM 전방 목표 갱신, "
             "FORKLIFT=(0.0,10.84885)")
 
     @staticmethod
@@ -105,7 +108,7 @@ class MissionNavNode(Node):
 
     def _on_mission(self, msg: String) -> None:
         mission = msg.data.strip().upper()
-        if mission not in {"FOLLOW", "FORKLIFT"}:
+        if mission not in {"IDLE", "FOLLOW", "FORKLIFT"}:
             self.get_logger().warning(f"알 수 없는 IW 미션 무시: {mission}")
             return
         if mission == self._mission:
@@ -160,12 +163,8 @@ class MissionNavNode(Node):
             self.get_logger().warning(
                 f"MM TF 대기 중: {exc}", throttle_duration_sec=5.0)
             return None
-        yaw = _yaw_from_quaternion(transform.rotation)
-        ox = float(self.get_parameter("follow_offset_x").value)
-        oy = float(self.get_parameter("follow_offset_y").value)
-        c, s = math.cos(yaw), math.sin(yaw)
-        target_x = transform.translation.x + ox * c - oy * s
-        target_y = transform.translation.y + ox * s + oy * c
+        mm_x = transform.translation.x
+        mm_y = transform.translation.y
         if self._iw_pose is None:
             self.get_logger().warning(
                 "IW map pose 대기 중: /iwhub_0/tf map→odom + /iwhub_0/odom",
@@ -174,6 +173,12 @@ class MissionNavNode(Node):
             return None
 
         iw_x, iw_y, iw_yaw = self._iw_pose
+        # 도킹점은 MM +X(=베드) 고정 오프셋이 아니라, MM 중심에서 IW가 접근하는
+        # 방향으로 standoff 거리에 둔다. 베드 반대편 안전한 쪽에 비접촉 정차한다.
+        bearing = math.atan2(iw_y - mm_y, iw_x - mm_x)
+        standoff = float(self.get_parameter("dock_standoff").value)
+        target_x = mm_x + standoff * math.cos(bearing)
+        target_y = mm_y + standoff * math.sin(bearing)
         dx = target_x - iw_x
         dy = target_y - iw_y
         # FOLLOW 목표 자세는 MM 자세를 복사하지 않는다. 현재 IW에서 이동할
@@ -201,6 +206,8 @@ class MissionNavNode(Node):
 
     def _update_goal(self) -> None:
         if self._request_pending:
+            return
+        if self._mission == "IDLE":
             return
         if not self._client.server_is_ready():
             self._recover_nav2()
