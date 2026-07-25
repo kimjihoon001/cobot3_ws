@@ -27,8 +27,6 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
-from launch_ros.descriptions import ParameterFile
-from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
@@ -42,17 +40,6 @@ def generate_launch_description():
     rviz = LaunchConfiguration("rviz")
     namespace = "iwhub_0"
     tf_remaps = [("/tf", "tf"), ("/tf_static", "tf_static")]
-    # namespace 안의 lifecycle node가 자기 파라미터를 찾도록 Nav2 표준
-    # RewrittenYaml로 /iwhub_0 root를 씌운다.
-    collision_monitor_params = ParameterFile(
-        RewrittenYaml(
-            source_file=nav2_params,
-            root_key=namespace,
-            param_rewrites={"use_sim_time": use_sim_time},
-            convert_types=True,
-        ),
-        allow_substs=True,
-    )
     with open(os.path.join(pkg, "urdf", "iwhub.urdf")) as urdf_file:
         robot_desc = urdf_file.read()
 
@@ -99,29 +86,6 @@ def generate_launch_description():
             namespace=namespace,
             output="screen",
             parameters=[{"use_sim_time": use_sim_time}],
-        ),
-
-        # IW 진행 방향의 전방 라이다만 최종 감속/정지에 사용한다.
-        Node(
-            package="nav2_collision_monitor",
-            executable="collision_monitor",
-            name="collision_monitor",
-            namespace=namespace,
-            remappings=tf_remaps,
-            output="screen",
-            parameters=[collision_monitor_params],
-        ),
-        Node(
-            package="nav2_lifecycle_manager",
-            executable="lifecycle_manager",
-            name="lifecycle_manager_collision_monitor",
-            namespace=namespace,
-            output="screen",
-            parameters=[{
-                "use_sim_time": use_sim_time,
-                "autostart": True,
-                "node_names": ["collision_monitor"],
-            }],
         ),
 
         # 2~3. Humble의 개별 localization/navigation launch는 namespace 인자를

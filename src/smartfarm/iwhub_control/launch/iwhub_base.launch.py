@@ -82,8 +82,8 @@ def generate_launch_description():
                 "ns": "iwhub_0",
                 "odom_frame": "iwhub_0/odom",
                 "base_frame": "iwhub_0/base_link",
-                # 전방 Collision Monitor를 통과한 명령만 바퀴에 전달한다.
-                "cmd_vel_topic": "/iwhub_0/cmd_vel_safe",
+                # Collision Monitor 도입 전 검증된 FOLLOW 경로를 직접 실행한다.
+                "cmd_vel_topic": "/iwhub_0/cmd_vel",
                 "odom_topic": "/iwhub_0/odom",
                 "publish_odom": ParameterValue(publish_odom, value_type=bool),
                 # 정지점의 작은 Nav2 정/역회전 명령을 0으로 고정해 wheel drive와
