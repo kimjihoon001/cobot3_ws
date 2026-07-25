@@ -89,6 +89,9 @@ WAREHOUSE_TEST = (
     and "--mm" not in sys.argv
     and "--moveit" not in sys.argv
 )
+# 4분할 모니터링 UI용 고정 감시 카메라 3대. 카메라 하나마다 씬을 다시
+# 렌더하므로 기본은 꺼두고 모니터링 화면이 필요할 때만 켠다.
+CCTV = "--cctv" in sys.argv
 
 # Warehouse 자동화의 공통 도메인은 108이다. ~/.bashrc가 109를 기본으로 내보내므로
 # setdefault()를 쓰면 Isaac만 109에 남고 ROS 터미널(108)과 완전히 분리된다.
@@ -409,6 +412,10 @@ def main() -> None:
     else:
         print("[Main] 로봇 플래그 없음 — 환경(씬)만 띄운다. "
               "(--mm / --iw / --fork 로 로봇 선택)")
+
+    if CCTV:
+        from scene import monitor_cams
+        monitor_cams.spawn(stage, cfg, publish=not NO_ROS)
 
     if GUI:
         from isaacsim.core.utils.viewports import set_camera_view
