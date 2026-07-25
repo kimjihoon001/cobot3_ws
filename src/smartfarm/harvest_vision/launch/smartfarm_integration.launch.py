@@ -8,7 +8,7 @@
   ros2 launch harvest_vision smartfarm_integration.launch.py
   (맵/수확 위치를 바꾸려면)
   ros2 launch harvest_vision smartfarm_integration.launch.py \
-      map:=/경로/farm.yaml harvest_x:=-0.487 harvest_y:=-8.207 harvest_yaw:=1.91
+      map:=/경로/farm.yaml harvest_x:=-0.54 harvest_y:=-8.19 harvest_yaw:=1.91
 
 포함:
   1) mm_moveit/nav_harvest_pipeline — 현재 검증된 MoveIt 스쿱 파지 파이프라인.
@@ -49,8 +49,8 @@ def generate_launch_description():
         DeclareLaunchArgument("initial_pose_y", default_value="-12.0"),
         DeclareLaunchArgument("initial_pose_yaw", default_value="0.0"),
         # auto_nav_harvest.launch.py 단독에서 검증한 자동 수확 정차 위치.
-        DeclareLaunchArgument("harvest_x", default_value="-0.487"),
-        DeclareLaunchArgument("harvest_y", default_value="-8.207"),
+        DeclareLaunchArgument("harvest_x", default_value="-0.54"),
+        DeclareLaunchArgument("harvest_y", default_value="-8.19"),
         DeclareLaunchArgument("harvest_yaw", default_value="1.91"),
         DeclareLaunchArgument("nav_rviz", default_value="true"),
         DeclareLaunchArgument("moveit_rviz", default_value="true"),

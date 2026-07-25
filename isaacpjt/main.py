@@ -214,6 +214,29 @@ from pjt_config.settings import SceneConfig
 from scene.greenhouse_task import GreenhouseTask
 
 
+def _set_default_viewport_lighting() -> None:
+    """GUI 뷰포트를 Stage Lights가 아닌 Isaac의 Default light rig로 고정한다."""
+    if not GUI:
+        return
+    try:
+        import omni.kit.actions.core
+
+        registry = omni.kit.actions.core.get_action_registry()
+        action = registry.get_action(
+            "omni.kit.viewport.menubar.lighting",
+            "set_lighting_mode_rig",
+        )
+        if action is None:
+            print("[Viewport] Default 조명 액션을 찾지 못해 현재 모드를 유지합니다.")
+            return
+        # -1은 해당 Isaac 버전의 defaultRig 설정(현재 이름: Default)을 사용한다.
+        action.execute(-1)
+        print("[Viewport] 조명 모드: Default")
+    except Exception as exc:
+        # 뷰포트 편의 설정 실패가 시뮬레이션 실행을 막아서는 안 된다.
+        print(f"[Viewport] Default 조명 적용 실패 — 현재 모드 유지: {exc}")
+
+
 class Opts:
     """드라이버 finalize/update 에 넘기는 실행 옵션 묶음 (모듈 플래그의 스냅샷)."""
 
@@ -341,6 +364,7 @@ def run_loaded(path: str) -> None:
     if GUI:
         from isaacsim.core.utils.viewports import set_camera_view
         set_camera_view(eye=[10.0, -18.0, 12.0], target=[0.0, 2.0, 0.5])
+        _set_default_viewport_lighting()
 
     was_playing = False
     while simulation_app.is_running():
@@ -378,6 +402,7 @@ def main() -> None:
         g = cfg.greenhouse
         set_camera_view(eye=[g.width * 0.9, -g.length * 0.8, 12.0],
                         target=[0.0, 2.0, 0.5])
+        _set_default_viewport_lighting()
 
     obs = task.get_observations()
     fruits = obs["fruits"]
