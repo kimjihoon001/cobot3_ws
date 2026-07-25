@@ -94,29 +94,37 @@ class IwDriver(Driver):
                 self._deck_geometry_error_logged = True
 
     def _publish_empty_basket_pose(self) -> None:
-        """IW의 실제 빈 KLT prim에서 map 기준 tool release pose를 발행한다."""
+        """빈 KLT 중 데크 앞쪽(IW 코=+x, MM 쪽)에 가장 가까운 슬롯의 release pose를 발행한다."""
         if self._basket_pose_pub is None or self._stage is None:
             return
         stage = self._stage
+        from pxr import Gf, Usd, UsdGeom
+        # 데크 로컬 +x = IW 코 방향(도킹 시 MM 쪽). 로컬 x가 가장 큰(가장 앞선) 빈 슬롯이
+        # MM에 가장 가깝다. MM prim 조회 없이 데크 기하만으로 견고하게 고른다.
         # load_cargo()의 초기 적재 슬롯 (00,11,30)은 제외한다.
+        best = None  # (local_x, release, quat)
         for slot in ("KLT_01", "KLT_10", "KLT_20", "KLT_21", "KLT_31"):
             prim = stage.GetPrimAtPath(f"/World/IwHubCargo/Load/{slot}")
             if not prim.IsValid():
                 continue
-            from pxr import Gf, Usd, UsdGeom
-            world = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
-                Usd.TimeCode.Default())
+            xf = UsdGeom.Xformable(prim)
+            local_x = float(xf.GetLocalTransformation().ExtractTranslation()[0])
+            world = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
             # KLT 높이 0.146m × scale 0.85의 윗면보다 5cm 위에서 놓는다.
             release = world.Transform(Gf.Vec3d(0.0, 0.0, 0.11205))
             quat = world.ExtractRotationQuat().GetNormalized()
-            imaginary = quat.GetImaginary()
-            self._basket_pose_pub.publish(
-                (float(release[0]), float(release[1]), float(release[2])),
-                (float(imaginary[0]), float(imaginary[1]),
-                 float(imaginary[2]), float(quat.GetReal())),
-                frame_id="map",
-            )
+            if best is None or local_x > best[0]:
+                best = (local_x, release, quat)
+        if best is None:
             return
+        _, release, quat = best
+        imaginary = quat.GetImaginary()
+        self._basket_pose_pub.publish(
+            (float(release[0]), float(release[1]), float(release[2])),
+            (float(imaginary[0]), float(imaginary[1]),
+             float(imaginary[2]), float(quat.GetReal())),
+            frame_id="map",
+        )
 
     def set_warehouse_dock_locked(self, locked: bool) -> bool:
         return bool(

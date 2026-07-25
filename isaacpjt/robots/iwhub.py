@@ -410,9 +410,13 @@ class IwHub:
                 set_pose(stage.GetPrimAtPath(kp), (ox, oy, kz), ident)
                 set_scale(stage.GetPrimAtPath(kp), klt_scale)
                 physics.disable_physics(stage, kp)         # 에셋 자체 강체 제거(중첩경고 §8)
+                # 초기 적재 여부와 무관하게 8개 KLT 모두 실제로 토마토를 받을 수 있는
+                # 그릇이어야 한다. 에셋 자체 물리를 제거한 뒤 모든 슬롯의 오목 형상을
+                # Load 강체 콜라이더로 다시 구성한다.
+                physics.add_convex_decomposition_colliders(
+                    stage, kp)                              # 담는 그릇(Load 콜라이더)
                 if (ix, iy) not in filled or not ripe:
                     continue
-                physics.add_convex_decomposition_colliders(stage, kp)   # 담는 그릇(Load 콜라이더)
                 for k in range(5):                         # 토마토 5개 — 흩뿌려 떨어뜨림
                     body, calyx = rng.choice(ripe)
                     jx = ox + rng.uniform(-0.06, 0.06)     # 격자 아닌 랜덤 산포
