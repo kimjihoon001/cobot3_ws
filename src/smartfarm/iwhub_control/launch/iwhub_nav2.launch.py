@@ -88,6 +88,30 @@ def generate_launch_description():
             parameters=[{"use_sim_time": use_sim_time}],
         ),
 
+        # DWB가 동적 장애물을 피하지 못하더라도 실제 바퀴 명령 직전에 전·후방
+        # 라이다로 감속/정지한다. base_node는 cmd_vel_safe만 구독한다.
+        Node(
+            package="nav2_collision_monitor",
+            executable="collision_monitor",
+            name="collision_monitor",
+            namespace=namespace,
+            remappings=tf_remaps,
+            output="screen",
+            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
+        ),
+        Node(
+            package="nav2_lifecycle_manager",
+            executable="lifecycle_manager",
+            name="lifecycle_manager_collision_monitor",
+            namespace=namespace,
+            output="screen",
+            parameters=[{
+                "use_sim_time": use_sim_time,
+                "autostart": True,
+                "node_names": ["collision_monitor"],
+            }],
+        ),
+
         # 2~3. Humble의 개별 localization/navigation launch는 namespace 인자를
         # 파라미터 root_key에만 쓰고 PushRosNamespace는 하지 않는다. 여기서 두 스택을
         # 명시적으로 감싸야 노드·액션·costmap·TF가 MM의 전역 Nav2와 분리된다.

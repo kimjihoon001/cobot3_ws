@@ -105,18 +105,20 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
-                "PathAlign", "PathDist", "GoalDist"]
+      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint",
+                "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       # 기존 0.05는 경로 관련 critic(18~32)에 비해 장애물 비용을 사실상
       # 무시해 고속 주행 시 회피가 너무 늦었다. 최고속도는 유지하되 장애물
       # 근접 궤적이 일찍 탈락하도록 기본값보다 약간 강하게 평가한다.
-      BaseObstacle.scale: 2.0
-      PathAlign.scale: 24.0
+      # 중심점 비용만 보는 BaseObstacle 대신 전체 1.73×0.802m footprint를
+      # 매 trajectory pose에서 검사한다. 레인 고정보다 동적 장애물 회피를 우선한다.
+      ObstacleFootprint.scale: 32.0
+      PathAlign.scale: 12.0
       PathAlign.forward_point_distance: 0.35
-      GoalAlign.scale: 18.0
+      GoalAlign.scale: 10.0
       GoalAlign.forward_point_distance: 0.35
-      PathDist.scale: 32.0
-      GoalDist.scale: 24.0
+      PathDist.scale: 16.0
+      GoalDist.scale: 14.0
       RotateToGoal.scale: 20.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
@@ -275,3 +277,44 @@ velocity_smoother:
     max_decel: [-1.5, 0.0, -2.0]
     odom_topic: "odom"
     odom_duration: 0.1
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: true
+    base_frame_id: "iwhub_0/base_link"
+    odom_frame_id: "iwhub_0/odom"
+    cmd_vel_in_topic: "cmd_vel"
+    cmd_vel_out_topic: "cmd_vel_safe"
+    transform_tolerance: 0.3
+    source_timeout: 0.5
+    base_shift_correction: true
+    stop_pub_timeout: 1.0
+    polygons: ["StopZone", "SlowZone"]
+    # 실제 적재 footprint보다 전후/좌우 15cm 넓은 최종 정지 영역.
+    StopZone:
+      type: "polygon"
+      points: [0.80, 0.55, 0.80, -0.55, -1.23, -0.55, -1.23, 0.55]
+      action_type: "stop"
+      max_points: 1
+      visualize: true
+      polygon_pub_topic: "collision_stop_zone"
+      enabled: true
+    # 정지 영역 바깥 35cm부터 25% 속도로 감속한다.
+    SlowZone:
+      type: "polygon"
+      points: [1.15, 0.80, 1.15, -0.80, -1.58, -0.80, -1.58, 0.80]
+      action_type: "slowdown"
+      max_points: 1
+      slowdown_ratio: 0.25
+      visualize: true
+      polygon_pub_topic: "collision_slow_zone"
+      enabled: true
+    observation_sources: ["scan_front", "scan_back"]
+    scan_front:
+      type: "scan"
+      topic: "front_2d_lidar/scan_filtered"
+      enabled: true
+    scan_back:
+      type: "scan"
+      topic: "back_2d_lidar/scan_filtered"
+      enabled: true

@@ -97,13 +97,13 @@ class NavHarvestTestNode(Node):
         self.declare_parameter("fixed_goal_retry_sec", 2.0)
         self.declare_parameter("iw_yield_request_topic", "/iw/mm_yield_request")
         self.declare_parameter("iw_yield_complete_topic", "/iw/mm_yield_complete")
-        # IW가 중앙 레인으로 하역 출발할 때 MM이 비켜 대기할 교차통로 옆 레인.
-        # 2026-07-25 최신 녹화에서 (-2.90,-3.85)는 중간 이후 global plan이
-        # 끊겨 MM이 충분히 비켜도 성공 응답이 나오지 않았다. 실제로 도달한
-        # 교차통로 안전점에서 완료시켜 IW 출발 게이트를 연다.
-        self.declare_parameter("iw_yield_x", -0.8)
-        self.declare_parameter("iw_yield_y", -6.8)
-        self.declare_parameter("iw_yield_yaw", 0.0)
+        # IW가 중앙 레인으로 하역 출발할 때 MM은 가까운 통로에서 멈추지 않고
+        # IW 반대쪽 베드 끝 교차통로까지 진행한 뒤 좌회전해 완전히 빠진다.
+        # 수확점(-0.54,-8.19)에서 베드 장축 방향으로 올라간 다음 서쪽(-X)을
+        # 향하는 자세이므로 최종 yaw는 pi다.
+        self.declare_parameter("iw_yield_x", -2.90)
+        self.declare_parameter("iw_yield_y", -3.85)
+        self.declare_parameter("iw_yield_yaw", math.pi)
 
         latched = QoSProfile(
             depth=1,

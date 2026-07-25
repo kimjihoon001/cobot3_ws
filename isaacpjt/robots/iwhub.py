@@ -420,6 +420,15 @@ class IwHub:
         klt_floor_t = 0.030
         klt_contact_offset = 0.002
         klt_collider_paths: list[str] = []
+        # 팔레트의 높은 마찰은 지게차 인수에 필요하지만 KLT 안쪽 벽까지 같은
+        # μ=0.5를 쓰면 낙하 과실이 림/벽에 걸쳐 멈춘다. KLT shell만 저마찰로
+        # 분리해 벽에 닿은 과실이 바닥으로 미끄러져 내려가게 한다.
+        klt_inner_material = physics.create_physics_material(
+            stage,
+            f"{root}/PhysMat/klt_inner",
+            static_friction=0.12,
+            dynamic_friction=0.08,
+        )
         klt_edge_margin_x = (
             PALLET_SIZE[0] / 2.0
             - ((nx - 1) / 2.0 * pitx + klt_outer_x / 2.0)
@@ -454,6 +463,7 @@ class IwHub:
             physx_collision.CreateContactOffsetAttr(
                 klt_contact_offset).Set(klt_contact_offset)
             physx_collision.CreateRestOffsetAttr(0.0).Set(0.0)
+            physics.bind_physics_material(prim, klt_inner_material)
             # 렌더링에서는 숨기되 물리 충돌은 계속 활성 상태로 유지한다.
             UsdGeom.Imageable(prim).MakeInvisible()
             klt_collider_paths.append(path)
@@ -650,6 +660,7 @@ class IwHub:
             f"KLT colliders={active_klt_colliders}/"
             f"{expected_klt_colliders}, "
             f"wall/floor=({klt_wall_t:.3f}/{klt_floor_t:.3f})m, "
+            "KLT friction=(0.12/0.08), "
             f"contact_offset={klt_contact_offset:.3f}m"
         )
         return n_tom

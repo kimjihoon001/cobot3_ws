@@ -82,7 +82,8 @@ def generate_launch_description():
                 "ns": "iwhub_0",
                 "odom_frame": "iwhub_0/odom",
                 "base_frame": "iwhub_0/base_link",
-                "cmd_vel_topic": "/iwhub_0/cmd_vel",
+                # Nav2/도킹 cmd_vel은 Collision Monitor를 통과한 안전 출력만 실행한다.
+                "cmd_vel_topic": "/iwhub_0/cmd_vel_safe",
                 "odom_topic": "/iwhub_0/odom",
                 "publish_odom": ParameterValue(publish_odom, value_type=bool),
                 # 정지점의 작은 Nav2 정/역회전 명령을 0으로 고정해 wheel drive와
