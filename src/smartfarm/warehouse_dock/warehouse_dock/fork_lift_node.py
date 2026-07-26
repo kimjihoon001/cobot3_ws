@@ -287,6 +287,8 @@ class ForkLiftNode(Node):
         self._handoff_expected_rise: float | None = None
         self._handoff_carry_pose_error: float | None = None
         self._handoff_iw_tilt_deg: float | None = None
+        self._handoff_iw_world_position: tuple[float, float, float] | None = None
+        self._handoff_iw_world_yaw: float | None = None
         self._handoff_pallet_position: tuple[float, float, float] | None = None
         self._handoff_pallet_target_position: tuple[float, float, float] | None = None
         self._handoff_state_time: float | None = None
@@ -406,6 +408,7 @@ class ForkLiftNode(Node):
         self._initial_pose = pose3("initial_pose")
         self._wait_pose = pose3("wait_pose")
         self._amr_hole = pose3("amr_hole_center")
+        self._canonical_amr_hole = self._amr_hole
         self._rack_front_y = float(self.get_parameter("rack_front_y").value)
         self._rack_heading = float(self.get_parameter("rack_heading").value)
         self._amr_heading = float(self.get_parameter("amr_heading").value)
@@ -652,6 +655,7 @@ class ForkLiftNode(Node):
 
         previous = self._amr_hole
         self._amr_hole = measured
+        self._canonical_amr_hole = measured
         first = not self._iw_deck_geometry_received
         self._iw_deck_geometry_received = True
         if first or any(
@@ -695,6 +699,7 @@ class ForkLiftNode(Node):
             expected_rise = optional_float("expected_rise")
             carry_pose_error = optional_float("carry_pose_error")
             iw_tilt_deg = optional_float("iw_tilt_deg")
+            iw_world_yaw = optional_float("iw_world_yaw")
 
             def optional_vec3(name: str) -> tuple[float, float, float] | None:
                 value = payload.get(name)
@@ -709,6 +714,7 @@ class ForkLiftNode(Node):
 
             pallet_position = optional_vec3("pallet_position")
             pallet_target_position = optional_vec3("pallet_target_position")
+            iw_world_position = optional_vec3("iw_world_position")
             if owner not in ("none", "deck", "fork", "conflict"):
                 raise ValueError(f"알 수 없는 owner={owner}")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -726,6 +732,8 @@ class ForkLiftNode(Node):
         self._handoff_expected_rise = expected_rise
         self._handoff_carry_pose_error = carry_pose_error
         self._handoff_iw_tilt_deg = iw_tilt_deg
+        self._handoff_iw_world_position = iw_world_position
+        self._handoff_iw_world_yaw = iw_world_yaw
         self._handoff_pallet_position = pallet_position
         self._handoff_pallet_target_position = pallet_target_position
         self._handoff_state_time = time.monotonic()

@@ -67,7 +67,7 @@ class MissionNavNode(Node):
         self.declare_parameter("follow_update_yaw", math.radians(30.0))
         self.declare_parameter("dock_x", 0.0)
         self.declare_parameter("dock_y", 10.84885)
-        self.declare_parameter("dock_yaw", math.pi / 2.0)
+        self.declare_parameter("dock_yaw", math.pi)
         self.declare_parameter("max_dock_adjust_retries", 3)
         self.declare_parameter("dock_align_capture_radius", 0.30)
         self.declare_parameter("dock_align_position_tolerance", 0.04)
@@ -158,6 +158,8 @@ class MissionNavNode(Node):
         self._dock_align_stable_since: float | None = None
         self._dock_align_log_at = 0.0
         self._dock_align_stage = "POSITION"
+        self._dock_align_yaw_stall_since: float | None = None
+        self._dock_align_yaw_stall_anchor: float | None = None
         self._follow_goal_handle = None    # active FOLLOW goal handle (cancel 용)
         self._goal_gen = 0                 # goal 세대 ID — 취소/교체된 goal의 늦은 콜백 무시
         self._started_at = time.monotonic()
@@ -429,6 +431,8 @@ class MissionNavNode(Node):
         self._dock_align_stable_since = None
         self._dock_align_log_at = 0.0
         self._dock_align_stage = "POSITION"
+        self._dock_align_yaw_stall_since = None
+        self._dock_align_yaw_stall_anchor = None
         self._publish_dock_cmd(0.0, 0.0)
         self.get_logger().info(
             f"IW DOCK_ALIGN 시작: {reason} — "
@@ -439,6 +443,8 @@ class MissionNavNode(Node):
         self._publish_dock_cmd(0.0, 0.0)
         self._dock_align_started = None
         self._dock_align_stable_since = None
+        self._dock_align_yaw_stall_since = None
+        self._dock_align_yaw_stall_anchor = None
 
     def _update_dock_alignment(self) -> None:
         """도크 근처 전용 unicycle 폐루프. 일반 Nav2 속도에는 관여하지 않는다."""
@@ -515,6 +521,8 @@ class MissionNavNode(Node):
                 # 위치와 최종 yaw를 한 제어식에 섞으면 전진/후진 판정 경계에서
                 # 회전 부호가 뒤집힌다. 한 tick 완전히 정지한 뒤 yaw 단계로 간다.
                 self._dock_align_stage = "YAW"
+                self._dock_align_yaw_stall_since = now
+                self._dock_align_yaw_stall_anchor = yaw_error
                 self._publish_dock_cmd(0.0, 0.0)
                 self.get_logger().info(
                     f"IW DOCK_ALIGN 위치 완료: xy={position_error:.3f}m "
@@ -547,6 +555,44 @@ class MissionNavNode(Node):
                 self.get_logger().warning(
                     "IW DOCK_ALIGN 회전 중 위치 이탈 → Nav2 재접근: "
                     f"xy_error={position_error:.3f}m"
+                )
+                return
+            # 목표 yaw 허용범위에 들어온 뒤 각도가 2초 동안 사실상 변하지
+            # 않으면 바퀴 deadband에 걸린 것으로 보고 정렬을 종료한다.
+            # 큰 각도 오차에서 멈춘 경우까지 성공 처리하지는 않는다.
+            yaw_stall_epsilon = math.radians(0.1)
+            if (
+                self._dock_align_yaw_stall_anchor is None
+                or abs(self._wrap(
+                    yaw_error - self._dock_align_yaw_stall_anchor
+                )) > yaw_stall_epsilon
+            ):
+                self._dock_align_yaw_stall_anchor = yaw_error
+                self._dock_align_yaw_stall_since = now
+            elif (
+                abs(yaw_error) <= yaw_tolerance
+                and self._dock_align_yaw_stall_since is not None
+                and now - self._dock_align_yaw_stall_since >= 2.0
+            ):
+                # 최종 인계 안전범위(50mm) 밖이면 yaw만 맞았다고 지게차를
+                # 호출하지 않는다. 위치 단계로 돌아가 XY부터 다시 맞춘다.
+                if position_error > 0.050:
+                    self._dock_align_stage = "POSITION"
+                    self._dock_align_yaw_stall_since = None
+                    self._dock_align_yaw_stall_anchor = None
+                    self._publish_dock_cmd(0.0, 0.0)
+                    self.get_logger().warning(
+                        "IW DOCK_ALIGN yaw 정체지만 잠금 XY 범위 밖 → "
+                        f"위치 재보정: xy_error={position_error:.3f}m"
+                    )
+                    return
+                self._stop_dock_alignment()
+                self._dock_phase = "REQUESTING_SERVICE"
+                self._dock_goal_sent = False
+                self.get_logger().info(
+                    "IW DOCK_ALIGN 완료: "
+                    f"yaw_error={math.degrees(yaw_error):.1f}deg가 "
+                    "2초 이상 정체 → 지게차 서비스 요청"
                 )
                 return
             angular = max(

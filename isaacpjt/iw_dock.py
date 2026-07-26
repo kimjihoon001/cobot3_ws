@@ -23,8 +23,6 @@ from scene import physics
 
 
 WAREHOUSE_DOCK_XY = (0.0, 10.84885)
-DOCK_POSITION_TOLERANCE_M = 0.04
-DOCK_QUATERNION_ALIGNMENT_MIN = 0.99984  # 약 2도 yaw 오차
 IW_WORLD_JOINT = "/World/WarehouseDockIwHubFixed"
 IW_PALLET_JOINT = "/World/WarehouseDockPalletJoint"
 FORK_PALLET_JOINT = "/World/ForkliftPalletCarryJoint"
@@ -376,31 +374,6 @@ class WarehouseDockController:
         self._robot.set_linear_velocity(np.zeros(3, dtype=float))
         self._robot.set_angular_velocity(np.zeros(3, dtype=float))
 
-    def _at_canonical_dock(self) -> bool:
-        """Return whether the live IW pose is already close enough to dock."""
-        position, orientation = self._robot.get_world_pose()
-        position = np.asarray(position, dtype=float)
-        orientation = np.asarray(orientation, dtype=float)
-        target_orientation = np.asarray(self._dock_orientation, dtype=float)
-
-        position_error = float(np.linalg.norm(
-            position[:2] - np.asarray(self._dock_position, dtype=float)[:2]
-        ))
-        orientation_norm = float(np.linalg.norm(orientation))
-        target_norm = float(np.linalg.norm(target_orientation))
-        if orientation_norm <= 1e-9 or target_norm <= 1e-9:
-            return False
-        quaternion_alignment = abs(float(np.dot(
-            orientation / orientation_norm,
-            target_orientation / target_norm,
-        )))
-        # X/Y/yaw를 한 번에 검사한다. 서비스에는 이 실제 yaw를 전달해
-        # 지게차가 동일한 축으로 접근하며, yaw만 따로 맞추지는 않는다.
-        return (
-            position_error <= DOCK_POSITION_TOLERANCE_M
-            and quaternion_alignment >= DOCK_QUATERNION_ALIGNMENT_MIN
-        )
-
     def set_dock_locked(
         self,
         locked: bool,
@@ -443,21 +416,10 @@ class WarehouseDockController:
 
                 if self._dock_lock_phase == "stopped":
                     self._stop_robot()
-                    if not self._at_canonical_dock():
-                        position, _ = self._robot.get_world_pose()
-                        position = np.asarray(position, dtype=float)
-                        error = float(np.linalg.norm(
-                            position[:2] - self._dock_position[:2]
-                        ))
-                        print(
-                            "[IW Dock] 도킹 잠금 거부: Nav2 정밀도 미달 "
-                            f"(xy_error={error:.3f}m, "
-                            f"허용={DOCK_POSITION_TOLERANCE_M:.3f}m) — "
-                            "순간이동하지 않음"
-                        )
-                        self._dock_lock_phase = "idle"
-                        return False
-                    print("[IW Dock] 도킹 고정 2/3: Nav2 도착 pose 유지")
+                    # Nav2는 AMCL이 보정한 map pose로 최종 XY/yaw를 이미
+                    # 검증한다. Isaac raw world pose를 map canonical 좌표와
+                    # 다시 비교하면 map→odom 보정량까지 위치 오차로 오인한다.
+                    print("[IW Dock] 도킹 고정 2/3: ROS 검증 pose 유지")
                     self._dock_lock_phase = "pose_settled"
                     return False
 

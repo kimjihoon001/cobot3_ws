@@ -78,9 +78,9 @@ manipulator_target_node:
     # IW(바스켓) 없으면 파지한 채 홈으로 복귀(그리퍼 안 엶). True 라 RETRACT→_send_home.
     home_after_attempt: true
     retry_after_failure: false
-    # 기존 릴리즈 TCP 높이에서 20mm 더 낮춘다.
-    # 슬롯 pose 기준 +14mm이며 스쿱 최저점은 KLT 윗면보다 약 10mm 낮다.
-    basket_approach_height_m: 0.014
+    # 기존 실행값(+14mm)에서 30mm 더 낮춘다.
+    # TCP가 발행된 슬롯 pose보다 16mm 아래까지 진입한다.
+    basket_approach_height_m: -0.016
     # 접힘 자세에서 바구니 pose를 기다리는 시간(일반 motion_timeout_sec와 분리).
     basket_wait_timeout_sec: 2.0
     # KLT는 MM 측후방에 놓인다. 축정렬 상자가 아니라 수평 반경으로 판정한다.

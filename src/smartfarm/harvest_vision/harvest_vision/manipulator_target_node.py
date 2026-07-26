@@ -195,9 +195,9 @@ class ManipulatorTargetNode(Node):
         #   → 툴 끝은 TCP 앞 57mm. 릴리즈 자세는 연직 하방이라 그대로 아래쪽 여유다.
         #   발행 슬롯 pose = KLT 윗면 + 33.1mm (isaacpjt/iw.py: 0.11205×0.85 − 62.1mm)
         #   ∴ 0.030 + 0.057 − 0.0331 = 0.0539
-        # 2026-07-25 사용자 지시로 2 cm 낮춤(0.054 → 0.034). 낙하 높이가 3 cm
-        # → 1 cm로 줄어 릴리즈 중 과실이 옆으로 빠질 여지를 줄인다.
-        self.declare_parameter("basket_approach_height_m", 0.014)
+        # 기존 실행값에서 3cm 더 낮춘다(0.014 → -0.016). 과실을 놓을 때
+        # TCP가 발행된 슬롯 pose보다 16mm 아래까지 진입한다.
+        self.declare_parameter("basket_approach_height_m", -0.016)
         # 릴리즈 후 LIN으로 빠져나올 바구니 상부 안전점(릴리즈점 기준 추가 상승).
         # 릴리즈 시 스쿱 끝이 림보다 3cm 위다. 추가 8cm만 수직 후퇴해도
         # 총 11cm 여유라 접기에 충분하며, 기존 15cm LIN 왕복 시간을 줄인다.
@@ -212,10 +212,12 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("scoop_tip_below_tcp_m", 0.057)
         self.declare_parameter("basket_pose_above_rim_m", 0.0331)
         # 바구니 단계 전용 툴 자세 — 수확용 _harvest_orientation을 재사용하지
-        # 않는다. (x,y,z,w)=(1,0,0,0)은 base X축 180° 회전 = 툴 z축이 연직 하방.
+        # 않는다. 연직 하방 자세 (1,0,0,0)에 로컬 TCP +Z 기준 +90°를 합성해,
+        # 위에서 하향 TCP를 볼 때 6번 축이 반시계로 90° 돌아간 최종 자세다.
         # 손목 yaw 후보 탐색은 mm_motion_bridge의 랭크드 IK가 담당한다.
         self.declare_parameter(
-            "basket_tool_orientation", [1.0, 0.0, 0.0, 0.0])
+            "basket_tool_orientation",
+            [0.7071067812, -0.7071067812, 0.0, 0.0])
         # 바스켓은 축정렬 상자가 아니라 수평 반경으로 판정한다. J1이 360° 도는
         # 6축 팔에서 KLT는 원래 MM 측후방에 놓이며(머지 전 grasp_proto.py 방식),
         # 상자 하한 X를 쓰면 도달 가능한 뒤쪽 슬롯이 부호 때문에 거부된다.

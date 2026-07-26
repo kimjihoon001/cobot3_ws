@@ -190,21 +190,57 @@ class ForkLiftReturnNode(ForkLiftNode):
 
         self._expected_pallet = pallet
         self._next_pallet = response.outbound_pallet
-        # 서비스 pose는 IW 차체의 최종 위치/yaw다. 팔레트 중심은 chassis
-        # 실측 X 오프셋까지 포함한 /iwhub_0/deck_geometry 값을 유지한다.
-        # canonical IW yaw=pi일 때 포크 heading은 -pi/2가 된다.
-        self._amr_hole = (
-            self._amr_hole[0],
-            self._amr_hole[1],
-            self._amr_hole[2],
+        # 서비스 pose는 AMCL 보정 map 좌표이고 지게차는 Isaac 물리 월드에서
+        # 움직인다. 최신 handoff_state의 실제 IW 월드 pose를 사용한다.
+        if (
+            self._handoff_iw_world_position is None
+            or self._handoff_iw_world_yaw is None
+            or self._handoff_state_time is None
+            or time.monotonic() - self._handoff_state_time
+            > self._connection_timeout
+        ):
+            response.accepted = False
+            response.message = "최신 Isaac IW 물리 pose가 없어 요청을 거부합니다"
+            return response
+        physical_dock_pose = (
+            self._handoff_iw_world_position[0],
+            self._handoff_iw_world_position[1],
+            self._handoff_iw_world_yaw,
         )
-        self._amr_heading = wrap_angle(dock_pose[2] + math.pi / 2.0)
+
+        # /iwhub_0/deck_geometry는 canonical IW pose
+        # (0, 10.84885, pi)에서 측정한 팔레트 중심이다. IW는 최종 pose를
+        # 순간이동 없이 그대로 잠그므로, Isaac의 실제 차체 pose에
+        # canonical 로컬 오프셋을 회전·이동해 실제 팔레트 중심을 계산한다.
+        canonical_x = 0.0
+        canonical_y = 10.84885
+        canonical_yaw = math.pi
+        canonical_hole = self._canonical_amr_hole
+        world_dx = canonical_hole[0] - canonical_x
+        world_dy = canonical_hole[1] - canonical_y
+        cc = math.cos(canonical_yaw)
+        sc = math.sin(canonical_yaw)
+        local_dx = cc * world_dx + sc * world_dy
+        local_dy = -sc * world_dx + cc * world_dy
+        ca = math.cos(physical_dock_pose[2])
+        sa = math.sin(physical_dock_pose[2])
+        self._amr_hole = (
+            physical_dock_pose[0] + ca * local_dx - sa * local_dy,
+            physical_dock_pose[1] + sa * local_dx + ca * local_dy,
+            canonical_hole[2],
+        )
+        self._amr_heading = wrap_angle(
+            physical_dock_pose[2] + math.pi / 2.0
+        )
         self.get_logger().info(
             "서비스 IW pose 적용: "
             f"pallet_center=({self._amr_hole[0]:.3f}, "
             f"{self._amr_hole[1]:.3f}), "
             f"IW center=({dock_pose[0]:.3f}, {dock_pose[1]:.3f}), "
             f"IW yaw={math.degrees(dock_pose[2]):.1f}deg, "
+            f"Isaac world=({physical_dock_pose[0]:.3f}, "
+            f"{physical_dock_pose[1]:.3f}, "
+            f"{math.degrees(physical_dock_pose[2]):.1f}deg), "
             f"fork heading={math.degrees(self._amr_heading):.1f}deg"
         )
         self._pallet_target_command = pallet

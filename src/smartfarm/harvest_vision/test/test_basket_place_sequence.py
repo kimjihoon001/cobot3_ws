@@ -138,10 +138,10 @@ def test_azimuth_align_runs_before_the_arm_extends(node):
     assert node._isaac_command_pub.phases() == ["BASKET_APPROACH"]
 
 
-def test_release_height_puts_the_tool_tip_1cm_below_the_klt_rim(node):
-    """슬롯 z=0.288 → 릴리즈 z=0.302. 스쿱 끝이 KLT 윗면 1cm 아래.
+def test_release_height_is_lowered_3cm_from_the_previous_setting(node):
+    """슬롯 z=0.288 → 릴리즈 z=0.272. 기존 값에서 3cm 추가 하향.
 
-    2026-07-26 사용자 지시로 기존 릴리즈 높이에서 2cm 더 낮췄다.
+    2026-07-26 사용자 지시로 +14mm에서 -16mm로 변경했다.
     """
     node._place_home_done = True
     node._transition("WAIT_BASKET_AT_BED_VIEW")
@@ -151,7 +151,7 @@ def test_release_height_puts_the_tool_tip_1cm_below_the_klt_rim(node):
 
     targets = node._isaac_command_pub.targets()
     assert [t["phase"] for t in targets] == ["BASKET_APPROACH"]
-    assert targets[0]["position"][2] == pytest.approx(0.302, abs=1e-6)
+    assert targets[0]["position"][2] == pytest.approx(0.272, abs=1e-6)
     # IW가 발행한 KLT 중심에서 XY 평면상 MM 원점 방향으로 정확히 80mm 이동한다.
     center_xy = np.array([-1.209, 0.536])
     expected_xy = center_xy * (1.0 - 0.08 / np.linalg.norm(center_xy))
@@ -159,11 +159,10 @@ def test_release_height_puts_the_tool_tip_1cm_below_the_klt_rim(node):
     assert actual_xy == pytest.approx(expected_xy, abs=1e-6)
     assert np.linalg.norm(actual_xy - center_xy) == pytest.approx(
         0.08, abs=1e-6)
-    # 슬롯 pose는 이미 KLT 윗면 +0.0331 m다. 툴 끝(TCP 앞 0.057 m)이 윗면에서
-    # 0.010 m 들어가는 높이여야 한다.
+    # 슬롯 pose는 이미 KLT 윗면 +0.0331 m다. TCP를 기존보다 30mm 낮춘다.
     klt_top = 0.288 - 0.0331
     assert targets[0]["position"][2] - 0.057 - klt_top == pytest.approx(
-        -0.010, abs=1e-3)
+        -0.040, abs=1e-3)
 
     _motion_done(node)                      # 릴리즈점 도달
     assert node._state == "PLACE_RELEASING"
@@ -171,7 +170,7 @@ def test_release_height_puts_the_tool_tip_1cm_below_the_klt_rim(node):
     # 슬롯 중심(z=0.288)으로 내려가는 BASKET_PLACE 명령은 존재하지 않는다.
     assert "BASKET_PLACE" not in node._isaac_command_pub.phases()
     assert all(
-        target["position"][2] > 0.30
+        target["position"][2] > 0.27
         for target in node._isaac_command_pub.targets())
 
 
@@ -185,7 +184,8 @@ def test_basket_phase_does_not_reuse_harvest_orientation(node):
     _motion_done(node)                      # 방위 정렬 성공
 
     orientation = node._isaac_command_pub.targets()[0]["tool_orientation"]
-    assert orientation == [1.0, 0.0, 0.0, 0.0]
+    assert orientation == pytest.approx(
+        [0.7071067812, -0.7071067812, 0.0, 0.0])
     assert orientation != node._harvest_orientation
 
 
