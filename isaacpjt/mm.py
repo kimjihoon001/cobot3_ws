@@ -469,8 +469,6 @@ class MMDriver(Driver):
         _, center = self._ripe_by_id(fruit_id)
         tcp = self._tcp_world()
         if center is None or tcp is None:
-            print(f"[Scoop] release fruit_id={fruit_id} "
-                  "측정 실패(과실/TCP 좌표 없음)")
             return
         delta = center - tcp
         lateral = float(np.linalg.norm(delta[:2]))

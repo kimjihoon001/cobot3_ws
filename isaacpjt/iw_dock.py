@@ -17,6 +17,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 from pjt_utils.deck_geometry import (
     IW_LOAD_MAP_X_OFFSET_M,
     PALLET_SUPPORT_CLEARANCE,
+    deck_target_xy,
     supported_pallet_hole_center_z,
 )
 from scene import physics
@@ -319,17 +320,31 @@ class WarehouseDockController:
             return INITIAL_IW_PALLET_PATH
         return warehouse_path
 
-    def _deck_surface(self) -> tuple[Gf.Vec3d, Gf.Quatd]:
-        """실제 chassis 월드 bbox의 상면 중심과 월드 방향을 반환한다."""
+    def _deck_surface(
+        self, forward_offset: float = 0.0
+    ) -> tuple[Gf.Vec3d, Gf.Quatd]:
+        """실제 IW pose 기준 팔레트 배치 목표와 chassis 상면을 반환한다."""
         if self._deck_body is None:
             raise ValueError("IW chassis rigid body를 찾지 못했습니다")
         world_range = _world_bbox_range(self._stage, self._deck_body)
-        # PhysX/Fabric으로 이동한 articulation의 USD bbox는 초기 스폰 좌표에
-        # 남을 수 있다. X는 Load 생성 때 측정한 root-relative 오프셋을 현재
-        # canonical dock root에 적용하고, bbox는 안정적인 상면 Z에만 사용한다.
+        # PhysX/Fabric으로 이동한 articulation의 USD bbox X/Y는 초기 스폰
+        # 좌표에 남을 수 있다. 실제 root pose에 검증된 로컬 deck offset을
+        # 회전 적용하고, bbox는 안정적인 상면 Z에만 사용한다.
+        root_position, root_quat = self._robot.get_world_pose()
+        w, x, y, z = (float(value) for value in root_quat)
+        root_yaw = np.arctan2(
+            2.0 * (w * z + x * y),
+            1.0 - 2.0 * (y * y + z * z),
+        )
+        target_x, target_y = deck_target_xy(
+            float(root_position[0]),
+            float(root_position[1]),
+            float(root_yaw),
+            forward_offset,
+        )
         world_point = Gf.Vec3d(
-            float(self._dock_position[0]) + IW_LOAD_MAP_X_OFFSET_M,
-            float(self._dock_position[1]),
+            target_x,
+            target_y,
             float(world_range.GetMax()[2]),
         )
         body = self._stage.GetPrimAtPath(self._deck_body)
@@ -343,7 +358,15 @@ class WarehouseDockController:
 
     def geometry_json(self) -> str:
         """ROS 제어기가 사용할 canonical 도킹/팔레트 높이 실측값."""
-        point, _ = self._deck_surface()
+        # 이 토픽은 런타임 목표가 아니라 IW 형상의 canonical 기준이다.
+        # 실제 이동한 root X/Y를 내보내면 회수 노드가 이를 새 도킹축으로
+        # 오인한다. 동적 목표는 /forklift/handoff_state로만 전달한다.
+        runtime_point, _ = self._deck_surface()
+        point = Gf.Vec3d(
+            float(self._dock_position[0]) + IW_LOAD_MAP_X_OFFSET_M,
+            float(self._dock_position[1]),
+            float(runtime_point[2]),
+        )
         payload = {
             "dock_x": round(float(point[0]), 6),
             "dock_y": round(float(point[1]), 6),
@@ -353,12 +376,18 @@ class WarehouseDockController:
                 6,
             ),
             "pallet_support_clearance": PALLET_SUPPORT_CLEARANCE,
+            "frame": "canonical_dock",
         }
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     def _log_deck_geometry(self) -> None:
         try:
-            point, _ = self._deck_surface()
+            runtime_point, _ = self._deck_surface()
+            point = Gf.Vec3d(
+                float(self._dock_position[0]) + IW_LOAD_MAP_X_OFFSET_M,
+                float(self._dock_position[1]),
+                float(runtime_point[2]),
+            )
             hole_z = supported_pallet_hole_center_z(float(point[2]))
             print(
                 "[IW Deck Measure] 실제 chassis bbox 기준: "
@@ -463,7 +492,10 @@ class WarehouseDockController:
         return True
 
     def set_pallet_on_deck(
-        self, attached: bool, pallet_id: int
+        self,
+        attached: bool,
+        pallet_id: int,
+        forward_offset: float = 0.0,
     ) -> bool:
         """Attach a warehouse pallet to the IW at one canonical deck frame."""
         if not attached:
@@ -501,7 +533,7 @@ class WarehouseDockController:
             return False
 
         try:
-            deck_point, _deck_orientation = self._deck_surface()
+            deck_point, _deck_orientation = self._deck_surface(forward_offset)
             pallet_range = _world_bbox_range(self._stage, pallet_path)
             pallet_center = pallet_range.GetMidpoint()
             xy_error = np.hypot(
@@ -512,6 +544,7 @@ class WarehouseDockController:
             z_error = float(pallet_range.GetMin()[2]) - support_z
             print(
                 "[IW Deck] Joint 전 실제 안착 검증: "
+                f"forward_offset={forward_offset:.3f}, "
                 f"deck_top_z={float(deck_point[2]):.5f}, "
                 f"pallet_world_min_z={float(pallet_range.GetMin()[2]):.5f}, "
                 f"xy_error={xy_error:.5f}, z_error={z_error:+.5f}"

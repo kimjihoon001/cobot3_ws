@@ -69,6 +69,7 @@ class ForkDriver(Driver):
         # frame마다 진행할 수 있도록 마지막 요청값을 래치한다.
         self._iw_dock_lock_requested = False
         self._pallet_id = 0
+        self._deck_forward_offset = 0.0
         self._deck_release_pending = False
         self._deck_clear_streak = 0
         self._deck_pickup_prevalidated = False
@@ -142,6 +143,7 @@ class ForkDriver(Driver):
             pallet_attach_request = None
             deck_attach_request = None
             dock_lock_request = None
+            deck_forward_offset_request = None
             pallet_id_request = self._pallet_id
             for name, value in zip(names, positions):
                 if not np.isfinite(value):
@@ -159,6 +161,10 @@ class ForkDriver(Driver):
                     dock_lock_request = float(value) >= 0.5
                 elif name == "pallet_id":
                     pallet_id_request = max(0, min(5, int(round(float(value)))))
+                elif name == "pallet_deck_forward_offset":
+                    deck_forward_offset_request = max(
+                        0.0, min(0.8, float(value))
+                    )
             for name, value in zip(names, velocities):
                 if name == "back_wheel_drive" and np.isfinite(value):
                     # 스파이크에서 확인된 ForkliftB 구동 부호: 음수가 전진이다.
@@ -173,6 +179,8 @@ class ForkDriver(Driver):
                 self._controller.set_fork(self._pickup_lift_override)
             if dock_lock_request is not None:
                 self._iw_dock_lock_requested = dock_lock_request
+            if deck_forward_offset_request is not None:
+                self._deck_forward_offset = deck_forward_offset_request
             if (
                 pallet_attach_request is not None
                 or deck_attach_request is not None
@@ -342,7 +350,9 @@ class ForkDriver(Driver):
                 del w, z
                 up_z = max(-1.0, min(1.0, 1.0 - 2.0 * (x * x + y * y)))
                 iw_tilt_deg = math.degrees(math.acos(up_z))
-                deck_point, _ = self._iw_driver._deck_surface()
+                deck_point, _ = self._iw_driver.warehouse_deck_surface(
+                    self._deck_forward_offset
+                )
                 deck_target_position_json = [
                     float(deck_point[0]),
                     float(deck_point[1]),
@@ -368,6 +378,7 @@ class ForkDriver(Driver):
                 "pallet_target_position": (
                     deck_target_position_json
                 ),
+                "deck_forward_offset": self._deck_forward_offset,
                 "forklift_position": forklift_position_json,
                 "pallet_rise": pallet_rise,
                 "expected_rise": expected_rise,
@@ -900,7 +911,9 @@ class ForkDriver(Driver):
             self._iw_driver.set_warehouse_pallet_deck_collision_filtered(
                 True, pallet_id
             )
-            if self._iw_driver.set_warehouse_pallet_attached(True, pallet_id):
+            if self._iw_driver.set_warehouse_pallet_attached(
+                True, pallet_id, self._deck_forward_offset
+            ):
                 self._deck_pallet_attached = True
                 self._pallet_id = pallet_id
             return

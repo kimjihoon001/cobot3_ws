@@ -175,12 +175,22 @@ class IwDriver(Driver):
         )
 
     def set_warehouse_pallet_attached(
-        self, attached: bool, pallet_id: int
+        self,
+        attached: bool,
+        pallet_id: int,
+        forward_offset: float = 0.0,
     ) -> bool:
         return bool(
             self._warehouse_dock
-            and self._warehouse_dock.set_pallet_on_deck(attached, pallet_id)
+            and self._warehouse_dock.set_pallet_on_deck(
+                attached, pallet_id, forward_offset
+            )
         )
+
+    def warehouse_deck_surface(self, forward_offset: float = 0.0):
+        if self._warehouse_dock is None:
+            raise ValueError("IW warehouse dock controller가 없습니다")
+        return self._warehouse_dock._deck_surface(forward_offset)
 
     def has_warehouse_pallet_attached(self) -> bool:
         return bool(

@@ -52,6 +52,9 @@ class ForkLiftReturnNode(ForkLiftNode):
         # 예전 고정 높이용 -0.056m를 다시 빼면 포크가 홀보다 낮아져 IW
         # 하부를 미므로 추가 오프셋 없이 실측 중심 목표를 그대로 사용한다.
         self.declare_parameter("iw_pickup_lift_offset", 0.0)
+        # IW의 기존 팔레트를 회수하러 가는 1.5m 근접 접근에만 적용한다.
+        # 포크 직선 삽입과 새 팔레트 배치 속도는 기존 creep 속도를 유지한다.
+        self.declare_parameter("iw_pickup_approach_drive", 3.6)
         initial_pallet = int(self.get_parameter("initial_pallet").value)
         self._resume_next_pallet = int(
             self.get_parameter("resume_next_pallet").value
@@ -62,6 +65,11 @@ class ForkLiftReturnNode(ForkLiftNode):
         self._iw_pickup_lift_offset = float(
             self.get_parameter("iw_pickup_lift_offset").value
         )
+        self._iw_pickup_approach_drive = float(
+            self.get_parameter("iw_pickup_approach_drive").value
+        )
+        if not 0.8 <= self._iw_pickup_approach_drive <= 6.0:
+            raise ValueError("iw_pickup_approach_drive는 0.8~6.0 사이여야 합니다")
         if not 0 <= initial_pallet < self.PALLET_COUNT:
             raise ValueError("initial_pallet은 0부터 5 사이여야 합니다")
         if self._resume_next_pallet not in (-1, *range(self.PALLET_COUNT)):
@@ -486,7 +494,7 @@ class ForkLiftReturnNode(ForkLiftNode):
                 amr_lane_align_x,
                 amr_lane_align_y,
                 self._amr_heading,
-                +self._creep_drive,
+                +self._iw_pickup_approach_drive,
                 f"Pallet_{pallet:02d} close-range IW pose alignment",
                 steering_limit=math.radians(8.0),
                 position_tolerance=0.04,

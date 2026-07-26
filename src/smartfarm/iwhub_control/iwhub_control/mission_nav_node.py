@@ -69,7 +69,9 @@ class MissionNavNode(Node):
         self.declare_parameter("dock_y", 10.84885)
         self.declare_parameter("dock_yaw", math.pi)
         self.declare_parameter("max_dock_adjust_retries", 3)
-        self.declare_parameter("dock_align_capture_radius", 0.30)
+        # Nav2가 도크 약 0.5m 앞에서 progress 실패해도 저속 전용 폐루프로
+        # 넘겨 최종 X/Y/yaw를 맞춘다. 이 구간은 costmap critic을 사용하지 않는다.
+        self.declare_parameter("dock_align_capture_radius", 0.55)
         self.declare_parameter("dock_align_position_tolerance", 0.04)
         self.declare_parameter(
             "dock_align_yaw_tolerance", math.radians(2.0)
@@ -852,7 +854,16 @@ class MissionNavNode(Node):
         elif status != GoalStatus.STATUS_CANCELED:
             self.get_logger().warning(
                 f"IW {purpose} 레인 경로 실패(status={status})")
-            self._dock_goal_sent = False
+            if (
+                purpose in {"DOCK", "DOCK_FINAL"}
+                and self._dock_alignment_capturable()
+            ):
+                self._start_dock_alignment(
+                    f"Nav2 도크 접근 실패(status={status})지만 "
+                    "최종 정렬 반경 진입"
+                )
+            else:
+                self._dock_goal_sent = False
 
     def _dock_pose_ready(self) -> bool:
         """Isaac 도크 잠금과 같은 실제 map pose 허용오차를 검사한다."""

@@ -130,7 +130,7 @@ def test_azimuth_align_runs_before_the_arm_extends(node):
     assert node._state == "BASKET_AZIMUTH_ALIGN"
     aligns = node._isaac_command_pub.aligns()
     assert len(aligns) == 1
-    assert aligns[0]["position"][2] == pytest.approx(0.302, abs=1e-6)
+    assert aligns[0]["position"][2] == pytest.approx(0.272, abs=1e-6)
     assert node._isaac_command_pub.targets() == []
 
     _motion_done(node)                      # 정렬 성공 응답
@@ -164,7 +164,14 @@ def test_release_height_is_lowered_3cm_from_the_previous_setting(node):
     assert targets[0]["position"][2] - 0.057 - klt_top == pytest.approx(
         -0.040, abs=1e-3)
 
-    _motion_done(node)                      # 릴리즈점 도달
+    _motion_done(node)                      # 릴리즈점 도달 → 손목 회전
+    assert node._state == "BASKET_WRIST_ROTATE"
+    wrist = node._isaac_command_pub.messages[-1]["wrist_rotate"]
+    assert wrist["angle_rad"] == pytest.approx(np.pi)
+    assert all("gripper" not in message
+               for message in node._isaac_command_pub.messages)
+
+    _motion_done(node, "BASKET_WRIST_ROTATE")  # 손목 회전 확인 후 릴리즈
     assert node._state == "PLACE_RELEASING"
     assert node._isaac_command_pub.messages[-1] == {"gripper": {"closed": False}}
     # 슬롯 중심(z=0.288)으로 내려가는 BASKET_PLACE 명령은 존재하지 않는다.
@@ -185,7 +192,7 @@ def test_basket_phase_does_not_reuse_harvest_orientation(node):
 
     orientation = node._isaac_command_pub.targets()[0]["tool_orientation"]
     assert orientation == pytest.approx(
-        [0.7071067812, -0.7071067812, 0.0, 0.0])
+        [1.0, 0.0, 0.0, 0.0])
     assert orientation != node._harvest_orientation
 
 
@@ -196,7 +203,8 @@ def test_successful_place_folds_before_home(node):
     _arm_at_basket(node)
     node._start_place()
     _motion_done(node)                      # 방위 정렬
-    _motion_done(node)                      # 릴리즈점
+    _motion_done(node)                      # 릴리즈점 → 손목 회전
+    _motion_done(node, "BASKET_WRIST_ROTATE")
 
     node._status_callback(_string(json.dumps({"gripper": 0.0})))
     assert node._state == "BASKET_RETRACT"
@@ -224,7 +232,8 @@ def test_basket_failure_retreats_and_never_retries_tomato(node):
     _arm_at_basket(node)
     node._start_place()
     _motion_done(node)                      # 방위 정렬 성공
-    _motion_done(node)                      # 릴리즈점 도달 → PLACE_RELEASING
+    _motion_done(node)                      # 릴리즈점 도달 → 손목 회전
+    _motion_done(node, "BASKET_WRIST_ROTATE")
     node._isaac_command_pub.messages.clear()
 
     node._status_callback(_string(json.dumps({

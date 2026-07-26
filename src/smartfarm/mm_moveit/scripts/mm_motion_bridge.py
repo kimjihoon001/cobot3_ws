@@ -250,6 +250,10 @@ class MMMotionBridge(Node):
         if isinstance(align, dict):
             self._start_azimuth_align(align)
             return
+        wrist = command.get("wrist_rotate")
+        if isinstance(wrist, dict):
+            self._start_wrist_rotate(wrist)
+            return
         bed_view = command.get("moveit_bed_view")
         if isinstance(bed_view, dict):
             try:
@@ -364,6 +368,56 @@ class MMMotionBridge(Node):
         self._queue(
             request_id, "BASKET_AZIMUTH_ALIGN",
             self._joint_goal(positions))
+
+    def _start_wrist_rotate(self, request: dict) -> None:
+        """현재 자세에서 joint_1~5를 고정하고 joint_6만 지정 각도 회전한다."""
+        try:
+            request_id = int(request.get("id", 0))
+            phase = str(request.get("phase", "BASKET_WRIST_ROTATE"))
+            angle = float(request["angle_rad"])
+            if (
+                phase != "BASKET_WRIST_ROTATE"
+                or not math.isfinite(angle)
+                or abs(abs(angle) - math.pi) > 1e-6
+            ):
+                raise ValueError("wrist rotate request")
+        except (KeyError, TypeError, ValueError):
+            self.get_logger().warning("잘못된 wrist_rotate 형식")
+            return
+        if not self._joint_state_ready():
+            self.get_logger().error(
+                "BASKET_WRIST_ROTATE: 최신 joint_states 없음 — 릴리즈 금지")
+            self._active_id = request_id
+            self._active_phase = phase
+            self._publish_motion(False, phase)
+            return
+
+        positions = {
+            name: float(self._joint_positions[name])
+            for name in (f"joint_{index}" for index in range(1, 7))
+        }
+        current = positions["joint_6"]
+        target = current + angle
+        # joint_6 범위는 ±2π다. 요청한 +180°가 상한을 넘을 때만 물리적으로
+        # 동일한 -180° 목표를 사용한다.
+        if target > 2.0 * math.pi:
+            target -= 2.0 * math.pi
+        elif target < -2.0 * math.pi:
+            target += 2.0 * math.pi
+        positions["joint_6"] = target
+        self.get_logger().info(
+            "플레이스 손목 회전: joint_1~5 고정, "
+            f"joint_6 {math.degrees(current):.1f}° → "
+            f"{math.degrees(target):.1f}° (Δ=180.0°)")
+        self._queue(
+            request_id,
+            phase,
+            self._joint_goal(
+                positions,
+                velocity_scale=0.80,
+                acceleration_scale=0.45,
+            ),
+        )
 
     def _base_goal(self) -> MoveGroup.Goal:
         goal = MoveGroup.Goal()

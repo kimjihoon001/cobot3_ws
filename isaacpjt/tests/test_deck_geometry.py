@@ -1,8 +1,11 @@
+import math
+
 import pytest
 
 from pjt_utils.deck_geometry import (
     IW_LOAD_MAP_X_OFFSET_M,
     PALLET_HOLE_CENTER_Z,
+    deck_target_xy,
     supported_pallet_hole_center_z,
     supported_pallet_origin_z,
 )
@@ -10,6 +13,29 @@ from pjt_utils.deck_geometry import (
 
 def test_iw_load_map_x_offset_matches_measured_chassis_center():
     assert IW_LOAD_MAP_X_OFFSET_M == pytest.approx(0.3171)
+
+
+def test_deck_target_uses_canonical_root_relative_offset():
+    x, y = deck_target_xy(0.0, 10.84885, math.pi)
+
+    assert x == pytest.approx(0.3171)
+    assert y == pytest.approx(10.84885)
+
+
+def test_deck_target_applies_placement_offset_along_fork_heading():
+    center = deck_target_xy(0.0, 10.84885, math.pi)
+    target = deck_target_xy(0.0, 10.84885, math.pi, 0.30)
+
+    assert target[0] == pytest.approx(center[0])
+    assert target[1] == pytest.approx(center[1] - 0.30)
+    assert math.dist(center, target) == pytest.approx(0.30)
+
+
+def test_deck_target_rotates_with_actual_iw_pose():
+    x, y = deck_target_xy(2.0, 3.0, math.pi / 2.0, 0.30)
+
+    assert x == pytest.approx(1.70)
+    assert y == pytest.approx(3.0 - IW_LOAD_MAP_X_OFFSET_M)
 
 
 def test_pallet_bottom_is_placed_on_deck_with_clearance():
