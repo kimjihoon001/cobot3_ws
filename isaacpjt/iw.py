@@ -176,7 +176,10 @@ class IwDriver(Driver):
         #   루트를 쓰면 스폰점(0,-12) 기준 최근접 슬롯 = 실제 MM 기준 최원거리
         #   슬롯을 고르게 된다(2026-07-25 sim_diag_152127 실측 2.30m vs 1.34m).
         harvester = stage.GetPrimAtPath("/World/Harvester/Base/base_link")
-        if not harvester.IsValid():
+        # 이 prim이 곧 ROS 프레임 mm_base다(moveit_mm.py::_publish_klt_target).
+        # 있을 때만 MM 상대좌표로 발행할 수 있다.
+        relative = harvester.IsValid()
+        if not relative:
             harvester = stage.GetPrimAtPath("/World/Harvester")
             if not harvester.IsValid():
                 return
@@ -187,8 +190,16 @@ class IwDriver(Driver):
 
         candidates = []
         for ix, iy in self._available_place_slots():
+            # small_KLT의 root pivot은 시각 메시의 기하 중심이므로(S3 에셋
+            # 실측) 격자 원점이 곧 슬롯 중심이다. 씬 조립 시 그 값으로 박아둔
+            # 명시적 중심을 쓰고, 구형 씬만 KLT prim으로 폴백한다.
             prim = stage.GetPrimAtPath(
-                f"{pallet_path}/KLT_{ix}{iy}")
+                f"{pallet_path}/KLT_SlotCenter_{ix}{iy}")
+            center_source = "슬롯 중심"
+            if not prim.IsValid():
+                prim = stage.GetPrimAtPath(
+                    f"{pallet_path}/KLT_{ix}{iy}")
+                center_source = "legacy prim origin"
             if not prim.IsValid():
                 continue
             world = UsdGeom.Xformable(
@@ -199,25 +210,43 @@ class IwDriver(Driver):
                 (float(center[0]) - float(harvester_position[0])) ** 2
                 + (float(center[1]) - float(harvester_position[1])) ** 2
             )
-            candidates.append((distance_xy, world, ix, iy))
+            candidates.append(
+                (distance_xy, world, ix, iy, center_source)
+            )
         if not candidates:
             # 앞열 두 칸을 다 채웠다 — 더 내줄 빈 칸이 없으니 발행을 멈춘다.
             return
 
         # 아직 안 쓴 빈 칸 중 MM에 가장 가까운 칸을 release 목표로 쓴다.
-        _, world, ix, iy = min(candidates, key=lambda candidate: candidate[0])
+        _, world, ix, iy, center_source = min(
+            candidates, key=lambda candidate: candidate[0])
         # 어느 칸을 골랐고 그 칸 원점이 맵 어디인지 한 번만 남긴다. 발행 XY가
         # KLT 중앙인지 확인하려면 이 값과 팔레트 격자(pitch 0.31/0.25)를 대조한다.
         chosen = (ix, iy)
         if chosen != self._last_basket_slot:
             self._last_basket_slot = chosen
             origin = world.ExtractTranslation()
-            print(f"[IW Basket] KLT_{ix}{iy} 선택 — prim 원점 map="
+            print(f"[IW Basket] KLT_{ix}{iy} 선택 — {center_source} map="
                   f"({float(origin[0]):.4f}, {float(origin[1]):.4f}, "
                   f"{float(origin[2]):.4f})")
         # KLT 높이 0.146m × scale 0.85의 윗면보다 약 5cm 위.
         release = world.Transform(Gf.Vec3d(0.0, 0.0, 0.11205))
         quat = world.ExtractRotationQuat().GetNormalized()
+        # ★map이 아니라 MM 상대좌표(mm_base)로 낸다. map으로 내면 MM이 이 pose를
+        #   자기 AMCL 추정(map→odom)으로 되돌리는데, 그 추정 오차가 그대로
+        #   릴리즈 지점 오차가 된다(2026-07-27 sim_diag_024700 실측 115.7mm →
+        #   KLT_31 상자 바깥 왼쪽 9mm). mm_base로 내면 소비 측 TF가
+        #   mm_base→base_link 정적 링크만 타서 위치추정이 경로에서 빠진다.
+        #   이 값은 IW·MM 두 강체의 실제 자세로 계산하므로, MM이 IW를 직접
+        #   관측했을 때 얻는 값과 같은 것을 대신한다.
+        if relative:
+            inverse = harvester_world.GetInverse()
+            release = inverse.Transform(release)
+            quat = (harvester_world.ExtractRotationQuat().GetInverse()
+                    * quat).GetNormalized()
+            frame_id = "mm_base"
+        else:
+            frame_id = "map"
         imaginary = quat.GetImaginary()
         self._basket_pose_pub.publish(
             (float(release[0]), float(release[1]), float(release[2])),
@@ -227,7 +256,7 @@ class IwDriver(Driver):
                 float(imaginary[2]),
                 float(quat.GetReal()),
             ),
-            frame_id="map",
+            frame_id=frame_id,
         )
 
     def set_warehouse_dock_locked(self, locked: bool) -> bool:

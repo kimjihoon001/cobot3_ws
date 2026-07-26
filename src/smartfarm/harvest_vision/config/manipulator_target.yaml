@@ -87,8 +87,15 @@ manipulator_target_node:
     basket_max_reach_m: 1.45
     basket_z_min: 0.15
     basket_z_max: 1.80
-    # KLT 중심에서 XY 평면상 MM base_link 원점 방향으로 80mm 이동한 릴리즈점.
-    basket_place_toward_mm_m: 0.08
+    # 굴림(스쿱 곡면 roll-out) 보정. 둘 다 0으로 두고 KLT 중심 그대로 놓는다.
+    # 과거 80mm/40mm 튜닝값은 (a) KLT 콜라이더가 시각 메시와 90° 어긋나 있고
+    # (b) KLT_SlotCenter가 팔레트 원점으로 무너져 있던 기하에서 얻은 값이라
+    # 지금 기하에는 근거가 없다. 두 버그를 고친 뒤 실측하고 다시 정한다.
+    # 근거: docs/investigation_basket_place_offset_2026-07-27.md
+    basket_place_toward_mm_m: 0.0
+    # 반경(MM 원점) 방향이 아니라 MM이 바라보는 오른쪽으로 미는 보정.
+    # 굴림 방향은 스쿱 자세가 정하므로 이 프레임도 대리값일 뿐이다.
+    basket_place_right_m: 0.0
 
     # base_frame 기준 허용 작업영역 [x, y, z] (m). 실제 로봇/환경에 맞춰 축소한다.
     # 팔을 대각선으로 완전히 펴는 자세도 허용한다. 최종 안전 한계는 별도의

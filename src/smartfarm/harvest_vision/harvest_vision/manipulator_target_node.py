@@ -252,8 +252,14 @@ class ManipulatorTargetNode(Node):
         #   0.04 → 들어가긴 하나 재현성 불량
         #   0.00 → 착지점 = KLT 내부 중심 + 굴림 벡터. 무작위 성분이 없다
         # 굴림 자체의 근본 대응(손목 회전각을 KLT 긴 축에 정렬)은 발표 후 과제다.
+        # 기존 반경(MM 원점) 방향 보정. 방향이 스쿱의 실제 낙하 방향과 일치하지
+        # 않아 KLT 중앙에서 원하는 오른쪽 보정에 쓸 수 없으므로 기본은 끈다.
         # 근거: docs/investigation_basket_place_offset_2026-07-27.md
         self.declare_parameter("basket_place_toward_mm_m", 0.0)
+        # MM base 원점에서 바스켓 중심을 바라볼 때의 수평면 오른쪽 방향 보정.
+        # 사용자가 KLT 중앙보다 오른쪽에 놓아야 내부 착지한다고 반복 관찰한
+        # 결과를 반영한다. 40mm는 과실 반지름을 제외한 짧은 축 안전 여유다.
+        self.declare_parameter("basket_place_right_m", 0.0)
         self.declare_parameter("workspace_min", [0.15, -1.05, 0.15])
         self.declare_parameter("workspace_max", [1.25, 1.05, 1.80])
         # 데모: 성공/실패 무관 매 시도 후 홈 복귀 → 팔이 안 굳고 다음 과실을 계속 시도한다.
@@ -1452,13 +1458,14 @@ class ManipulatorTargetNode(Node):
         stable_sec = (now_ns - self._basket_stable_since_ns) * 1e-9
         # IW 프레임(iwhub_0/base_link)은 MM의 TF 트리에 없다 — IW는 /iwhub_0/tf
         # 네임스페이스로 발행하고 MM은 /harvester_0/tf만 듣는다. 대신 수신
-        # 원본(map)을 그대로 남긴다. Isaac의 "[IW Basket] prim 원점 map=(...)"
-        # 과 직접 대조하면 발행 XY가 KLT 중앙인지 판정된다(z는 +0.0952 차이).
+        # 원본을 프레임 이름과 함께 남긴다. 정상 통합에서는 mm_base로 들어와야
+        # 한다 — map으로 들어오면 AMCL 오차가 릴리즈 지점에 그대로 실린다.
         raw = msg.pose.position
         self.get_logger().info(
             "실제 IW 바스켓 좌표 수신: "
             f"base=({values[0]:.3f}, {values[1]:.3f}, {values[2]:.3f})"
-            f" | 수신 map=({raw.x:.4f}, {raw.y:.4f}, {raw.z:.4f})"
+            f" | 수신 {msg.header.frame_id}="
+            f"({raw.x:.4f}, {raw.y:.4f}, {raw.z:.4f})"
             f" | 안정 {stable_sec:.1f}s",
             throttle_duration_sec=2.0)
         if self._state != "WAIT_BASKET_AT_BED_VIEW":
@@ -1567,6 +1574,26 @@ class ManipulatorTargetNode(Node):
                     f"{shift:.3f}m 이동 → "
                     f"({self._basket_place[0]:.3f}, "
                     f"{self._basket_place[1]:.3f})")
+        # base 원점→바스켓 방향 f=(x,y)/r 에 대한 오른쪽 단위벡터는
+        # (f_y,-f_x)다. KLT/map 축에 고정하지 않고 MM이 실제로 바라보는
+        # 방향을 기준으로 하므로 사용자가 관찰한 화면상 오른쪽과 일치한다.
+        right = max(
+            0.0,
+            float(self.get_parameter("basket_place_right_m").value),
+        )
+        if right > 0.0:
+            radius = float(np.linalg.norm(self._basket_place[:2]))
+            if radius > 1e-6:
+                right_vector = np.array([
+                    self._basket_place[1] / radius,
+                    -self._basket_place[0] / radius,
+                ])
+                self._basket_place[:2] += right * right_vector
+                self.get_logger().info(
+                    f"바스켓 릴리즈 XY: KLT 중심에서 바라보는 오른쪽으로 "
+                    f"{right:.3f}m 이동 → "
+                    f"({self._basket_place[0]:.3f}, "
+                    f"{self._basket_place[1]:.3f})")
         # 릴리즈점 = 슬롯 중심 + basket_approach_height_m. 여기서 스쿱을 열어
         # 낙하시킨다. 슬롯 중심(z)까지 TCP를 내리면 스쿱이 KLT 벽에 걸린다.
         release = self._basket_place.copy()
@@ -1602,7 +1629,7 @@ class ManipulatorTargetNode(Node):
             f"{tip_base:.4f} → 여유={tip_base - rim_base:.4f} m")
         if self._basket_map_z is not None:
             message += (
-                f" | map 기준 KLT 윗면 z="
+                f" | 발행 프레임 기준 KLT 윗면 z="
                 f"{self._basket_map_z - rim_offset:.4f}")
         try:
             transform = self._buffer.lookup_transform(
