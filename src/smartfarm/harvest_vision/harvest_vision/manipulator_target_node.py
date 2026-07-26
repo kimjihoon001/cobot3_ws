@@ -93,6 +93,10 @@ class ManipulatorTargetNode(Node):
         # 상대 이름이어야 namespace=harvester_0에서 코디네이터가 발행하는
         # /harvester_0/harvest_test/enable과 동일한 토픽으로 해석된다.
         self.declare_parameter("harvest_enable_topic", "harvest_test/enable")
+        # 코디네이터가 "이번 적재에서 아직 놓을 게 남았다"를 알려주는 채널.
+        # true면 플레이스 후 HOME(joint_1=180°)까지 돌아갔다 오지 않는다.
+        self.declare_parameter(
+            "place_more_pending_topic", "harvest_test/place_more_pending")
         self.declare_parameter("external_harvest_gate_enabled", False)
         self.declare_parameter("use_sim_ground_truth", False)
         self.declare_parameter("sim_tomato_topic", "/harvester_0/sim/tomato")
@@ -197,7 +201,11 @@ class ManipulatorTargetNode(Node):
         #   ∴ 0.030 + 0.057 − 0.0331 = 0.0539
         # 기존 실행값에서 3cm 더 낮춘다(0.014 → -0.016). 과실을 놓을 때
         # TCP가 발행된 슬롯 pose보다 16mm 아래까지 진입한다.
-        self.declare_parameter("basket_approach_height_m", -0.016)
+        # 2026-07-27: 다시 2cm 하향(-0.016 → -0.036). 스쿱 곡면 때문에 과실이
+        # 수직 낙하가 아니라 굴러 나가므로, 낙하 높이를 줄이면 수평 이동거리도
+        # 준다. 여유 확인 — 릴리즈 시 스쿱 최저점은 KLT 윗면 아래 59.9mm이고
+        # KLT 내부 깊이는 약 112mm라 바닥까지 52mm 남는다(충돌 없음).
+        self.declare_parameter("basket_approach_height_m", -0.036)
         # 릴리즈 후 LIN으로 빠져나올 바구니 상부 안전점(릴리즈점 기준 추가 상승).
         # 릴리즈 시 스쿱 끝이 림보다 3cm 위다. 추가 8cm만 수직 후퇴해도
         # 총 11cm 여유라 접기에 충분하며, 기존 15cm LIN 왕복 시간을 줄인다.
@@ -230,8 +238,22 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("basket_z_min", 0.15)
         self.declare_parameter("basket_z_max", 1.80)
         # KLT 중심에서 수평면상 MM(base 원점) 방향으로 최종 릴리즈점을 당긴다.
-        # IW/팔레트 TF의 잔여 수평 오차를 흡수하도록 기본 80 mm를 적용한다.
-        self.declare_parameter("basket_place_toward_mm_m", 0.08)
+        #
+        # 2026-07-27: 기본값 0.08 → 0.04 → **0.0**.
+        # 발행되는 슬롯 pose는 이미 KLT 콜라이더(=실제 바구니)의 내부 중심이다.
+        # 보정이 필요해 보였던 이유는 스쿱이 1/4구 곡면이라 과실이 굴러 나가며
+        # 낙하점이 릴리즈점과 다르기 때문이다(반포물선 낙하, 실행 관찰).
+        #
+        # 그런데 이 보정의 방향은 **MM base 원점 쪽**이고 굴림 방향은 스쿱 자세가
+        # 정한다 — 둘은 무관하다. 따라서 크기를 얼마로 두든 굴림에 자세마다
+        # 다른 방향 성분을 더하는 셈이라 재현성만 나빠진다. 실측:
+        #   0.08 → KLT 짧은 변(내부 반폭 0.0742) 벽 위에 얹힘
+        #          (로컬 y 변위 0.054 + 과실 반지름 0.034 = 0.088 > 외벽 0.0842)
+        #   0.04 → 들어가긴 하나 재현성 불량
+        #   0.00 → 착지점 = KLT 내부 중심 + 굴림 벡터. 무작위 성분이 없다
+        # 굴림 자체의 근본 대응(손목 회전각을 KLT 긴 축에 정렬)은 발표 후 과제다.
+        # 근거: docs/investigation_basket_place_offset_2026-07-27.md
+        self.declare_parameter("basket_place_toward_mm_m", 0.0)
         self.declare_parameter("workspace_min", [0.15, -1.05, 0.15])
         self.declare_parameter("workspace_max", [1.25, 1.05, 1.80])
         # 데모: 성공/실패 무관 매 시도 후 홈 복귀 → 팔이 안 굳고 다음 과실을 계속 시도한다.
@@ -332,10 +354,14 @@ class ManipulatorTargetNode(Node):
         self.create_subscription(PoseStamped, basket_topic, self._basket_callback, 10)
         self.create_subscription(Bool, enable_topic, self._enable_callback, 10)
         self.create_subscription(
+            Bool, str(self.get_parameter("place_more_pending_topic").value),
+            self._place_more_pending_callback, latched_qos)
+        self.create_subscription(
             String, str(self.get_parameter("sim_tomato_topic").value),
             self._sim_tomato_callback, 20)
         self.create_timer(0.1, self._watchdog)
         self._target_class = ""
+        self._place_more_pending = False
         self._state = "NO_TARGET"
         self._harvest_enabled = not bool(
             self.get_parameter("external_harvest_gate_enabled").value)
@@ -1300,13 +1326,31 @@ class ManipulatorTargetNode(Node):
                 self.get_clock().now().nanoseconds
                 + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
             )
-            self._isaac_command_pub.publish(
-                String(data=json.dumps({"gripper": {"closed": False}})))
+            # reason="place": 바구니에 실제로 놓는 개방이다. 접근 전 개방이나
+            # 실패 시 부분 파지 해제와 구분해야 IW 슬롯 배정기가 적재를 정확히
+            # 센다(파지 '검증' 성공 여부로는 구분할 수 없다 — 과실을 제대로
+            # 집어도 검증이 실패로 뜨는 경우가 많다).
+            self._isaac_command_pub.publish(String(data=json.dumps({
+                "gripper": {"closed": False, "reason": "place"}})))
         elif self._state == "BASKET_RETRACT":
             # 바구니 바로 위에서 편 팔을 HOME으로 한 번에 돌리면 스쿱/링크가
             # KLT와 IW를 쓸 수 있다. 방위를 유지한 채 먼저 완전히 접는다.
             self._send_post_place_fold()
         elif self._state == "POST_PLACE_BED_VIEW":
+            if self._place_more_pending:
+                # 접힌 자세는 HOME_Q에서 joint_1만 바구니 방위인 상태다. 이번
+                # 적재에서 한 번 더 놓아야 하면 joint_1을 180°(HOME)로 돌렸다가
+                # 다시 베드로 돌리는 왕복이 순수한 낭비다. 접힌 채로 코디네이터에
+                # 넘겨 joint_1만 베드 방위로 돌리는 BED_VIEW를 바로 받게 한다.
+                self._basket_place = None
+                self._basket_received_ns = 0
+                self._mobility_pub.publish(Bool(data=True))
+                self._transition("HOME_READY", stop=True)
+                self.get_logger().info(
+                    "플레이스 완료 — 남은 적재가 있어 HOME 왕복 없이 "
+                    "접힌 자세에서 베드뷰 복귀 대기")
+                self._maybe_single_shot_off()
+                return
             # 접기 성공 응답을 받은 뒤에만 joint_1까지 HOME 방위로 복귀한다.
             self._send_home(fast=True)
         elif self._state == "GO_HOME":
@@ -1330,6 +1374,10 @@ class ManipulatorTargetNode(Node):
             else:
                 self._transition("HOME_READY", stop=True)
                 self._maybe_single_shot_off()
+
+    def _place_more_pending_callback(self, msg: Bool) -> None:
+        """이번 IW 적재에서 아직 더 놓아야 하는지를 코디네이터로부터 받는다."""
+        self._place_more_pending = bool(msg.data)
 
     def _basket_callback(self, msg: PoseStamped) -> None:
         """IW가 선택한 빈 바스켓 슬롯의 tool-release pose를 base 좌표로 저장한다."""

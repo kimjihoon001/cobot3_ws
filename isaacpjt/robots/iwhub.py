@@ -503,15 +503,31 @@ class IwHub:
                 (inner_x, klt_wall_t, klt_height),
             )
 
-        # 통합 파이프라인에서는 MoveIt-MM이 실제로 수확한 토마토를 KLT에 넣는다.
-        # 미리 생성한 15개는 주행/포크 작업 중 팔레트 위를 굴러다니며 실제 하역
-        # 결과와 섞였으므로 제거한다. KLT는 8개 모두 빈 상태로 시작한다.
-        filled: set[tuple[int, int]] = set()
-        tz0 = PALLET_SIZE[2] + 0.045                        # 첫 토마토 높이(팔레트 윗면 위)
+        # 데크 앞쪽(IW 코=+x, MM 쪽) 한 열만 비워 MoveIt-MM이 실제로 수확한
+        # 토마토를 받는다. 나머지 뒤쪽 6칸은 "이미 수확해 실어둔" 모습으로 5개씩
+        # 사전 적재한다. 예전 사전 적재를 껐던 이유는 동적 강체 토마토가 주행/포크
+        # 작업 중 팔레트 위를 굴러다니며 실제 하역 결과와 섞였기 때문이므로,
+        # 사전 적재분은 KLT 크레이트와 같은 방식으로 Load(팔레트) 강체의 자식
+        # 콜라이더로 넣는다 — PhysX가 팔레트 복합 강체에 흡수하므로 IW 주행·
+        # 지게차 리프트에 한 덩어리로 딸려가고, 구르거나 튀지 않는다.
+        # (자체 강체를 주면 굴러다니고, kinematic 강체를 주면 부모가 움직여도
+        #  따라가지 않아 IW가 출발할 때 제자리에 남는다.)
+        filled: set[tuple[int, int]] = {
+            (ix, iy) for ix in range(nx - 1) for iy in range(ny)
+        }
+        # 사전 적재분은 낙하로 쌓이지 않으므로 KLT 바닥에 닿는 안착 높이에 바로 둔다.
+        # 바닥 윗면 = 팔레트 윗면 + 시각 바닥 두께, 거기에 과실 반지름을 더한다.
+        tz_rest = PALLET_SIZE[2] + klt_floor_visual_t + phys_cfg.fruit_collision_radius_m
+        # KLT 내부 유효 폭(=벽 안쪽) 안에서 5개가 서로 겹치지 않는 3+2 배치.
+        # 지름 68mm < x간격 70mm, y간격 74mm 이고 최외곽도 내벽 안에 들어온다.
+        prefill_offsets = (
+            (-0.070, -0.037), (0.000, -0.037), (+0.070, -0.037),
+            (-0.035, +0.037), (+0.035, +0.037),
+        )
         tmat = physics.create_physics_material(
             stage, f"{root}/PhysMat/tomato",
             phys_cfg.fruit_static_friction, phys_cfg.fruit_dynamic_friction)
-        tgroup = f"{root}/Tomatoes"
+        tgroup = f"{load}/Tomatoes"          # ★ 팔레트의 자식 → 강체에 흡수
         UsdGeom.Xform.Define(stage, tgroup)
         ripeness.bind_matte_material(
             stage, tgroup, stronger_than_descendants=False)
@@ -531,14 +547,17 @@ class IwHub:
                 add_klt_shell(ix, iy, ox, oy)
                 if (ix, iy) not in filled or not ripe:
                     continue
-                for k in range(5):                         # 토마토 5개 — 흩뿌려 떨어뜨림
+                for k, (dx, dy) in enumerate(prefill_offsets):   # 토마토 5개
                     body, calyx = rng.choice(ripe)
-                    jx = ox + rng.uniform(-0.06, 0.06)     # 격자 아닌 랜덤 산포
-                    jy = oy + rng.uniform(-0.035, 0.035)
-                    tz = tz0 + k * 0.05                     # 높이 엇갈려 떨어뜨려 자연스럽게 쌓임
+                    # 고정 배치에 아주 작은 흔들림만 줘 격자처럼 보이지 않게 한다.
+                    jx = ox + dx + rng.uniform(-0.002, 0.002)
+                    jy = oy + dy + rng.uniform(-0.002, 0.002)
+                    tz = tz_rest
+                    yaw = rng.uniform(-math.pi, math.pi)    # 개체마다 다른 방위
                     tp = f"{tgroup}/T_{ix}{iy}_{k}"
                     tprim = UsdGeom.Xform.Define(stage, tp).GetPrim()
-                    set_pose(tprim, (jx, jy, tz), ident)
+                    set_pose(tprim, (jx, jy, tz), Gf.Quatd(
+                        math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)))
                     set_scale(tprim, tomato_cfg.scale)
                     add_reference_to_stage(body, tp + "/Body")
                     ripeness.apply_ripeness_color(stage, tp + "/Body", "ripe", rng)
@@ -557,11 +576,10 @@ class IwHub:
                             mat_path="/World/Looks/MatteCalyx",
                             fallback_color=ripeness.GREEN,
                         )
-                    # 동적 강체: 몸통에만 콜라이더(꼭지는 장식) → 흩뿌리면 쌓인다
+                    # 몸통에만 콜라이더(꼭지는 장식). 강체는 주지 않는다 —
+                    # Load 강체가 흡수해 실제 토마토처럼 부딪히되 고정된다.
                     physics.add_mesh_colliders(stage, tp + "/Body",
                                                phys_cfg.fruit_approximation)
-                    physics.add_rigid_body(tprim, phys_cfg.fruit_density,
-                                           kinematic=False)
                     physics.bind_physics_material(tprim, tmat)
                     n_tom += 1
 
@@ -651,7 +669,8 @@ class IwHub:
             bound = "⚠ chassis 링크 없음 → 데크 위 비결속 배치"
         log(
             f"[IwHub] 데크 적재: 팔레트(포크슬롯)+KLT 8 + 토마토 "
-            f"{n_tom}개(동적강체). Load {bound}. "
+            f"{n_tom}개(사전적재·Load 강체 흡수, 앞열 {ny}칸은 MM용 공석). "
+            f"Load {bound}. "
             f"pallet_base_z={cargo_z:.5f}, mass=40.0kg, "
             f"friction=(static {load_static_friction:.2f}, "
             f"dynamic {load_dynamic_friction:.2f}). "

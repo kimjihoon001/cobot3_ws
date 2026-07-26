@@ -238,6 +238,41 @@ class WarehouseDockController:
         return self._stage.GetPrimAtPath(IW_WORLD_JOINT).IsValid()
 
     @property
+    def deck_pallet_id(self) -> int | None:
+        """지금 IW 데크에 결속된 팔레트 ID (없으면 None)."""
+        return self._deck_pallet_id
+
+    def pallet_world_min_z(self, pallet_path: str) -> float | None:
+        """팔레트 월드 bbox 최저점. 결속 게이트가 z_error를 재는 바로 그 값이다.
+
+        ROS 측이 안착 높이를 폐루프로 맞추려면 게이트와 **같은 양**을 봐야 한다.
+        강체 원점(pallet_position)은 피벗 위치에 따라 이 값과 달라질 수 있다.
+        """
+        try:
+            return float(
+                _world_bbox_range(self._stage, pallet_path).GetMin()[2]
+            )
+        except Exception:
+            return None
+
+    def deck_pallet_path(self) -> str | None:
+        """데크에 결속된 팔레트의 prim 경로 (없으면 None).
+
+        초기 IW 적재 팔레트와 창고 팔레트는 ID 공간이 겹친다(둘 다 0일 수 있다).
+        `_pallet_path()`는 창고를 먼저 조회하므로, 둘이 동시에 존재하면 ID만으로는
+        창고 쪽이 잡힌다. 일반 통합 실행은 main.py가 창고 0번 슬롯을 비워 이를
+        피하지만(`--iw --fork` 창고 시험은 의도적으로 유지한다), 경로 결정이 그
+        실행 모드 분기에 의존하지 않도록 데크 조인트를 직접 본다 — 이 조인트는
+        팔레트를 내릴 때 IW_PALLET_JOINT와 함께 제거되므로 '초기 IW 팔레트가 아직
+        데크에 있다'와 등가다.
+        """
+        if self._deck_pallet_id is None:
+            return None
+        if self._stage.GetPrimAtPath(INITIAL_IW_DECK_JOINT).IsValid():
+            return INITIAL_IW_PALLET_PATH
+        return self._pallet_path(self._deck_pallet_id)
+
+    @property
     def pallet_on_deck(self) -> bool:
         return (
             self._stage.GetPrimAtPath(IW_PALLET_JOINT).IsValid()

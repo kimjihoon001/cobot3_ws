@@ -78,6 +78,7 @@ class MMDriver(Driver):
         self._tcp_status = {}
         self._verified_fruit_path: str | None = None
         self._verified_fruit_id = -1           # 릴리즈 시 낙하점 측정용
+        self._release_seq = 0                  # 릴리즈 이벤트 일련번호
         self._release_pub = None
         # 레거시 follow_check용 상대 위치 기준값. 과실을 부착하거나 위치 보정하는 데
         # 사용하지 않고, 스쿱 안에서 물리적으로 함께 이동했는지만 측정한다.
@@ -334,7 +335,8 @@ class MMDriver(Driver):
                         print(f"[Scoop] {'CLOSE' if self._gripper_closed else 'OPEN'}")
                         self._apply_scoop()
                         if not self._gripper_closed:
-                            self._log_release_offset()
+                            self._publish_scoop_release(
+                                str(cmd["gripper"].get("reason", "")))
                             self._pending_grasp_check = None
                             self._cut_status = {}
                     if "blade" in cmd:
@@ -456,32 +458,66 @@ class MMDriver(Driver):
                 return fruit, self._fruit_center_world(fruit["path"])
         return None, None
 
-    def _log_release_offset(self) -> None:
-        """스쿱을 여는 순간 과실이 TCP에서 얼마나 벗어나 있는지 남긴다.
+    def _publish_scoop_release(self, reason: str = "") -> None:
+        """바구니에 놓는 스쿱 개방을 발행한다. 위치 진단은 부가 정보다.
 
-        MM은 릴리즈점을 TCP 기준으로 명령하지만 과실은 스쿱 안에서 굴러 이동할
-        수 있다. GRASP 때 0.9mm였던 오프셋이 릴리즈 시점에도 유지되는지가
-        KLT 중앙 낙하의 마지막 미검증 구간이다(KLT 내부 여유 y ±0.040 m).
+        ★릴리즈 '이벤트'와 낙하점 '진단'을 분리한다. 예전에는 과실/TCP 좌표
+        조회에 실패하면 이벤트까지 통째로 건너뛰었고, 그 결과 IW 슬롯 배정기가
+        적재를 한 건도 못 세어 두 번째 플레이스가 같은 KLT로 갔다
+        (2026-07-26 sim_diag_223158: release_debug 12093건 전부 빈 문자열).
+        진단값은 없으면 null로 두고 이벤트는 반드시 내보낸다.
+
+        ★판정 기준은 파지 '검증'이 아니라 ROS가 보낸 개방 이유다. 과실을 제대로
+        집어도 검증이 실패로 뜨는 경우가 많아 검증 결과로 거르면 실제 적재를
+        놓친다. manipulator_target_node는 PLACE_RELEASING 개방에만 reason="place"를
+        붙이므로, 접근 전 개방·실패 시 부분 파지 해제는 자연히 제외된다.
+
+        낙하점 진단: MM은 릴리즈점을 TCP 기준으로 명령하지만 과실은 스쿱 안에서
+        굴러 이동할 수 있다. GRASP 때 0.9mm였던 오프셋이 릴리즈 시점에도
+        유지되는지가 KLT 중앙 낙하의 마지막 미검증 구간이다(내부 여유 y ±0.040 m).
         """
-        if self._verified_fruit_id < 0:
+        if reason != "place":
+            # 파지 전 개방이거나 실패 복구용 개방 — 바구니에 놓는 게 아니다.
+            # 다만 이 개방으로 과실은 실제로 스쿱을 떠났다. 검증 id를 남겨두면
+            # 다음 릴리즈의 낙하점 진단에 엉뚱한 과실이 붙으므로 여기서 버린다.
+            self._verified_fruit_id = -1
             return
+        # 검증된 과실 id는 진단용으로만 쓴다. 없어도(-1) 이벤트는 발행한다.
         fruit_id, self._verified_fruit_id = self._verified_fruit_id, -1
-        _, center = self._ripe_by_id(fruit_id)
-        tcp = self._tcp_world()
-        if center is None or tcp is None:
-            return
-        delta = center - tcp
-        lateral = float(np.linalg.norm(delta[:2]))
-        print(f"[Scoop] release fruit_id={fruit_id} "
-              f"과실-TCP dx={float(delta[0]):+.4f} dy={float(delta[1]):+.4f} "
-              f"dz={float(delta[2]):+.4f} → 횡오프셋={lateral:.4f} m")
+        self._release_seq += 1
+
+        center = tcp = None
+        if fruit_id >= 0:
+            try:
+                _, center = self._ripe_by_id(fruit_id)
+                tcp = self._tcp_world()
+            except Exception as exc:
+                print(f"[Scoop] release 진단 좌표 조회 실패(이벤트는 발행): {exc}")
+
+        payload = {
+            # 구독자는 seq 변화로 새 릴리즈를 판정한다. 진단이 전부 null이면
+            # 페이로드가 같아져 StringPoller가 변화를 놓치기 때문이다.
+            "seq": self._release_seq,
+            "fruit_id": fruit_id if fruit_id >= 0 else None,
+            "fruit_map": None,
+            "tcp_map": None,
+            "lateral": None,
+        }
+        if center is not None and tcp is not None:
+            delta = center - tcp
+            lateral = float(np.linalg.norm(delta[:2]))
+            payload["fruit_map"] = [round(float(v), 4) for v in center]
+            payload["tcp_map"] = [round(float(v), 4) for v in tcp]
+            payload["lateral"] = round(lateral, 4)
+            print(f"[Scoop] release fruit_id={fruit_id} "
+                  f"과실-TCP dx={float(delta[0]):+.4f} dy={float(delta[1]):+.4f} "
+                  f"dz={float(delta[2]):+.4f} → 횡오프셋={lateral:.4f} m")
+        else:
+            print(f"[Scoop] release fruit_id={fruit_id} — 낙하점 진단 없음")
+
         if self._release_pub is not None:
-            self._release_pub.publish(json.dumps({
-                "fruit_id": fruit_id,
-                "fruit_map": [round(float(v), 4) for v in center],
-                "tcp_map": [round(float(v), 4) for v in tcp],
-                "lateral": round(lateral, 4),
-            }, separators=(",", ":")))
+            self._release_pub.publish(
+                json.dumps(payload, separators=(",", ":")))
 
     def _handle_grasp_check(self, request) -> None:
         """스쿱이 닫힌 상태에서 선택한 과실이 수용 범위 안에 있는지만 확인한다."""

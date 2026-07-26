@@ -16,6 +16,12 @@ from iw_dock import WarehouseDockController
 POSE = (1.6955, -12.0, COMMON_FLOOR_Z)
 SPAWN_YAW_DEG = 180.0
 IW_PALLET_PATH = "/World/IwHubCargo/Pallet_00"
+# robots/iwhub.py가 사전 적재에서 비워두는 데크 앞열(IW 코=+x, MM 쪽) 2칸.
+# 나머지 6칸은 이미 토마토가 차 있으므로 MM의 release 목표가 될 수 없다.
+MM_PLACE_SLOTS = ((3, 0), (3, 1))
+# MM이 스쿱을 열어 과실을 놓을 때마다 mm.py가 발행하는 디버그 토픽.
+# 이 이벤트를 세어 다음 플레이스에는 아직 안 쓴 칸을 내준다.
+MM_RELEASE_TOPIC = "/harvester_0/scoop/release_debug"
 
 
 class IwDriver(Driver):
@@ -35,6 +41,9 @@ class IwDriver(Driver):
         self._last_deck_geometry = None
         self._deck_geometry_error_logged = False
         self._last_basket_slot = None
+        self._mm_release_poller = None
+        self._used_basket_slots: set[tuple[int, int]] = set()
+        self._deck_pallet_id: int | None = None
 
     def spawn(self, stage):
         self._iw.spawn(stage, self.root, POSE, yaw_deg=SPAWN_YAW_DEG)
@@ -68,6 +77,11 @@ class IwDriver(Driver):
                 "/iw/basket/empty_slot_pose",
             )
             self._basket_pose_pub = RB.PosePublisher(basket_node)
+            release_node = RB.build_string_sub(
+                "/World/RosMmScoopRelease",
+                MM_RELEASE_TOPIC,
+            )
+            self._mm_release_poller = RB.StringPoller(release_node)
         except Exception:
             ros_fail("iw.hub 조인트 브리지")
 
@@ -101,10 +115,59 @@ class IwDriver(Driver):
                 print(f"[IW Deck Measure] ROS 발행 실패: {exc}")
                 self._deck_geometry_error_logged = True
 
+    def _refresh_deck_pallet(self) -> str | None:
+        """데크에 결속된 팔레트를 확인하고, 바뀌었으면 슬롯 기록을 초기화한다.
+
+        하역 후 지게차가 빈 팔레트를 새로 얹으면 그 팔레트의 KLT는 다시 비어
+        있다. 초기화 기준은 시간이 아니라 WarehouseDockController가 추적하는
+        '데크에 결속된 팔레트 ID' 변화다 — 실제로 새 팔레트가 올라온 시점.
+        """
+        if self._warehouse_dock is None:
+            return IW_PALLET_PATH
+        pallet_id = self._warehouse_dock.deck_pallet_id
+        if pallet_id != self._deck_pallet_id:
+            self._deck_pallet_id = pallet_id
+            if pallet_id is None:
+                print("[IW Basket] 데크 팔레트 내림 — 빈 슬롯 발행 중단")
+            else:
+                self._used_basket_slots.clear()
+                self._last_basket_slot = None
+                print(f"[IW Basket] 데크에 Pallet_{pallet_id:02d} 결속 — "
+                      "슬롯 사용 기록 초기화")
+        if pallet_id is None:
+            return None
+        return self._warehouse_dock.deck_pallet_path()
+
+    def _available_place_slots(self) -> tuple[tuple[int, int], ...]:
+        """MM이 아직 쓰지 않은 앞열 빈 슬롯."""
+        return tuple(
+            slot for slot in MM_PLACE_SLOTS
+            if slot not in self._used_basket_slots
+        )
+
+    def _consume_mm_release_events(self) -> None:
+        """MM이 과실을 놓을 때마다 그때 내주던 칸을 '사용됨'으로 넘긴다."""
+        if self._mm_release_poller is None:
+            return
+        if self._mm_release_poller.poll() is None:
+            return
+        if self._last_basket_slot is None:
+            return
+        if self._last_basket_slot in self._used_basket_slots:
+            return
+        self._used_basket_slots.add(self._last_basket_slot)
+        ix, iy = self._last_basket_slot
+        remaining = len(MM_PLACE_SLOTS) - len(self._used_basket_slots)
+        print(f"[IW Basket] KLT_{ix}{iy} 적재 완료 — 남은 빈 칸 {remaining}개")
+
     def _publish_empty_basket_pose(self) -> None:
-        """빈 KLT 중 데크 앞쪽(IW 코=+x, MM 쪽)에 가장 가까운 슬롯의 release pose를 발행한다."""
+        """아직 안 쓴 앞열 빈 KLT 중 MM에 가장 가까운 슬롯의 release pose를 발행한다."""
         if self._basket_pose_pub is None or self._stage is None:
             return
+        pallet_path = self._refresh_deck_pallet()
+        if pallet_path is None:
+            return
+        self._consume_mm_release_events()
         from pxr import Gf, Usd, UsdGeom
 
         stage = self._stage
@@ -123,26 +186,25 @@ class IwDriver(Driver):
         harvester_position = harvester_world.ExtractTranslation()
 
         candidates = []
-        for ix in range(4):
-            for iy in range(2):
-                prim = stage.GetPrimAtPath(
-                    f"{IW_PALLET_PATH}/KLT_{ix}{iy}")
-                if not prim.IsValid():
-                    continue
-                world = UsdGeom.Xformable(
-                    prim).ComputeLocalToWorldTransform(
-                        Usd.TimeCode.Default())
-                center = world.ExtractTranslation()
-                distance_xy = (
-                    (float(center[0]) - float(harvester_position[0])) ** 2
-                    + (float(center[1]) - float(harvester_position[1])) ** 2
-                )
-                candidates.append((distance_xy, world, ix, iy))
+        for ix, iy in self._available_place_slots():
+            prim = stage.GetPrimAtPath(
+                f"{pallet_path}/KLT_{ix}{iy}")
+            if not prim.IsValid():
+                continue
+            world = UsdGeom.Xformable(
+                prim).ComputeLocalToWorldTransform(
+                    Usd.TimeCode.Default())
+            center = world.ExtractTranslation()
+            distance_xy = (
+                (float(center[0]) - float(harvester_position[0])) ** 2
+                + (float(center[1]) - float(harvester_position[1])) ** 2
+            )
+            candidates.append((distance_xy, world, ix, iy))
         if not candidates:
+            # 앞열 두 칸을 다 채웠다 — 더 내줄 빈 칸이 없으니 발행을 멈춘다.
             return
 
-        # 현재 통합 시나리오는 1개 적재 후 IW가 바로 지게차로 출발한다.
-        # 따라서 매 시퀀스에서 MM에 가장 가까운 KLT 한 칸을 release 목표로 쓴다.
+        # 아직 안 쓴 빈 칸 중 MM에 가장 가까운 칸을 release 목표로 쓴다.
         _, world, ix, iy = min(candidates, key=lambda candidate: candidate[0])
         # 어느 칸을 골랐고 그 칸 원점이 맵 어디인지 한 번만 남긴다. 발행 XY가
         # KLT 중앙인지 확인하려면 이 값과 팔레트 격자(pitch 0.31/0.25)를 대조한다.
@@ -186,6 +248,11 @@ class IwDriver(Driver):
                 attached, pallet_id, forward_offset
             )
         )
+
+    def warehouse_pallet_min_z(self, pallet_path: str) -> float | None:
+        if self._warehouse_dock is None:
+            return None
+        return self._warehouse_dock.pallet_world_min_z(pallet_path)
 
     def warehouse_deck_surface(self, forward_offset: float = 0.0):
         if self._warehouse_dock is None:

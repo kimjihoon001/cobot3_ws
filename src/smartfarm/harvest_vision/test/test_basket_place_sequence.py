@@ -130,7 +130,7 @@ def test_azimuth_align_runs_before_the_arm_extends(node):
     assert node._state == "BASKET_AZIMUTH_ALIGN"
     aligns = node._isaac_command_pub.aligns()
     assert len(aligns) == 1
-    assert aligns[0]["position"][2] == pytest.approx(0.272, abs=1e-6)
+    assert aligns[0]["position"][2] == pytest.approx(0.252, abs=1e-6)
     assert node._isaac_command_pub.targets() == []
 
     _motion_done(node)                      # 정렬 성공 응답
@@ -139,9 +139,10 @@ def test_azimuth_align_runs_before_the_arm_extends(node):
 
 
 def test_release_height_is_lowered_3cm_from_the_previous_setting(node):
-    """슬롯 z=0.288 → 릴리즈 z=0.272. 기존 값에서 3cm 추가 하향.
+    """슬롯 z=0.288 → 릴리즈 z=0.252. 보정 없이 KLT 중심 위에서 놓는다.
 
-    2026-07-26 사용자 지시로 +14mm에서 -16mm로 변경했다.
+    2026-07-26 +14mm → -16mm. 2026-07-27 다시 2cm 하향해 -36mm.
+    스쿱 곡면 때문에 과실이 굴러 나가므로 낙하 높이를 줄여 수평 이동을 줄인다.
     """
     node._place_home_done = True
     node._transition("WAIT_BASKET_AT_BED_VIEW")
@@ -151,18 +152,26 @@ def test_release_height_is_lowered_3cm_from_the_previous_setting(node):
 
     targets = node._isaac_command_pub.targets()
     assert [t["phase"] for t in targets] == ["BASKET_APPROACH"]
-    assert targets[0]["position"][2] == pytest.approx(0.272, abs=1e-6)
-    # IW가 발행한 KLT 중심에서 XY 평면상 MM 원점 방향으로 정확히 80mm 이동한다.
+    assert targets[0]["position"][2] == pytest.approx(0.252, abs=1e-6)
+    # XY는 IW가 발행한 KLT 중심 그대로다 — 보정하지 않는다.
+    # 2026-07-27: 보정 방향(MM base 원점 쪽)은 스쿱 굴림 방향과 무관해서,
+    # 크기를 얼마로 두든 자세마다 다른 성분을 더해 재현성만 나빠진다.
+    # 80mm는 과실을 짧은 변 벽에 얹었고(끝 0.0884 > 외벽 0.0842), 40mm도 불안정했다.
+    shift = node.get_parameter("basket_place_toward_mm_m").value
+    assert shift == pytest.approx(0.0), "기본 보정은 0이어야 한다"
     center_xy = np.array([-1.209, 0.536])
-    expected_xy = center_xy * (1.0 - 0.08 / np.linalg.norm(center_xy))
+    expected_xy = center_xy * (1.0 - shift / np.linalg.norm(center_xy))
     actual_xy = np.asarray(targets[0]["position"][:2])
     assert actual_xy == pytest.approx(expected_xy, abs=1e-6)
-    assert np.linalg.norm(actual_xy - center_xy) == pytest.approx(
-        0.08, abs=1e-6)
-    # 슬롯 pose는 이미 KLT 윗면 +0.0331 m다. TCP를 기존보다 30mm 낮춘다.
+    # 보정을 다시 켜더라도, 과실 반지름을 더해 KLT 짧은 변 내부 반폭을 넘으면
+    # 벽에 얹힌다. 보정이 전부 짧은 축에 실리는 최악을 기준으로 상한을 고정한다.
+    assert shift + 0.034 <= 0.0742
+    # 슬롯 pose는 이미 KLT 윗면 +0.0331 m다. 스쿱 최저점(TCP 아래 57mm)이
+    # KLT 윗면보다 얼마나 아래로 들어가는지 — 내부 깊이 112mm 안이어야 한다.
     klt_top = 0.288 - 0.0331
-    assert targets[0]["position"][2] - 0.057 - klt_top == pytest.approx(
-        -0.040, abs=1e-3)
+    scoop_below_rim = targets[0]["position"][2] - 0.057 - klt_top
+    assert scoop_below_rim == pytest.approx(-0.060, abs=1e-3)
+    assert scoop_below_rim > -0.112, "스쿱이 KLT 바닥을 뚫으면 안 된다"
 
     _motion_done(node)                      # 릴리즈점 도달 → 손목 회전
     assert node._state == "BASKET_WRIST_ROTATE"
@@ -173,7 +182,10 @@ def test_release_height_is_lowered_3cm_from_the_previous_setting(node):
 
     _motion_done(node, "BASKET_WRIST_ROTATE")  # 손목 회전 확인 후 릴리즈
     assert node._state == "PLACE_RELEASING"
-    assert node._isaac_command_pub.messages[-1] == {"gripper": {"closed": False}}
+    # reason="place"는 IW 슬롯 배정기가 실제 적재만 세는 근거다. 빠지면 적재를
+    # 한 건도 못 세어 두 번째 플레이스가 같은 KLT로 간다(2026-07-26 회귀).
+    assert node._isaac_command_pub.messages[-1] == {
+        "gripper": {"closed": False, "reason": "place"}}
     # 슬롯 중심(z=0.288)으로 내려가는 BASKET_PLACE 명령은 존재하지 않는다.
     assert "BASKET_PLACE" not in node._isaac_command_pub.phases()
     assert all(
