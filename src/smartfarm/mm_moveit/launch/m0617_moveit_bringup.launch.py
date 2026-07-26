@@ -168,7 +168,10 @@ def generate_launch_description():
             controller,
             "--controller-manager", "controller_manager",
             "--controller-manager-timeout", "60",
-            "--service-call-timeout", "60",
+            # 통합 기동 부하에서 FastDDS 서비스 응답 하나가 유실될 수 있다.
+            # 60초를 전부 기다리면 MoveIt 시작 이벤트도 그만큼 막히므로 짧게
+            # 실패시키고 spawner 자체 재시도로 복구한다.
+            "--service-call-timeout", "8",
             "--switch-timeout", "60",
         ],
         output="screen",

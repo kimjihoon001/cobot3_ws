@@ -16,13 +16,14 @@ from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (BoundingVolume, Constraints, JointConstraint,
                              OrientationConstraint, PositionConstraint)
-from moveit_msgs.srv import GetPositionIK
+from moveit_msgs.srv import GetPositionFK, GetPositionIK
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 
 HOME_Q = {
@@ -62,12 +63,36 @@ class MMMotionBridge(Node):
         self.declare_parameter(
             "basket_ik_joint_change_weights", [0.3, 3.0, 3.0, 3.0, 4.0, 4.0])
         self.declare_parameter("ik_max_single_joint_change_rad", 2.40)
+        # 바구니 접근은 아래보기 자세만 지정하고 손목 yaw는 자유다. 머지 이전
+        # grasp_proto.py와 같이 base-Z yaw 후보를 돌려 IK가 풀리는 해를 찾는다.
+        self.declare_parameter(
+            "basket_tool_yaw_candidates_deg",
+            [0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0])
+        # seed × yaw 조합 폭주 방지 상한(IK 서비스 호출 수).
+        self.declare_parameter("ik_max_candidate_requests", 48)
+        # ★동시 요청 수 상한. ROS2 기본 서비스 QoS는 KEEP_LAST depth 10이라
+        #   그 이상을 한꺼번에 던지면 요청이 큐에서 버려지고 응답이 영영 안 와
+        #   IK 탐색이 조용히 멈춘다(2026-07-25 sim_diag_160553: 48개 동시 요청
+        #   후 27초간 무응답). 응답이 올 때마다 다음 요청을 채워 넣는다.
+        self.declare_parameter("ik_max_inflight_requests", 6)
+        # 그래도 응답이 유실되면 여기서 끊고 지금까지 모인 해로 진행한다.
+        self.declare_parameter("ik_search_timeout_sec", 6.0)
         self.declare_parameter("joint_state_max_age_sec", 0.5)
         self.declare_parameter("control_failure_retries", 2)
+        self.declare_parameter("move_action_ready_timeout_sec", 10.0)
+        self.declare_parameter("move_action_diagnostic_period_sec", 5.0)
 
         self._move = ActionClient(self, MoveGroup, "move_action")
         self._compute_ik = self.create_client(GetPositionIK, "compute_ik")
+        self._compute_fk = self.create_client(GetPositionFK, "compute_fk")
         self._status_pub = self.create_publisher(String, "pipeline_status", 20)
+        latched = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._ready_pub = self.create_publisher(
+            Bool, "moveit_ready", latched)
         self.create_subscription(String, "status", self._forward_isaac_status, 20)
         self.create_subscription(String, "cmd", self._command, 20)
         self._goal_handle = None
@@ -84,11 +109,19 @@ class MMMotionBridge(Node):
         self._ik_generation = 0
         self._ik_active_key: tuple[int, str] | None = None
         self._ik_pending = 0
+        self._ik_queue: list[tuple[list[float], tuple]] = []
+        self._ik_target: PoseStamped | None = None
+        self._ik_joint_names: list[str] = []
+        self._ik_deadline_ns = 0
         self._ik_candidates: list[dict[str, float]] = []
         self._ik_context: tuple[int, str, MoveGroup.Goal] | None = None
+        self._move_ready = False
+        self._move_wait_started_ns = self.get_clock().now().nanoseconds
+        self._last_move_diagnostic_ns = 0
         self.create_subscription(
             JointState, "joint_states", self._joint_state, 20)
         self.create_timer(0.1, self._dispatch)
+        self._ready_pub.publish(Bool(data=False))
         self.get_logger().info(
             "MM motion bridge 시작: cmd → move_action, "
             "status + MoveIt → pipeline_status")
@@ -162,7 +195,60 @@ class MMMotionBridge(Node):
         home = command.get("rmp_home")
         if isinstance(home, dict):
             request_id = int(home.get("id", 0))
-            self._queue(request_id, "GO_HOME", self._joint_goal(HOME_Q))
+            fast = bool(home.get("fast", False))
+            self._queue(
+                request_id,
+                "GO_HOME",
+                self._joint_goal(
+                    HOME_Q,
+                    velocity_scale=0.70 if fast else None,
+                    acceleration_scale=0.50 if fast else None,
+                ),
+            )
+            return
+        fold = command.get("fold_keep_j1")
+        if isinstance(fold, dict):
+            # 수확 방위(joint_1)를 유지한 채 joint_2~6만 접는다. HOME_Q로 통째
+            # 이동하면 joint_1이 180°로 돌아가 바구니 방위에서 오히려 멀어진다
+            # (2026-07-25 sim_diag_161712: 필요 168° > 제한 137.5°로 IK 48개 전부
+            # 탈락). moveit_bed_view의 고정 joint_1도 쓰지 않는다.
+            request_id = int(fold.get("id", 0))
+            phase = str(fold.get("phase", "PRE_PLACE_BED_VIEW"))
+            fast = bool(fold.get("fast", False))
+            if phase not in {"PRE_PLACE_BED_VIEW", "POST_PLACE_BED_VIEW"}:
+                self.get_logger().warning(
+                    f"fold_keep_j1: 허용되지 않은 phase={phase!r}")
+                return
+            if not self._joint_state_ready():
+                # HOME_Q로 대체하면 joint_1이 180°로 돌아가 바구니 방위에서
+                # 168° 멀어지고 플레이스 IK가 전부 탈락한다. 대체하지 말고
+                # 실패를 보고해 수확물을 잡은 채 정지시킨다.
+                self.get_logger().error(
+                    "fold_keep_j1: 최신 joint_states 없음 — "
+                    "HOME_Q 대체 금지, 실패 보고")
+                self._active_id = request_id
+                self._active_phase = phase
+                self._publish_motion(False, phase)
+                return
+            positions = dict(HOME_Q)
+            positions["joint_1"] = float(self._joint_positions["joint_1"])
+            self.get_logger().info(
+                "접힘(방위 유지): joint_1="
+                f"{math.degrees(positions['joint_1']):.1f}° 유지, "
+                "joint_2~6만 홈 값으로")
+            # 검증된 GO_HOME과 같은 Pilz PTP. OMPL은 관절 목표에서도 경로를
+            # 자유롭게 잡아 접히는 도중 팔이 다른 방향으로 뻗을 수 있다.
+            self._queue(
+                request_id, phase,
+                self._joint_goal(
+                    positions,
+                    velocity_scale=0.70 if fast else None,
+                    acceleration_scale=0.50 if fast else None,
+                ))
+            return
+        align = command.get("azimuth_align")
+        if isinstance(align, dict):
+            self._start_azimuth_align(align)
             return
         bed_view = command.get("moveit_bed_view")
         if isinstance(bed_view, dict):
@@ -191,6 +277,93 @@ class MMMotionBridge(Node):
             self._queued = None
             if self._goal_handle is not None:
                 self._goal_handle.cancel_goal_async()
+
+    def _start_azimuth_align(self, align: dict) -> None:
+        """접힌 자세를 유지한 채 joint_1만 돌려 목표 XY 방위로 정렬한다.
+
+        joint_1 축은 base 원점의 Z축이므로, joint_1을 Δ만큼 돌리면 TCP의 방위각도
+        정확히 Δ만큼 돈다. 현재 TCP 방위는 FK로 실측해 고정 오프셋 가정을 없앤다.
+        """
+        try:
+            request_id = int(align.get("id", 0))
+            position = [float(value) for value in align["position"]]
+            if len(position) < 2 or not all(
+                    math.isfinite(value) for value in position):
+                raise ValueError("position")
+        except (KeyError, TypeError, ValueError):
+            self.get_logger().warning("잘못된 azimuth_align 형식")
+            return
+        if not self._joint_state_ready():
+            self.get_logger().warning(
+                "azimuth_align: 최신 joint_states 없음")
+            self._active_id = request_id
+            self._active_phase = "BASKET_AZIMUTH_ALIGN"
+            self._publish_motion(False, "BASKET_AZIMUTH_ALIGN")
+            return
+        if not self._compute_fk.service_is_ready():
+            self.get_logger().warning(
+                "azimuth_align: MoveIt compute_fk 서비스 없음")
+            self._active_id = request_id
+            self._active_phase = "BASKET_AZIMUTH_ALIGN"
+            self._publish_motion(False, "BASKET_AZIMUTH_ALIGN")
+            return
+        joint_names = [f"joint_{index}" for index in range(1, 7)]
+        request = GetPositionFK.Request()
+        request.header.frame_id = str(
+            self.get_parameter("planning_frame").value)
+        request.fk_link_names = ["harvest_tcp"]
+        request.robot_state.joint_state.name = joint_names
+        request.robot_state.joint_state.position = [
+            float(self._joint_positions[name]) for name in joint_names]
+        target_azimuth = math.atan2(position[1], position[0])
+        future = self._compute_fk.call_async(request)
+        future.add_done_callback(
+            lambda done, rid=request_id, azimuth=target_azimuth:
+            self._azimuth_align_response(done, rid, azimuth))
+
+    def _azimuth_align_response(
+        self, future, request_id: int, target_azimuth: float
+    ) -> None:
+        self._active_id = request_id
+        self._active_phase = "BASKET_AZIMUTH_ALIGN"
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"compute_fk 호출 실패: {exc}")
+            self._publish_motion(False, "BASKET_AZIMUTH_ALIGN")
+            return
+        if (response is None or int(response.error_code.val) != 1
+                or not response.pose_stamped):
+            self.get_logger().error("compute_fk 실패 — 방위 정렬 취소")
+            self._publish_motion(False, "BASKET_AZIMUTH_ALIGN")
+            return
+        tcp = response.pose_stamped[0].pose.position
+        if math.hypot(tcp.x, tcp.y) < 0.02:
+            self.get_logger().error(
+                "TCP가 joint_1 축 위에 있어 현재 방위를 정의할 수 없음")
+            self._publish_motion(False, "BASKET_AZIMUTH_ALIGN")
+            return
+        current_azimuth = math.atan2(tcp.y, tcp.x)
+        delta = math.atan2(math.sin(target_azimuth - current_azimuth),
+                           math.cos(target_azimuth - current_azimuth))
+        positions = {
+            name: float(self._joint_positions[name])
+            for name in (f"joint_{index}" for index in range(1, 7))
+        }
+        positions["joint_1"] = self._nearest_joint_equivalent(
+            "joint_1", positions["joint_1"] + delta)
+        self.get_logger().info(
+            "바구니 방위 정렬: TCP "
+            f"{math.degrees(current_azimuth):.1f}° → "
+            f"{math.degrees(target_azimuth):.1f}° "
+            f"(joint_1 {delta:+.3f} rad = {math.degrees(delta):+.1f}°, "
+            "다른 관절 고정)")
+        # Pilz PTP는 각 관절을 시작값→목표값으로 동기 보간한다. joint_1만
+        # 다르므로 나머지 관절은 접힌 값 그대로 고정되고, 회전 내내 반경이
+        # 유지되는 것이 보장된다. OMPL이면 이 보장이 없다.
+        self._queue(
+            request_id, "BASKET_AZIMUTH_ALIGN",
+            self._joint_goal(positions))
 
     def _base_goal(self) -> MoveGroup.Goal:
         goal = MoveGroup.Goal()
@@ -249,36 +422,84 @@ class MMMotionBridge(Node):
             quaternion = self._approach_quaternion(approach_direction)
         else:
             quaternion = (0.0, 0.0, 0.0, 1.0)
-        (target.pose.orientation.x,
-         target.pose.orientation.y,
-         target.pose.orientation.z,
-         target.pose.orientation.w) = quaternion
+        # 바구니는 아래보기 자세만 정해지면 손목 yaw는 자유롭다. yaw 하나로
+        # 고정하면 위치가 가동범위 안이어도 IK가 안 풀린다(grasp_proto.py 주석).
+        if phase == "BASKET_APPROACH":
+            yaws = [math.radians(float(value)) for value in
+                    self.get_parameter(
+                        "basket_tool_yaw_candidates_deg").value]
+        else:
+            yaws = [0.0]
+        orientations = [self._yaw_rotated(quaternion, yaw) for yaw in yaws]
+        limit = max(1, int(
+            self.get_parameter("ik_max_candidate_requests").value))
+        requests = [(seed, orientation)
+                    for orientation in orientations
+                    for seed in seeds][:limit]
 
         self._ik_generation += 1
         generation = self._ik_generation
         self._ik_active_key = key
         self._ik_context = (request_id, phase, fallback_goal)
         self._ik_candidates = []
-        self._ik_pending = len(seeds)
-        for seed in seeds:
+        self._ik_target = target
+        self._ik_joint_names = joint_names
+        self._ik_queue = list(requests)
+        self._ik_pending = 0
+        self._ik_deadline_ns = self.get_clock().now().nanoseconds + int(
+            max(0.5, float(
+                self.get_parameter("ik_search_timeout_sec").value)) * 1e9)
+        self.get_logger().info(
+            f"{phase} IK 후보 탐색: {len(seeds)}개 seed × "
+            f"{len(orientations)}개 손목 yaw = {len(requests)}회 조회 "
+            f"(동시 {self.get_parameter('ik_max_inflight_requests').value}개)")
+        self._pump_ik_queue(generation)
+
+    def _pump_ik_queue(self, generation: int) -> None:
+        """in-flight 상한을 지키며 남은 IK 요청을 채워 넣는다."""
+        if generation != self._ik_generation or self._ik_target is None:
+            return
+        limit = max(1, int(
+            self.get_parameter("ik_max_inflight_requests").value))
+        while self._ik_queue and self._ik_pending < limit:
+            seed, orientation = self._ik_queue.pop(0)
+            pose = PoseStamped()
+            pose.header = self._ik_target.header
+            pose.pose.position = self._ik_target.pose.position
+            (pose.pose.orientation.x,
+             pose.pose.orientation.y,
+             pose.pose.orientation.z,
+             pose.pose.orientation.w) = orientation
             request = GetPositionIK.Request()
             request.ik_request.group_name = str(
                 self.get_parameter("group_name").value)
             request.ik_request.ik_link_name = "harvest_tcp"
-            request.ik_request.pose_stamped = target
-            request.ik_request.robot_state.joint_state.name = joint_names
+            request.ik_request.pose_stamped = pose
+            request.ik_request.robot_state.joint_state.name = (
+                self._ik_joint_names)
             request.ik_request.robot_state.joint_state.position = seed
             request.ik_request.avoid_collisions = True
             request.ik_request.timeout = Duration(
                 seconds=float(self.get_parameter(
                     "ik_candidate_timeout_sec").value)).to_msg()
+            self._ik_pending += 1
             future = self._compute_ik.call_async(request)
             future.add_done_callback(
                 lambda done, token=generation:
                 self._ranked_ik_response(done, token))
-        self.get_logger().info(
-            f"APPROACH IK 후보 탐색: {len(seeds)}개 seed, "
-            "현재 자세 최소변화 해 선택")
+
+    @staticmethod
+    def _yaw_rotated(quaternion, yaw: float):
+        """base Z축 yaw 회전을 툴 자세에 선곱한다. (x,y,z,w) 규약."""
+        if abs(yaw) < 1e-9:
+            return tuple(float(value) for value in quaternion)
+        x, y, z, w = (float(value) for value in quaternion)
+        c, s = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+        # q_yaw = (0, 0, s, c) 를 왼쪽에서 곱한다.
+        return (c * x - s * y,
+                c * y + s * x,
+                c * z + s * w,
+                c * w - s * z)
 
     @staticmethod
     def _ik_seeds(current: list[float]) -> list[list[float]]:
@@ -338,7 +559,8 @@ class MMMotionBridge(Node):
                 }
                 self._ik_candidates.append(normalized)
         self._ik_pending -= 1
-        if self._ik_pending <= 0:
+        self._pump_ik_queue(generation)
+        if self._ik_pending <= 0 and not self._ik_queue:
             self._finish_ranked_ik(generation)
 
     def _finish_ranked_ik(self, generation: int) -> None:
@@ -347,6 +569,10 @@ class MMMotionBridge(Node):
         request_id, phase, fallback_goal = self._ik_context
         self._ik_active_key = None
         self._ik_context = None
+        self._ik_queue = []
+        self._ik_pending = 0
+        self._ik_deadline_ns = 0
+        self._ik_target = None
         if not self._ik_candidates:
             self.get_logger().warning(
                 "APPROACH 사전 IK 후보 없음 — 기존 Pose 계획으로 시도")
@@ -371,18 +597,42 @@ class MMMotionBridge(Node):
                 float(weight) * delta * delta
                 for weight, delta in zip(weights, changes(solution)))
 
-        selected = min(self._ik_candidates, key=cost)
-        deltas = changes(selected)
         max_change = float(
             self.get_parameter("ik_max_single_joint_change_rad").value)
-        if max(deltas) > max_change:
+        # 단일 관절 제한을 넘는 해는 경고 후 강행하지 않고 후보에서 제외한다.
+        # 그런 해는 팔이 크게 휘둘려 베드·IW를 지나가는 경로가 된다.
+        within_limit = [candidate for candidate in self._ik_candidates
+                        if max(changes(candidate)) <= max_change]
+        rejected = len(self._ik_candidates) - len(within_limit)
+        if rejected:
+            worst = min(self._ik_candidates,
+                        key=lambda candidate: max(changes(candidate)))
+            deltas = changes(worst)
+            index = deltas.index(max(deltas))
             self.get_logger().warning(
-                "APPROACH 최소변화 IK도 단일 관절 제한 초과: "
-                f"max={math.degrees(max(deltas)):.1f}° > "
-                f"{math.degrees(max_change):.1f}° — 유일한 최소비용 해로 실행")
+                f"{phase} IK 후보 {rejected}개 제외: 단일 관절 변화 "
+                f"{math.degrees(max_change):.1f}° 초과 — 가장 나은 해도 "
+                f"joint_{index + 1} {math.degrees(max(deltas)):.1f}° "
+                "(Δq=[" + ", ".join(
+                    f"{math.degrees(delta):.0f}°" for delta in deltas) + "])")
+        if not within_limit:
+            self.get_logger().error(
+                f"{phase} 관절변화 제한을 만족하는 IK 해 없음 — 동작 취소")
+            self._active_id = request_id
+            self._active_phase = phase
+            self._publish_motion(False, phase)
+            return
+        selected = min(within_limit, key=cost)
+        deltas = changes(selected)
+        if max(deltas) > 0.8 * max_change:
+            self.get_logger().warning(
+                f"{phase} 선택 IK가 관절변화 제한에 근접: "
+                f"joint_{deltas.index(max(deltas)) + 1} "
+                f"{math.degrees(max(deltas)):.1f}° / "
+                f"{math.degrees(max_change):.1f}°")
         self.get_logger().info(
-            "APPROACH IK 선택: "
-            f"{len(self._ik_candidates)}개 유효 후보, "
+            f"{phase} IK 선택: "
+            f"{len(within_limit)}개 유효 후보, "
             f"cost={cost(selected):.3f}, "
             "Δq=[" + ", ".join(
                 f"{math.degrees(delta):.1f}°" for delta in deltas) + "]")
@@ -551,9 +801,18 @@ class MMMotionBridge(Node):
                 0.25 * s, (m10 - m01) / s)
 
     def _joint_goal(
-        self, positions: dict[str, float], motion: str = "PTP"
+        self,
+        positions: dict[str, float],
+        motion: str = "PTP",
+        velocity_scale: float | None = None,
+        acceleration_scale: float | None = None,
     ) -> MoveGroup.Goal:
         goal = self._base_goal()
+        if velocity_scale is not None:
+            goal.request.max_velocity_scaling_factor = float(velocity_scale)
+        if acceleration_scale is not None:
+            goal.request.max_acceleration_scaling_factor = float(
+                acceleration_scale)
         if motion == "OMPL":
             goal.request.pipeline_id = "ompl"
             goal.request.planner_id = "RRTConnectkConfigDefault"
@@ -640,10 +899,56 @@ class MMMotionBridge(Node):
             self._goal_handle.cancel_goal_async()
 
     def _dispatch(self) -> None:
+        now = self.get_clock().now().nanoseconds
+        # IK 응답이 유실되면 조용히 멈추지 않고 여기서 끊는다.
+        if (self._ik_context is not None
+                and self._ik_deadline_ns
+                and now > self._ik_deadline_ns):
+            self.get_logger().warning(
+                f"IK 후보 탐색 시간 초과 — 응답 {len(self._ik_candidates)}개, "
+                f"미응답 {self._ik_pending}개, 대기열 {len(self._ik_queue)}개로 진행")
+            self._ik_queue = []
+            self._ik_pending = 0
+            self._finish_ranked_ik(self._ik_generation)
+        action_ready = self._move.server_is_ready()
+        if action_ready != self._move_ready:
+            self._move_ready = action_ready
+            self._ready_pub.publish(Bool(data=action_ready))
+            if action_ready:
+                self._move_wait_started_ns = 0
+                self._last_move_diagnostic_ns = 0
+                self.get_logger().info(
+                    "MoveIt move_action 서버 연결 완료 — 명령 실행 가능")
+            else:
+                self._move_wait_started_ns = now
+                self.get_logger().error(
+                    "MoveIt move_action 서버 연결 유실 — 자동 재발견 대기")
+        if not action_ready:
+            if self._move_wait_started_ns <= 0:
+                self._move_wait_started_ns = now
+            timeout_ns = int(max(
+                0.1, float(self.get_parameter(
+                    "move_action_ready_timeout_sec").value)) * 1e9)
+            period_ns = int(max(
+                0.5, float(self.get_parameter(
+                    "move_action_diagnostic_period_sec").value)) * 1e9)
+            if (now - self._move_wait_started_ns >= timeout_ns
+                    and (not self._last_move_diagnostic_ns
+                         or now - self._last_move_diagnostic_ns >= period_ns)):
+                self._last_move_diagnostic_ns = now
+                self.get_logger().error(
+                    "MoveIt move_action 서버를 발견하지 못함; "
+                    "DDS discovery와 /harvester_0/move_action을 확인하며 재시도 중")
+                if self._queued is not None:
+                    request_id, _, _ = self._queued
+                    self._status_pub.publish(String(data=json.dumps({
+                        "id": request_id,
+                        "phase": "ERROR_MOVEIT_UNAVAILABLE",
+                        "reached": False,
+                    }, separators=(",", ":"))))
+            return
         if (self._queued is None or self._goal_handle is not None
                 or self._send_pending):
-            return
-        if not self._move.server_is_ready():
             return
         if not self._joint_state_ready():
             self.get_logger().warning(

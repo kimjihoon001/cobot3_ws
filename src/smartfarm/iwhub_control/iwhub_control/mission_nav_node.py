@@ -52,7 +52,11 @@ class MissionNavNode(Node):
         self.declare_parameter("iw_tf_topic", "/iwhub_0/tf")
         # 도킹 standoff: MM 중심에서 IW 접근 방향으로 이 거리에 비접촉 정차점을 둔다.
         # 하한(비접촉) ≈ MM반경 + IW앞0.40 + 여유0.10, 상한 ≈ 팔 도달반경(~1.35).
-        self.declare_parameter("dock_standoff", 1.2)
+        # 플레이스 때 1번 링크가 지면과 수평에 가깝게 완전 신전되어, 그리퍼
+        # 이송 중 링크가 파지 과실을 건드리는 현상을 줄인다. 최종 X가 레인 중심으로
+        # 스냅되는 오차를 포함해 실제 중심 간격을 약 1.23m→1.08m로 줄이는 값이다
+        # (2026-07-25 sim_diag_160553 기준).
+        self.declare_parameter("dock_standoff", 1.03)
         self.declare_parameter("follow_update_distance", 0.30)
         self.declare_parameter("follow_update_yaw", math.radians(30.0))
         self.declare_parameter("dock_x", 0.0)
@@ -97,8 +101,13 @@ class MissionNavNode(Node):
         # iw→MM 복귀 완료 신호 — MM(수확 FSM)이 이걸 받아 다음 수확을 재개한다.
         self._resume_pub = self.create_publisher(
             Bool, "/iw/resume_harvest", latched)
+        self._yield_request_pub = self.create_publisher(
+            Bool, "/iw/mm_yield_request", latched)
         self.create_subscription(
             Bool, "/forklift/clear", self._on_forklift_clear, 10)
+        self.create_subscription(
+            Bool, "/iw/mm_yield_complete",
+            self._on_mm_yield_complete, latched)
         self.create_subscription(
             Int32, "/forklift/pallet_on_iw", self._on_pallet_on_iw, 10)
         self.create_subscription(
@@ -227,7 +236,7 @@ class MissionNavNode(Node):
 
     def _on_mission(self, msg: String) -> None:
         mission = msg.data.strip().upper()
-        if mission not in {"IDLE", "FOLLOW", "FORKLIFT"}:
+        if mission not in {"IDLE", "FOLLOW", "PREPARE_FORKLIFT", "FORKLIFT"}:
             self.get_logger().warning(f"알 수 없는 IW 미션 무시: {mission}")
             return
         if mission == self._mission:
@@ -239,10 +248,29 @@ class MissionNavNode(Node):
         self._mission = mission
         self._last_target = None
         self._dock_goal_sent = False
-        if mission == "FORKLIFT":
+        if mission == "PREPARE_FORKLIFT":
+            # MM이 HOME 상태로 안전 피항을 끝내기 전에는 중앙 하역 레인으로
+            # 출발하지 않는다. transient-local 요청이라 분산 노드가 늦게 붙어도 받는다.
+            self._yield_request_pub.publish(Bool(data=True))
+            self._status_pub.publish(String(data="WAITING_MM_YIELD"))
+        elif mission == "FORKLIFT":
             self._dock_phase = "APPROACH"
             self._dock_adjust_attempts = 0
         self.get_logger().info(f"IW 미션 전환: {mission}")
+
+    def _on_mm_yield_complete(self, msg: Bool) -> None:
+        """MM 피항 완료 확인 뒤에만 IW 하역 주행을 시작한다."""
+        if not msg.data or self._mission != "PREPARE_FORKLIFT":
+            return
+        self._yield_request_pub.publish(Bool(data=False))
+        self._mission = "FORKLIFT"
+        self._last_target = None
+        self._dock_goal_sent = False
+        self._dock_phase = "APPROACH"
+        self._dock_adjust_attempts = 0
+        self._status_pub.publish(String(data="MM_CLEAR_TO_FORKLIFT"))
+        self.get_logger().info(
+            "MM 피항 완료 확인 → IW 지게차 하역 경로 출발")
 
     def _on_iw_odom(self, msg: Odometry) -> None:
         self._iw_odom_pose = (
@@ -334,6 +362,8 @@ class MissionNavNode(Node):
             return
         if self._mission == "IDLE":
             return
+        if self._mission == "PREPARE_FORKLIFT":
+            return  # MM 피항 완료 신호 전에는 기존 FOLLOW goal도 새 하역 goal도 금지
         if not self._through_client.server_is_ready():
             self._recover_nav2()
             self.get_logger().warning(
@@ -707,7 +737,10 @@ class MissionNavNode(Node):
         try:
             route = lanes.follow_route(
                 iw_x, iw_y, iw_yaw, target[0], target[1],
-                snap_target_x=False,
+                # 정확한 standoff 점이 세로 레인에서 수십 cm 벗어나면 마지막에
+                # 차체가 통과할 수 없는 작은 90도 코너가 생겨 제자리 회전한다.
+                # 레인 중심 정차를 우선하고 standoff의 수 cm 오차를 허용한다.
+                snap_target_x=True,
             )
         except ValueError as exc:
             self.get_logger().error(

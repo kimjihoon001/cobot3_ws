@@ -105,18 +105,20 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
-                "PathAlign", "PathDist", "GoalDist"]
+      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint",
+                "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       # 기존 0.05는 경로 관련 critic(18~32)에 비해 장애물 비용을 사실상
       # 무시해 고속 주행 시 회피가 너무 늦었다. 최고속도는 유지하되 장애물
       # 근접 궤적이 일찍 탈락하도록 기본값보다 약간 강하게 평가한다.
-      BaseObstacle.scale: 2.0
-      PathAlign.scale: 24.0
+      # 중심점 비용만 보는 BaseObstacle 대신 전체 1.73×0.802m footprint를
+      # 매 trajectory pose에서 검사한다. 레인 고정보다 동적 장애물 회피를 우선한다.
+      ObstacleFootprint.scale: 32.0
+      PathAlign.scale: 12.0
       PathAlign.forward_point_distance: 0.35
-      GoalAlign.scale: 18.0
+      GoalAlign.scale: 10.0
       GoalAlign.forward_point_distance: 0.35
-      PathDist.scale: 32.0
-      GoalDist.scale: 24.0
+      PathDist.scale: 16.0
+      GoalDist.scale: 14.0
       RotateToGoal.scale: 20.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0

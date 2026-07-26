@@ -410,8 +410,25 @@ class IwHub:
         klt_outer_x = KLT_SIZE[0] * klt_scale
         klt_outer_y = KLT_SIZE[1] * klt_scale
         klt_height = KLT_SIZE[2] * klt_scale
-        klt_wall_t = 0.010
-        klt_floor_t = 0.012
+        # 시각 KLT의 안쪽 벽면은 10mm 기준이다. 충돌 벽은 내부 공간을
+        # 좁히지 않고 바깥쪽으로만 30mm까지 두껍게 해 측면 tunneling을 막는다.
+        klt_wall_visual_t = 0.010
+        klt_wall_t = 0.030
+        # 얇은 12mm 바닥은 물리 step 사이에 과실이 통과(tunneling)할 수 있다.
+        # 내부 바닥 윗면 높이는 유지하고 충돌체만 아래쪽으로 30mm 두껍게 둔다.
+        klt_floor_visual_t = 0.012
+        klt_floor_t = 0.030
+        klt_contact_offset = 0.002
+        klt_collider_paths: list[str] = []
+        # 팔레트의 높은 마찰은 지게차 인수에 필요하지만 KLT 안쪽 벽까지 같은
+        # μ=0.5를 쓰면 낙하 과실이 림/벽에 걸쳐 멈춘다. KLT shell만 저마찰로
+        # 분리해 벽에 닿은 과실이 바닥으로 미끄러져 내려가게 한다.
+        klt_inner_material = physics.create_physics_material(
+            stage,
+            f"{root}/PhysMat/klt_inner",
+            static_friction=0.12,
+            dynamic_friction=0.08,
+        )
         klt_edge_margin_x = (
             PALLET_SIZE[0] / 2.0
             - ((nx - 1) / 2.0 * pitx + klt_outer_x / 2.0)
@@ -437,38 +454,52 @@ class IwHub:
             # pjt_utils.set_scale()은 균일 스케일 전용이다. 충돌 박스는
             # 각 축 길이가 다르므로 새 Cube의 scale op를 직접 지정한다.
             UsdGeom.Xformable(prim).AddScaleOp().Set(Gf.Vec3f(*size))
-            UsdPhysics.CollisionAPI.Apply(prim)
+            collision = UsdPhysics.CollisionAPI.Apply(prim)
+            collision.CreateCollisionEnabledAttr(True).Set(True)
+            # CollisionAPI만 암묵적으로 해석시키지 않고 PhysX 접촉 속성까지
+            # 명시한다. IW 팔레트가 복합 강체로 결속된 뒤에도 KLT 바닥/벽의
+            # 접촉 형상이 활성 상태임을 보장한다.
+            physx_collision = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+            physx_collision.CreateContactOffsetAttr(
+                klt_contact_offset).Set(klt_contact_offset)
+            physx_collision.CreateRestOffsetAttr(0.0).Set(0.0)
+            physics.bind_physics_material(prim, klt_inner_material)
             # 렌더링에서는 숨기되 물리 충돌은 계속 활성 상태로 유지한다.
             UsdGeom.Imageable(prim).MakeInvisible()
+            klt_collider_paths.append(path)
 
         def add_klt_shell(ix: int, iy: int, ox: float, oy: float) -> None:
             shell = f"{load}/KLT_Colliders_{ix}{iy}"
             UsdGeom.Xform.Define(stage, shell)
             bottom_z = kz - klt_height / 2.0
+            floor_top_z = bottom_z + klt_floor_visual_t
+            inner_half_x = klt_outer_x / 2.0 - klt_wall_visual_t
+            inner_half_y = klt_outer_y / 2.0 - klt_wall_visual_t
             add_klt_box_collider(
                 f"{shell}/Floor",
-                (ox, oy, bottom_z + klt_floor_t / 2.0),
+                (ox, oy, floor_top_z - klt_floor_t / 2.0),
                 (klt_outer_x, klt_outer_y, klt_floor_t),
             )
             add_klt_box_collider(
                 f"{shell}/Wall_X_Neg",
-                (ox - (klt_outer_x - klt_wall_t) / 2.0, oy, kz),
+                (ox - inner_half_x - klt_wall_t / 2.0, oy, kz),
                 (klt_wall_t, klt_outer_y, klt_height),
             )
             add_klt_box_collider(
                 f"{shell}/Wall_X_Pos",
-                (ox + (klt_outer_x - klt_wall_t) / 2.0, oy, kz),
+                (ox + inner_half_x + klt_wall_t / 2.0, oy, kz),
                 (klt_wall_t, klt_outer_y, klt_height),
             )
-            inner_x = max(0.001, klt_outer_x - 2.0 * klt_wall_t)
+            # Y벽은 X벽의 안쪽 면 사이만 채워 서로 겹치거나 내부를 막지 않는다.
+            inner_x = max(0.001, 2.0 * inner_half_x)
             add_klt_box_collider(
                 f"{shell}/Wall_Y_Neg",
-                (ox, oy - (klt_outer_y - klt_wall_t) / 2.0, kz),
+                (ox, oy - inner_half_y - klt_wall_t / 2.0, kz),
                 (inner_x, klt_wall_t, klt_height),
             )
             add_klt_box_collider(
                 f"{shell}/Wall_Y_Pos",
-                (ox, oy + (klt_outer_y - klt_wall_t) / 2.0, kz),
+                (ox, oy + inner_half_y + klt_wall_t / 2.0, kz),
                 (inner_x, klt_wall_t, klt_height),
             )
 
@@ -482,7 +513,8 @@ class IwHub:
             phys_cfg.fruit_static_friction, phys_cfg.fruit_dynamic_friction)
         tgroup = f"{root}/Tomatoes"
         UsdGeom.Xform.Define(stage, tgroup)
-        ripeness.bind_matte_material(stage, tgroup)        # 무광 — displayColor(익은색) 읽게
+        ripeness.bind_matte_material(
+            stage, tgroup, stronger_than_descendants=False)
         n_tom = 0
         for ix in range(nx):
             for iy in range(ny):
@@ -510,9 +542,21 @@ class IwHub:
                     set_scale(tprim, tomato_cfg.scale)
                     add_reference_to_stage(body, tp + "/Body")
                     ripeness.apply_ripeness_color(stage, tp + "/Body", "ripe", rng)
+                    ripeness.bind_matte_material(
+                        stage,
+                        tp + "/Body",
+                        mat_path="/World/Looks/MatteFruitRipe",
+                        fallback_color=ripeness.RED,
+                    )
                     if calyx:                              # 꼭지(장식 — 콜라이더 없음)
                         add_reference_to_stage(calyx, tp + "/Calyx")
                         ripeness.apply_flat_color(stage, tp + "/Calyx", ripeness.GREEN)
+                        ripeness.bind_matte_material(
+                            stage,
+                            tp + "/Calyx",
+                            mat_path="/World/Looks/MatteCalyx",
+                            fallback_color=ripeness.GREEN,
+                        )
                     # 동적 강체: 몸통에만 콜라이더(꼭지는 장식) → 흩뿌리면 쌓인다
                     physics.add_mesh_colliders(stage, tp + "/Body",
                                                phys_cfg.fruit_approximation)
@@ -520,6 +564,30 @@ class IwHub:
                                            kinematic=False)
                     physics.bind_physics_material(tprim, tmat)
                     n_tom += 1
+
+        # 8개 KLT × (바닥 1 + 벽 4). 하나라도 빠지면 토마토가 팔레트 아래로
+        # 떨어질 수 있으므로 조용히 진행하지 않는다.
+        expected_klt_colliders = nx * ny * 5
+        active_klt_colliders = sum(
+            1
+            for path in klt_collider_paths
+            if (
+                stage.GetPrimAtPath(path).IsValid()
+                and stage.GetPrimAtPath(path).HasAPI(
+                    UsdPhysics.CollisionAPI)
+                and bool(
+                    UsdPhysics.CollisionAPI(
+                        stage.GetPrimAtPath(path)
+                    ).GetCollisionEnabledAttr().Get()
+                )
+            )
+        )
+        if active_klt_colliders != expected_klt_colliders:
+            raise RuntimeError(
+                "IW KLT collider 생성 실패: "
+                f"active={active_klt_colliders}, "
+                f"expected={expected_klt_colliders}"
+            )
 
         # ── Load 를 독립 강체로 확정 + 안전한 데크 소유 표식 생성 ──
         # Explicit mass가 PhysX의 복합 참조 collider에서 무시되는 경우에도
@@ -588,7 +656,12 @@ class IwHub:
             f"friction=(static {load_static_friction:.2f}, "
             f"dynamic {load_dynamic_friction:.2f}). "
             f"KLT local z={kz:.5f}m, edge_margin="
-            f"({klt_edge_margin_x:.5f}, {klt_edge_margin_y:.5f})m"
+            f"({klt_edge_margin_x:.5f}, {klt_edge_margin_y:.5f})m, "
+            f"KLT colliders={active_klt_colliders}/"
+            f"{expected_klt_colliders}, "
+            f"wall/floor=({klt_wall_t:.3f}/{klt_floor_t:.3f})m, "
+            "KLT friction=(0.12/0.08), "
+            f"contact_offset={klt_contact_offset:.3f}m"
         )
         return n_tom
 

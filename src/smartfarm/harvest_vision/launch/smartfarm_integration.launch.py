@@ -57,7 +57,7 @@ def generate_launch_description():
         DeclareLaunchArgument("iw_rviz", default_value="true"),
         DeclareLaunchArgument("use_debug", default_value="true"),
         # MM 중심에서 현재 IW 접근 방향으로 유지할 비접촉 플레이스 거리.
-        DeclareLaunchArgument("iw_dock_standoff", default_value="1.2"),
+        DeclareLaunchArgument("iw_dock_standoff", default_value="1.03"),
 
         # 1) 현재 성공한 MM MoveIt 파이프라인 + 고정 Nav2 goal 코디네이터.
         IncludeLaunchDescription(

@@ -67,6 +67,8 @@ def generate_launch_description():
             "harvest_enable_topic": "harvest_test/enable",
             "manipulator_state_topic": "manipulator/target_state",
             "mobility_ready_topic": "manipulator/mobility_ready",
+            "require_moveit_ready": True,
+            "moveit_ready_topic": "moveit_ready",
             "rmpflow_status_topic": "pipeline_status",
             "isaac_command_topic": "cmd",
             "reposition_request_topic": "nav/reposition_request",

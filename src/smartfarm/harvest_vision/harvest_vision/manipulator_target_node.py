@@ -27,8 +27,9 @@ ACTIVE_SEQUENCE_STATES = {
     "VERIFY_RETRACT", "GRASP_FOLLOW_CHECK",
     "RETRACT_CIRC", "RETRACT_LIN",
     "RETRACT", "PRE_PLACE",
-    "WAIT_BASKET", "BASKET_APPROACH", "BASKET_PLACE", "PLACE_RELEASING",
-    "BASKET_RETRACT",
+    "PRE_PLACE_BED_VIEW", "WAIT_BASKET_AT_BED_VIEW", "BASKET_AZIMUTH_ALIGN",
+    "BASKET_APPROACH", "PLACE_RELEASING",
+    "BASKET_RETRACT", "POST_PLACE_BED_VIEW", "PLACE_FAILED_HOLDING",
     "GO_HOME",
     "NAV_REPOSITION_REQUIRED",
 }
@@ -63,14 +64,23 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("basket_pose_max_age_sec", 2.0)
         self.declare_parameter("use_iw_tf_basket_fallback", True)
         self.declare_parameter("iw_base_frame", "iwhub_0/base_link")
-        # IwHub cargo의 실제 4×2 KLT 격자 중 초기 적재가 없는 슬롯.
-        # [x,y,z]는 IW base_link 기준 release pose이며 z=KLT 윗면+약 5 cm다.
+        # IwHub cargo의 실제 4×2 KLT 격자. [x,y,z]는 IW base_link 기준 release
+        # pose이며 z=KLT 윗면+약 5 cm다. 이 표는 /iw/basket/empty_slot_pose가
+        # 없을 때만 쓰는 폴백이다.
+        # ★팔레트는 base_link 중심이 아니다(55263ea 지게차 도킹 정렬). 카고 원점이
+        #   실측 chassis bbox 중심 = base_link 기준 -0.3171 m로 이동했으므로 격자
+        #   ±0.465/±0.155에 그 오프셋을 더한다. 2026-07-25 스폰 시점 ground truth
+        #   (map (1.561,-12.125,0.588), IW (1.6955,-12.0,180°))로 검증.
+        #   초기 적재 토마토를 없앤 뒤로 8칸 모두 빈 슬롯이다.
         self.declare_parameter("iw_empty_basket_offsets", [
-            -0.465, 0.125, 0.52,
-            -0.155, -0.125, 0.52,
-            0.155, -0.125, 0.52,
-            0.155, 0.125, 0.52,
-            0.465, 0.125, 0.52,
+            -0.782, -0.125, 0.587,
+            -0.782, 0.125, 0.587,
+            -0.472, -0.125, 0.587,
+            -0.472, 0.125, 0.587,
+            -0.162, -0.125, 0.587,
+            -0.162, 0.125, 0.587,
+            0.148, -0.125, 0.587,
+            0.148, 0.125, 0.587,
         ])
         # 상대 이름이어야 namespace=harvester_0에서 코디네이터가 발행하는
         # /harvester_0/harvest_test/enable과 동일한 토픽으로 해석된다.
@@ -171,14 +181,43 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("grasp_follow_max_delta_m", 0.015)
         self.declare_parameter("grasp_one_side_yaw_deg", 5.0)
         self.declare_parameter("grasp_one_side_max_retries", 1)
-        self.declare_parameter("basket_approach_height_m", 0.15)
-        # X 하한은 옛 UR10e 기준 -0.80이었다. m0617은 리치가 길어 MM 뒤쪽(음수 X)
-        # 앞 데크 슬롯(KLT_31 ≈ X -0.95, 반경 0.98m)까지 닿는다. -1.05로 넓혀 통과시킨다.
-        self.declare_parameter("basket_workspace_min", [-1.05, -0.80, 0.15])
-        self.declare_parameter("basket_workspace_max", [1.35, 0.80, 1.80])
-        # 스쿱 릴리즈가 목표보다 바깥(MM 반대편)에 떨어져 옆 칸 사이에 놓이는 것을
-        # 보정한다. 릴리즈 목표를 MM 쪽(수평 반경 안쪽)으로 이만큼 당겨 중심에 놓는다.
-        self.declare_parameter("basket_place_toward_mm_m", 0.06)
+        # 릴리즈 높이 = 발행된 슬롯 pose + 이 값. 여기서 스쿱을 열어 낙하시키고
+        # TCP를 더 내리지 않는다. 값 유도[2] — 그리퍼 끝을 KLT 윗면 3cm 위에 둔다:
+        #   harvest_tcp = 플랜지 +Z 120mm(1/4구 회전중심), 스쿱 메시 z 최대 177mm
+        #   → 툴 끝은 TCP 앞 57mm. 릴리즈 자세는 연직 하방이라 그대로 아래쪽 여유다.
+        #   발행 슬롯 pose = KLT 윗면 + 33.1mm (isaacpjt/iw.py: 0.11205×0.85 − 62.1mm)
+        #   ∴ 0.030 + 0.057 − 0.0331 = 0.0539
+        self.declare_parameter("basket_approach_height_m", 0.054)
+        # 릴리즈 후 LIN으로 빠져나올 바구니 상부 안전점(릴리즈점 기준 추가 상승).
+        # 릴리즈 시 스쿱 끝이 림보다 3cm 위다. 추가 8cm만 수직 후퇴해도
+        # 총 11cm 여유라 접기에 충분하며, 기존 15cm LIN 왕복 시간을 줄인다.
+        self.declare_parameter("basket_retract_height_m", 0.08)
+        # 접힘 자세에서 바구니 pose를 기다리는 시간. 일반 모션 타임아웃(10초)과
+        # 분리한다 — IW가 이미 정차했으면 한 프레임에 진행하고, 없으면 이만큼만
+        # 기다린 뒤 수확물을 든 채 홈으로 복귀한다.
+        self.declare_parameter("basket_wait_timeout_sec", 2.0)
+        # 릴리즈 높이 검증 로그용 실측 상수.
+        #   harvest_tcp → 스쿱 최저점: 스쿱 메시 z 최대 177mm − TCP 120mm
+        #   발행 슬롯 pose → KLT 윗면: isaacpjt/iw.py의 0.11205×0.85 − 반높이 62.1mm
+        self.declare_parameter("scoop_tip_below_tcp_m", 0.057)
+        self.declare_parameter("basket_pose_above_rim_m", 0.0331)
+        # 바구니 단계 전용 툴 자세 — 수확용 _harvest_orientation을 재사용하지
+        # 않는다. (x,y,z,w)=(1,0,0,0)은 base X축 180° 회전 = 툴 z축이 연직 하방.
+        # 손목 yaw 후보 탐색은 mm_motion_bridge의 랭크드 IK가 담당한다.
+        self.declare_parameter(
+            "basket_tool_orientation", [1.0, 0.0, 0.0, 0.0])
+        # 바스켓은 축정렬 상자가 아니라 수평 반경으로 판정한다. J1이 360° 도는
+        # 6축 팔에서 KLT는 원래 MM 측후방에 놓이며(머지 전 grasp_proto.py 방식),
+        # 상자 하한 X를 쓰면 도달 가능한 뒤쪽 슬롯이 부호 때문에 거부된다.
+        # 반경 상한 근거[2]: 릴리즈 높이(base 기준 z≈+0.29)에서 툴을 아래로
+        # 세우면 손목+툴 0.241m가 수직으로 소모돼 어깨(z=0.153)에서 wrist center
+        # 까지 0.377m 상승 → 최대 수평 = √((0.845+0.734)² − 0.377²) = 1.533m.
+        # 완전 신전(특이점) 직전을 피해 1.45로 둔다.
+        self.declare_parameter("basket_max_reach_m", 1.45)
+        self.declare_parameter("basket_z_min", 0.15)
+        self.declare_parameter("basket_z_max", 1.80)
+        # KLT 중심에서 수평면상 MM(base 원점) 방향으로 최종 릴리즈점을 당긴다.
+        self.declare_parameter("basket_place_toward_mm_m", 0.02)
         self.declare_parameter("workspace_min", [0.15, -1.05, 0.15])
         self.declare_parameter("workspace_max", [1.25, 1.05, 1.80])
         # 데모: 성공/실패 무관 매 시도 후 홈 복귀 → 팔이 안 굳고 다음 과실을 계속 시도한다.
@@ -229,7 +268,17 @@ class ManipulatorTargetNode(Node):
         self._stable_ref: tuple[float, float, float] | None = None
         self._follow_check_id = 0
         self._basket_place: np.ndarray | None = None
+        self._basket_map_z: float | None = None
         self._basket_received_ns = 0
+        # 접힌 홈 경유의 **성공 응답**을 받았는지. 명령 발행만으로 True로 만들지
+        # 않는다 — 홈이 실패하면 바구니 접근을 시작하면 안 된다.
+        self._place_home_done = False
+        self._basket_retract_tried = False
+        # 방위 정렬 뒤 팔을 펼 릴리즈 목표(슬롯 중심 + 접근 높이).
+        self._basket_release: np.ndarray | None = None
+        # 릴리즈점에 실제로 도달했는가. 도달 전 실패에 바구니 상부 LIN 후퇴를
+        # 시도하면 홈에서 1.3m 직교 이동이 되어 Pilz가 거부한다.
+        self._basket_release_reached = False
         self._sim_fruits: dict[int, tuple[np.ndarray, int]] = {}
         self._sim_fruit_heights: dict[int, float] = {}
         self._sim_fruit_radii: dict[int, float] = {}
@@ -845,8 +894,7 @@ class ManipulatorTargetNode(Node):
             if phase == "GRASP":
                 command["rmp_target"]["velocity_scale"] = 0.05
         elif phase in {
-            "PREGRASP", "CAPTURE_TRIM", "RETRACT_LIN",
-            "BASKET_PLACE", "BASKET_RETRACT",
+            "PREGRASP", "CAPTURE_TRIM", "RETRACT_LIN", "BASKET_RETRACT",
         }:
             command["rmp_target"]["motion"] = "LIN"
             if phase == "PREGRASP":
@@ -855,16 +903,25 @@ class ManipulatorTargetNode(Node):
                 command["rmp_target"]["lock_joint_1"] = True
             if phase == "CAPTURE_TRIM":
                 command["rmp_target"]["velocity_scale"] = 0.035
+            if phase == "BASKET_RETRACT":
+                command["rmp_target"]["velocity_scale"] = 0.45
         else:
             command["rmp_target"]["motion"] = "PTP"
         # PREGRASP마다 카메라 광선으로 새 TCP 자세를 만들면 ±360° 범위의 두산 손목이
         # 먼 등가 IK 해를 골라 제자리에서 여러 번 회전할 수 있다. Nav 도착 뒤 이미
         # 베드를 향한 현재 스쿱 자세를 그대로 잠그고 위치만 목표로 이동한다.
-        if phase in {
+        if phase in {"BASKET_APPROACH", "BASKET_RETRACT"}:
+            # 바구니는 등 뒤 아래에 있다. 베드를 향한 수확 자세를 그대로 쓰면
+            # 스쿱 개구가 옆을 향해 과실이 슬롯 밖으로 튄다.
+            command["rmp_target"]["tool_orientation"] = [
+                float(value)
+                for value in self.get_parameter(
+                    "basket_tool_orientation").value
+            ]
+        elif phase in {
             "APPROACH", "PREGRASP", "GRASP",
             "CAPTURE_TRIM", "VERIFY_RETRACT",
             "RETRACT_CIRC", "RETRACT_LIN", "RETRACT",
-            "BASKET_APPROACH", "BASKET_PLACE", "BASKET_RETRACT",
         }:
             orientation = self._harvest_orientation
             if orientation is None:
@@ -1093,7 +1150,10 @@ class ManipulatorTargetNode(Node):
         if self._state == "GRIPPER_CLOSING":
             # watchdog이 닫기 정착 시간 뒤 TCP 거리 검증을 요청한다.
             return
-        if self._state == "PLACE_RELEASING":
+        if (self._state == "PLACE_RELEASING"
+                and not str(status.get("phase", "")).startswith("ERROR_")):
+            # 오류 응답은 아래 공통 오류 처리로 넘긴다. 여기서 먼저 return하면
+            # 릴리즈 중 실패가 워치독 타임아웃까지 통째로 무시된다.
             try:
                 gripper = float(status.get("gripper", 1.0))
             except (TypeError, ValueError):
@@ -1110,7 +1170,8 @@ class ManipulatorTargetNode(Node):
         if status_id != self._pending_id:
             return
         phase = str(status.get("phase", ""))
-        if phase in {"ERROR_DIVERGENCE", "ERROR_IK_PATH", "ERROR_STAGNATION"}:
+        if phase in {"ERROR_DIVERGENCE", "ERROR_IK_PATH", "ERROR_STAGNATION",
+                     "ERROR_MOVEIT_UNAVAILABLE"}:
             self._deadline_ns = 0
             self._abort_to_home(phase.lower())
             return
@@ -1169,21 +1230,44 @@ class ManipulatorTargetNode(Node):
         elif self._state == "RETRACT_CIRC":
             self._send_rmp_goal(self._approach_target, "RETRACT_LIN")
         elif self._state in ("RETRACT_LIN", "RETRACT", "PRE_PLACE"):
-            # 파지·절단·안전 후퇴가 모두 끝난 지금부터만 바스켓 좌표를 받는다.
-            # 주행/수확 중 들어온 좌표는 이동 중인 IW의 과거 위치일 수 있으므로 폐기한다.
+            # 먼저 베드뷰와 같은 접힘 자세로 간다. 판단은 그 자세에서 한다.
+            # 편 자세로 대기하거나 회전하면 반경 1.1m로 베드를 쓸고 지나간다
+            # (2026-07-25 sim_diag_154400). 주행/수확 중 들어온 좌표는 이동
+            # 중 IW의 과거 위치일 수 있으므로 여기서 폐기하고 새로 받는다.
             self._basket_place = None
             self._basket_received_ns = 0
-            self._transition("WAIT_BASKET", stop=True)
+            self._place_home_done = False
+            self._basket_retract_tried = False
+            self._basket_release = None
+            self._basket_release_reached = False
+            self._send_place_fold()
+        elif self._state == "PRE_PLACE_BED_VIEW":
+            # ── 접힘(베드뷰 자세) 도달. 여기서 바구니 가용성을 판단한다. ──
+            #   있으면  → 방위 회전 → 플레이스 접근
+            #   없으면  → 수확물을 든 채 홈 복귀(WAIT_BASKET_AT_BED_VIEW 타임아웃 경로)
+            self._place_home_done = True
+            self._transition("WAIT_BASKET_AT_BED_VIEW", stop=True)
             self._deadline_ns = (
                 self.get_clock().now().nanoseconds
-                + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+                + int(float(self.get_parameter(
+                    "basket_wait_timeout_sec").value) * 1e9)
             )
+            # TF 폴백 좌표는 접힘이 끝난 뒤에 취득한다. 이동 중에 잡으면
+            # basket_pose_max_age_sec(2초)에 걸려 만료된다.
             if (bool(self.get_parameter("use_iw_tf_basket_fallback").value)
                     and self._acquire_nearby_iw_basket()):
                 self._start_place()
+        elif self._state == "BASKET_AZIMUTH_ALIGN":
+            # 방위가 맞았으니 이제 편다. 남은 joint_1 변화가 작아 관절변화
+            # 제한에 걸리지 않고, 펴는 동작은 바구니 쪽에서만 일어난다.
+            if self._basket_release is None:
+                self._abort_basket("no_release_target")
+            else:
+                self._send_rmp_goal(self._basket_release, "BASKET_APPROACH")
         elif self._state == "BASKET_APPROACH":
-            self._send_rmp_goal(self._basket_place, "BASKET_PLACE")
-        elif self._state == "BASKET_PLACE":
+            # 접근점이 곧 릴리즈점이다. 추가 하강 없이 연다.
+            self._basket_release_reached = True
+            self._log_release_clearance()
             self._transition("PLACE_RELEASING", stop=True)
             self._deadline_ns = (
                 self.get_clock().now().nanoseconds
@@ -1192,7 +1276,12 @@ class ManipulatorTargetNode(Node):
             self._isaac_command_pub.publish(
                 String(data=json.dumps({"gripper": {"closed": False}})))
         elif self._state == "BASKET_RETRACT":
-            self._send_home()
+            # 바구니 바로 위에서 편 팔을 HOME으로 한 번에 돌리면 스쿱/링크가
+            # KLT와 IW를 쓸 수 있다. 방위를 유지한 채 먼저 완전히 접는다.
+            self._send_post_place_fold()
+        elif self._state == "POST_PLACE_BED_VIEW":
+            # 접기 성공 응답을 받은 뒤에만 joint_1까지 HOME 방위로 복귀한다.
+            self._send_home(fast=True)
         elif self._state == "GO_HOME":
             self._deadline_ns = 0
             self._mobility_pub.publish(Bool(data=True))
@@ -1219,7 +1308,9 @@ class ManipulatorTargetNode(Node):
         """IW가 선택한 빈 바스켓 슬롯의 tool-release pose를 base 좌표로 저장한다."""
         # 바스켓 위치는 수확·절단·후퇴가 끝난 뒤에만 사용한다. 통합 시작부터
         # 변환하면 이동 중 IW 좌표가 캐시되고 불필요한 TF/작업영역 경고도 폭주한다.
-        if self._state != "WAIT_BASKET":
+        # PRE_PLACE_BED_VIEW(접기) 중에도 갱신은 받는다. 접는 몇 초 사이에
+        # 좌표가 만료되면 플레이스를 시작하지 못하고 홈 복귀로 빠진다.
+        if self._state not in ("WAIT_BASKET_AT_BED_VIEW", "PRE_PLACE_BED_VIEW"):
             return
         if not msg.header.frame_id or self._is_stale(msg):
             return
@@ -1236,21 +1327,48 @@ class ManipulatorTargetNode(Node):
             return
         p = target.pose.position
         values = np.array([p.x, p.y, p.z], dtype=float)
-        lower = np.asarray(self.get_parameter("basket_workspace_min").value)
-        upper = np.asarray(self.get_parameter("basket_workspace_max").value)
-        if (not np.all(np.isfinite(values))
-                or not np.all((lower <= values) & (values <= upper))):
-            self.get_logger().warning("작업영역 밖 바스켓 목표를 무시합니다")
+        if not self._basket_reachable(values):
+            if self._state != "WAIT_BASKET_AT_BED_VIEW":
+                # 홈 경유 중 일시적으로 범위를 벗어난 갱신은 무시하고 직전
+                # 유효 좌표를 유지한다(IW가 아직 정차 중일 수 있다).
+                return
+            self.get_logger().warning(
+                "작업영역 밖 바스켓 목표 — 토마토를 잡은 상태로 HOME 복귀: "
+                f"base=({values[0]:.3f}, {values[1]:.3f}, "
+                f"{values[2]:.3f}), "
+                f"수평반경={float(np.linalg.norm(values[:2])):.3f} "
+                f"허용반경={float(self.get_parameter('basket_max_reach_m').value):.2f} "
+                f"z=[{float(self.get_parameter('basket_z_min').value):.2f}"
+                f" .. {float(self.get_parameter('basket_z_max').value):.2f}]")
+            # 범위 밖 pose를 계속 무시하면 WAIT_BASKET에서 영구 정지한다.
+            # 그리퍼 개방/실패 재시도 없이 곧바로 HOME을 보내 수확물을 든 채
+            # 안전 자세에서 IW의 다음 동작을 기다린다. _send_home()이 상태를
+            # GO_HOME으로 바꾸므로 뒤따르는 고주기 pose는 이 콜백 입구에서 무시된다.
+            self._deadline_ns = 0
+            self._send_home()
             return
         self._basket_place = values
+        self._basket_map_z = float(msg.pose.position.z)
         self._basket_received_ns = self.get_clock().now().nanoseconds
         self.get_logger().info(
             "실제 IW 바스켓 좌표 수신: "
             f"base=({values[0]:.3f}, {values[1]:.3f}, {values[2]:.3f})",
             throttle_duration_sec=2.0,
         )
-        if self._state == "WAIT_BASKET":
+        if self._state == "WAIT_BASKET_AT_BED_VIEW":
             self._start_place()
+
+    def _basket_reachable(self, values: np.ndarray) -> bool:
+        """바스켓 릴리즈 좌표(base 프레임)가 팔 도달 범위 안인가."""
+        if not np.all(np.isfinite(values)):
+            return False
+        radius = float(np.linalg.norm(values[:2]))
+        return (
+            radius <= float(self.get_parameter("basket_max_reach_m").value)
+            and float(self.get_parameter("basket_z_min").value)
+            <= float(values[2])
+            <= float(self.get_parameter("basket_z_max").value)
+        )
 
     def _basket_available(self) -> bool:
         if self._basket_place is None or not self._basket_received_ns:
@@ -1268,8 +1386,6 @@ class ManipulatorTargetNode(Node):
             return False
         iw_frame = str(self.get_parameter("iw_base_frame").value)
         base_frame = str(self.get_parameter("base_frame").value)
-        lower = np.asarray(self.get_parameter("basket_workspace_min").value)
-        upper = np.asarray(self.get_parameter("basket_workspace_max").value)
         candidates: list[np.ndarray] = []
         for index in range(0, len(raw), 3):
             source = PoseStamped()
@@ -1290,8 +1406,7 @@ class ManipulatorTargetNode(Node):
                 return False
             p = target.pose.position
             values = np.array([p.x, p.y, p.z], dtype=float)
-            if (np.all(np.isfinite(values))
-                    and np.all((lower <= values) & (values <= upper))):
+            if self._basket_reachable(values):
                 candidates.append(values)
         if not candidates:
             return False
@@ -1307,34 +1422,150 @@ class ManipulatorTargetNode(Node):
 
     def _start_place(self) -> None:
         if not self._basket_available():
+            # 도달 가능한 바구니 없음 → 수확물을 든 채 홈 복귀(플레이스 생략).
+            self.get_logger().warning(
+                "도달 가능한 IW 바구니 없음 — 수확물을 잡은 채 홈 복귀")
             self._basket_place = None
             self._basket_received_ns = 0
             self._send_home()
             return
-        # 바스켓 중심 보정: 릴리즈 목표를 MM 쪽(수평 반경 안쪽)으로 당겨 옆 칸 사이가
-        # 아니라 슬롯 중심에 떨어지게 한다. BASKET_APPROACH·BASKET_PLACE 공통 반영.
-        shift = float(self.get_parameter("basket_place_toward_mm_m").value)
+        if not self._place_home_done:
+            # 접힘 성공 응답 전에는 절대 바구니로 움직이지 않는다.
+            self._fail_place_holding("fold_not_confirmed")
+            return
+        # 릴리즈 XY는 IW가 발행한 KLT 슬롯 중심에서 수평면상 MM(base 원점)
+        # 방향으로 지정 거리만 이동한다. Z 높이는 바꾸지 않는다.
+        shift = max(
+            0.0,
+            float(self.get_parameter("basket_place_toward_mm_m").value),
+        )
         if shift > 0.0:
-            xy = self._basket_place[:2]
-            r = float(np.linalg.norm(xy))
-            if r > 1e-6:
-                self._basket_place[:2] = xy * (1.0 - shift / r)
+            radius = float(np.linalg.norm(self._basket_place[:2]))
+            if radius > shift:
+                self._basket_place[:2] *= 1.0 - shift / radius
                 self.get_logger().info(
-                    f"바스켓 중심 보정: MM 쪽으로 {shift:.3f} m 당김 → "
-                    f"({self._basket_place[0]:.3f}, {self._basket_place[1]:.3f})")
-        approach = self._basket_place.copy()
-        approach[2] += float(
+                    f"바스켓 릴리즈 XY: KLT 중심에서 MM 방향으로 "
+                    f"{shift:.3f}m 이동 → "
+                    f"({self._basket_place[0]:.3f}, "
+                    f"{self._basket_place[1]:.3f})")
+        # 릴리즈점 = 슬롯 중심 + basket_approach_height_m. 여기서 스쿱을 열어
+        # 낙하시킨다. 슬롯 중심(z)까지 TCP를 내리면 스쿱이 KLT 벽에 걸린다.
+        release = self._basket_place.copy()
+        release[2] += float(
             self.get_parameter("basket_approach_height_m").value)
-        self._send_rmp_goal(approach, "BASKET_APPROACH")
+        self.get_logger().info(
+            f"바구니 릴리즈점: 슬롯 z={self._basket_place[2]:.3f} → "
+            f"릴리즈 z={release[2]:.3f} (하강 없음)")
+        self._basket_release = release
+        self._basket_release_reached = False
+        # 펴기 전에 방위부터 맞춘다. 편 채로 joint_1을 크게 돌리면 반경 1.1m로
+        # 베드를 쓸고 지나간다(2026-07-25 sim_diag_154400).
+        self._send_azimuth_align(release)
+
+    def _log_release_clearance(self) -> None:
+        """릴리즈 시점의 실제 높이를 남긴다 — 스쿱 최저점이 KLT 윗면 위 3cm인가.
+
+        명령값은 TF 지연과 무관하게 정확하므로 기준으로 쓰고, TF 실측값은 참고로
+        함께 찍는다(부하가 높으면 /harvester_0/tf가 수 초 지연될 수 있다).
+        """
+        if self._basket_release is None:
+            return
+        tip_offset = float(self.get_parameter("scoop_tip_below_tcp_m").value)
+        rim_offset = float(self.get_parameter("basket_pose_above_rim_m").value)
+        base_frame = str(self.get_parameter("base_frame").value)
+        rim_base = float(self._basket_release[2]) - float(
+            self.get_parameter("basket_approach_height_m").value) - rim_offset
+        tip_base = float(self._basket_release[2]) - tip_offset
+        message = (
+            "릴리즈 높이 검증(명령값, base): "
+            f"KLT 윗면 z={rim_base:.4f}, harvest_tcp z="
+            f"{float(self._basket_release[2]):.4f}, 스쿱 최저점 z="
+            f"{tip_base:.4f} → 여유={tip_base - rim_base:.4f} m")
+        if self._basket_map_z is not None:
+            message += (
+                f" | map 기준 KLT 윗면 z="
+                f"{self._basket_map_z - rim_offset:.4f}")
+        try:
+            transform = self._buffer.lookup_transform(
+                base_frame, "harvest_tcp", Time()).transform
+            measured = float(transform.translation.z)
+            message += (
+                f" | TF 실측 harvest_tcp z={measured:.4f}, "
+                f"스쿱 최저점 z={measured - tip_offset:.4f}, "
+                f"여유={measured - tip_offset - rim_base:.4f} m(지연 가능)")
+        except TransformException as exc:
+            message += f" | TF 실측 실패: {exc}"
+        self.get_logger().info(message)
+
+    def _send_place_fold(self) -> None:
+        """수확 방위(joint_1)를 유지한 채 접는다. 완료는 성공 응답으로만 판정한다.
+
+        홈(joint_1=180°)까지 돌려버리면 바구니 방위(≈348°)에서 168° 떨어져
+        관절변화 제한에 전부 걸린다. 방위는 그대로 두고 팔만 접은 뒤,
+        BASKET_AZIMUTH_ALIGN에서 joint_1만 돌린다.
+        """
+        self._sequence_id += 1
+        self._pending_id = self._sequence_id
+        self._transition("PRE_PLACE_BED_VIEW")
+        self._deadline_ns = (
+            self.get_clock().now().nanoseconds
+            + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+        )
+        self._isaac_command_pub.publish(String(data=json.dumps({
+            "fold_keep_j1": {"id": self._pending_id},
+        })))
+        self.get_logger().info(
+            "바구니 이송 전 접기 — 수확 방위(joint_1) 유지, joint_2~6만 접음")
+
+    def _send_azimuth_align(self, position: np.ndarray) -> None:
+        """접힌 상태에서 joint_1만 돌려 바구니 방위로 정렬한다."""
+        self._sequence_id += 1
+        self._pending_id = self._sequence_id
+        self._transition("BASKET_AZIMUTH_ALIGN")
+        self._deadline_ns = (
+            self.get_clock().now().nanoseconds
+            + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+        )
+        self._isaac_command_pub.publish(String(data=json.dumps({
+            "azimuth_align": {
+                "id": self._pending_id,
+                "position": [float(value) for value in position],
+            }
+        })))
+        self.get_logger().info(
+            "바구니 방위 정렬 요청: 목표 XY="
+            f"({position[0]:.3f}, {position[1]:.3f}) — 접힌 채 joint_1만 회전")
+
+    def _send_post_place_fold(self) -> None:
+        """플레이스 후 현재 방위를 유지한 채 먼저 접어 IW/KLT에서 빠져나온다."""
+        self._sequence_id += 1
+        self._pending_id = self._sequence_id
+        self._transition("POST_PLACE_BED_VIEW")
+        self._deadline_ns = (
+            self.get_clock().now().nanoseconds
+            + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
+        )
+        self._isaac_command_pub.publish(String(data=json.dumps({
+            "fold_keep_j1": {
+                "id": self._pending_id,
+                "phase": "POST_PLACE_BED_VIEW",
+                "fast": True,
+            },
+        })))
+        self.get_logger().info(
+            "플레이스 후 안전 접기 — 바구니 방위(joint_1) 유지, "
+            "joint_2~6을 먼저 접은 뒤 HOME 복귀")
 
     def _start_basket_retract(self) -> None:
-        """릴리스 위치에서 같은 수직 경로로 KLT 위까지 안전하게 빠져나온다."""
+        """릴리즈점에서 같은 수직선으로 바구니 상부 안전점까지 LIN 후퇴한다."""
         if self._basket_place is None:
             self._send_home()
             return
+        self._basket_retract_tried = True
         retract = self._basket_place.copy()
-        retract[2] += float(
-            self.get_parameter("basket_approach_height_m").value)
+        retract[2] += (
+            float(self.get_parameter("basket_approach_height_m").value)
+            + float(self.get_parameter("basket_retract_height_m").value))
         self._send_rmp_goal(retract, "BASKET_RETRACT")
 
     def _begin_preplace(self) -> None:
@@ -1354,7 +1585,9 @@ class ManipulatorTargetNode(Node):
             "blade": float(self.get_parameter("blade_cut_deg").value),
         })))
 
-    def _send_home(self, retry_after_home: bool = False) -> None:
+    def _send_home(
+        self, retry_after_home: bool = False, fast: bool = False
+    ) -> None:
         self._basket_place = None
         self._basket_received_ns = 0
         self._retry_after_home = bool(retry_after_home)
@@ -1366,7 +1599,7 @@ class ManipulatorTargetNode(Node):
             + int(float(self.get_parameter("motion_timeout_sec").value) * 1e9)
         )
         self._isaac_command_pub.publish(String(data=json.dumps({
-            "rmp_home": {"id": self._pending_id},
+            "rmp_home": {"id": self._pending_id, "fast": bool(fast)},
         })))
 
     def _maybe_single_shot_off(self) -> None:
@@ -1376,9 +1609,55 @@ class ManipulatorTargetNode(Node):
             self._harvest_enabled = False
             self.get_logger().info("원샷 수확 종료 — h 다시 눌러야 다음 과실")
 
+    _BASKET_PHASE_STATES = (
+        "PRE_PLACE_BED_VIEW", "WAIT_BASKET_AT_BED_VIEW", "BASKET_AZIMUTH_ALIGN",
+        "BASKET_APPROACH", "PLACE_RELEASING", "BASKET_RETRACT",
+        "POST_PLACE_BED_VIEW",
+    )
+
+    def _abort_basket(self, reason: str) -> None:
+        """바구니 단계 실패 — 토마토 재접근으로 되돌아가지 않는다.
+
+        수확물을 놓치지 않도록 그리퍼는 계속 닫아 둔다. 릴리즈점 부근이면 먼저
+        바구니 상부로 LIN 후퇴하고, 그게 불가능하면 홈 복귀를 시도한다.
+        """
+        self._deadline_ns = 0
+        self.get_logger().warning(f"바구니 이송 실패({reason})")
+        # 릴리즈점에 실제로 도달했을 때만 상부 후퇴가 의미 있다. 도달 전에
+        # 시도하면 접힌 자세에서 1.3m 직교 LIN이 되어 Pilz가 거부하거나
+        # 타임아웃까지 붙잡는다(2026-07-25 sim_diag_161712: 85초 낭비).
+        if (self._basket_release_reached
+                and self._basket_place is not None
+                and not self._basket_retract_tried):
+            self.get_logger().warning("→ 바구니 상부로 LIN 후퇴 후 홈 복귀")
+            self._start_basket_retract()
+            return
+        if self._state in ("PRE_PLACE_BED_VIEW", "POST_PLACE_BED_VIEW", "GO_HOME"):
+            # 접힘 홈 자체가 실패한 상태에서 같은 홈 명령을 반복하지 않는다.
+            self._fail_place_holding(reason)
+            return
+        self.get_logger().warning("→ 그리퍼를 닫은 채 홈 복귀")
+        self._transition("HARVEST_FAILED")
+        self._send_home()
+
+    def _fail_place_holding(self, reason: str) -> None:
+        """홈 복귀조차 실패 — 수확물을 잡은 채 정지한다(그리퍼 열지 않음)."""
+        self._deadline_ns = 0
+        self._basket_place = None
+        self._basket_received_ns = 0
+        self._place_home_done = False
+        self.get_logger().error(
+            f"바구니 이송 안전 실패({reason}) — 수확물을 잡은 채 정지, "
+            "운영자 확인 필요")
+        self._transition("HARVEST_FAILED")
+        self._transition("PLACE_FAILED_HOLDING", stop=True)
+
     def _abort_to_home(self, reason: str) -> None:
         """실패해도 팔을 홈으로 돌려 다음 과실을 계속 시도하게 한다(데모 연속 사이클).
         이미 홈 복귀 중(GO_HOME)에 또 실패하면 무한루프 방지로 멈추기만 한다."""
+        if self._state in self._BASKET_PHASE_STATES:
+            self._abort_basket(reason)
+            return
         was_going_home = self._state == "GO_HOME"
         # 재접근 재시도: 홈까지 가지 않고 APPROACH 안전점으로 후퇴한 뒤 다시 파지한다.
         # 도달하면 기존 흐름(APPROACH→PREGRASP→GRASP)이 그대로 이어진다.

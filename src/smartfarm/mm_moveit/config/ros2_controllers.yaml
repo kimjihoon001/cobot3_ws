@@ -32,9 +32,20 @@
     state_publish_rate: 60.0
     action_monitor_rate: 20.0
     allow_partial_joints_goal: false
+    # 관절별 goal 허용오차를 주지 않으면 팔이 물리적으로 막혀 106° 어긋난
+    # 상태에서도 JTC가 "Goal reached, success!"를 반환한다(2026-07-25
+    # sim_diag_154400 실측). 그러면 FSM이 접근 성공으로 믿고 다음 LIN을
+    # 엉뚱한 시작 자세에서 계획해 PLANNING_FAILED로 끝난다.
+    # 0.05 rad(2.9°)는 정상 추종 오차보다 크고 막힘 판정에는 충분히 작다.
     constraints:
       stopped_velocity_tolerance: 0.2
       goal_time: 0.0
+      joint_1: {goal: 0.05}
+      joint_2: {goal: 0.05}
+      joint_3: {goal: 0.05}
+      joint_4: {goal: 0.05}
+      joint_5: {goal: 0.05}
+      joint_6: {goal: 0.05}
 
 # 동축 스쿱 — 세 회전축을 /gripper_controller/commands (Float64MultiArray) 로 직접 지령.
 # 순서: inner receiver, middle receiver, outer cutter.

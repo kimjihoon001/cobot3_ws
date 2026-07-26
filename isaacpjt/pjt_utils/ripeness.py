@@ -58,6 +58,17 @@ def apply_ripeness_color(stage, prim_path, class_name, rng=random):
     반환: 실제 사용된 red_fraction (라벨 메타 저장용, spoiled 는 None)."""
     spec = CLASSES[class_name]
     frac = None
+    # 참조 USD의 하위 Mesh가 비동기 구성되기 전에 호출돼도 회색 fallback으로
+    # 남지 않도록 루트에 클래스 기본색을 상속 primvar로 먼저 기록한다.
+    base_color = BROWN if class_name == "spoiled" else RED
+    root = stage.GetPrimAtPath(prim_path)
+    if root.IsValid():
+        root_color = UsdGeom.PrimvarsAPI(root).CreatePrimvar(
+            "displayColor",
+            Sdf.ValueTypeNames.Color3fArray,
+            UsdGeom.Tokens.constant,
+        )
+        root_color.Set([base_color])
     for mesh in _iter_meshes(stage, prim_path):
         pts = mesh.GetPointsAttr().Get()
         if not pts:
@@ -87,6 +98,16 @@ def apply_ripeness_color(stage, prim_path, class_name, rng=random):
 
 def apply_flat_color(stage, prim_path, color):
     """단색 (꼭지=초록 등)."""
+    # 참조가 아직 로드 중이면 현재 traversal에 Mesh가 없을 수 있다. 루트에
+    # constant primvar를 두면 나중에 구성된 하위 Mesh도 같은 색을 상속한다.
+    root = stage.GetPrimAtPath(prim_path)
+    if root.IsValid():
+        pv = UsdGeom.PrimvarsAPI(root).CreatePrimvar(
+            "displayColor",
+            Sdf.ValueTypeNames.Color3fArray,
+            UsdGeom.Tokens.constant,
+        )
+        pv.Set([color])
     for mesh in _iter_meshes(stage, prim_path):
         pv = UsdGeom.PrimvarsAPI(mesh.GetPrim()).CreatePrimvar(
             "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant)
@@ -95,7 +116,8 @@ def apply_flat_color(stage, prim_path, color):
 
 def bind_matte_material(stage, prim_path,
                         mat_path="/World/Looks/MatteDisplayColor",
-                        fallback_color=Gf.Vec3f(0.5, 0.5, 0.5)):
+                        fallback_color=Gf.Vec3f(0.5, 0.5, 0.5),
+                        stronger_than_descendants=True):
     """displayColor 를 그대로 읽는 무광 머티리얼을 만들어 바인딩.
 
     머티리얼이 없으면 RTX 기본 재질(광택)로 렌더돼 과실이 유리구슬처럼 보인다
@@ -123,10 +145,13 @@ def bind_matte_material(stage, prim_path,
             surf.CreateOutput("surface", Sdf.ValueTypeNames.Token))
     else:
         mat = UsdShade.Material(stage.GetPrimAtPath(mat_path))
-    # 참조된 토마토 USD 일부에는 하위 Mesh의 기본 회색 재질 바인딩이 들어 있다.
-    # 기본(weakerThanDescendants) 상속으로 묶으면 그 회색 재질이 displayColor를
-    # 덮어써 ripe 과실까지 회색으로 보인다. 클래스 색을 읽는 이 재질이 하위
-    # 바인딩보다 강하도록 명시해 렌더링을 결정적으로 만든다.
-    UsdShade.MaterialBindingAPI.Apply(
-        stage.GetPrimAtPath(prim_path)).Bind(
-            mat, UsdShade.Tokens.strongerThanDescendants)
+    # 참조 에셋 루트에는 강한 바인딩을 써 하위 Mesh의 기본 회색 재질을 덮는다.
+    # 단, /World/Plants 같은 공통 컨테이너는 약하게 묶어야 하위 과실/잎의
+    # 빨강·초록 전용 재질을 가리지 않는다.
+    binding = UsdShade.MaterialBindingAPI.Apply(
+        stage.GetPrimAtPath(prim_path))
+    if stronger_than_descendants:
+        binding.Bind(mat, UsdShade.Tokens.strongerThanDescendants)
+    else:
+        # Bind의 기본 strength가 weakerThanDescendants다.
+        binding.Bind(mat)
