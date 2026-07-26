@@ -21,7 +21,11 @@ ROOT = "/World/MonitorCams"
 # iwhub_control/lanes.py의 DOCK y와 같아야 한다. IW는 온실 쪽(Y<13)에 서고
 # 지게차는 창고 안(Y>13)에서 나오므로, 인계 장면은 두 방을 가르는 벽의
 # 입구를 통해서만 한 화면에 담긴다.
-IW_DOCK_Y = 10.85
+IW_DOCK_Y = 10.84885
+
+# mm_moveit/launch/nav2_harvest_bringup.launch.py의 fixed_goal_x/y와 같아야 한다.
+# MM이 여기 정차해서 딴다. 이 지점을 안 보면 통로를 지나가는 장면만 남는다.
+HARVEST_XY = (-0.54, -8.19)
 
 # 화면 칸이 16:9라 4:3으로 뽑으면 좌우에 검은 여백이 크게 남는다. 16:9로
 # 맞추면 칸을 꽉 채우고 렌더 픽셀도 25% 줄어든다.
@@ -85,12 +89,16 @@ def spawn(stage: Usd.Stage, cfg, publish: bool = True, log=print) -> list:
     rack_y = wh_front + wh.depth / 2.0 + (wh.depth / 2.0 - RACK_DEPTH / 2.0 - 0.10)
 
     cams = [
-        # 온실 작업: MM 로봇팔과 IW 위 팔레트가 같이 식별돼야 하므로 멀리서
+        # 수확 작업: MM 로봇팔과 IW 위 팔레트가 같이 식별돼야 하므로 멀리서
         # 전경을 담지 않고 작업 구역에 붙인다. 온실 높이가 4.5m뿐이라
         # 먼 모서리에 두면 부감각이 12°까지 떨어져 평면처럼 보인다.
+        #
+        # 이랑 사이 통로(lanes.py VLANES의 x=0) 끝에 세워 통로를 따라 보게 한다.
+        # 옆(+X 벽)에서 잡으면 시선이 x=1.45 이랑을 넘어야 하는데 줄기가 1.8m라
+        # 캐노피에 아래쪽이 잘린다. 통로축이면 사이를 그대로 통과한다.
         (_add_camera(stage, f"{ROOT}/Greenhouse",
-                     eye=(half_w - 1.5, -4.0, g.height - 0.3),
-                     target=(0.0, 0.0, 1.0)),
+                     eye=(0.0, -g.length / 2.0 + 0.8, 2.6),
+                     target=(HARVEST_XY[0], HARVEST_XY[1], 1.1)),
          "/cctv/greenhouse", RES),
         # 인계: 창고 안에서 입구를 통해 온실 쪽 IW를 본다. 시선이 입구 폭
         # 안을 지나야 벽에 안 가리므로 카메라 X를 크게 잡으면 안 된다.

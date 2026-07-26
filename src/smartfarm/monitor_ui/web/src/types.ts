@@ -49,7 +49,7 @@ export interface CameraSpec {
  */
 export const CAMERAS: CameraSpec[] = [
   { id: "CAM-01", name: "MM D455 / YOLO", type: "robot_front", key: "mm_front", robot: "mm", inGrid: true },
-  { id: "CAM-02", name: "GREENHOUSE OPERATION", type: "greenhouse", key: "greenhouse", robot: "mm", inGrid: true },
+  { id: "CAM-02", name: "HARVESTING OPERATION", type: "greenhouse", key: "greenhouse", robot: "mm", inGrid: true },
   { id: "CAM-03", name: "UNLOADING AREA", type: "unloading", key: "unloading", robot: "iw", inGrid: true },
   { id: "CAM-04", name: "WAREHOUSE STORAGE", type: "storage", key: "storage", robot: "forklift", inGrid: true },
   { id: "CAM-05", name: "OVERVIEW", type: "overview", key: "overview", inGrid: false },

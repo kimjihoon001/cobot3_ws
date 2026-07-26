@@ -52,7 +52,10 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("camera_ns", default_value="harvester_0"),
 
-        _republish("mm_front", [camera_ns, "/rgb"]),
+        # 생 RGB가 아니라 vision_node가 박스를 그려 낸 쪽을 받는다. 1번 화면은
+        # 검출을 보여주는 자리인데 /rgb를 받으면 박스 없는 원본만 나온다.
+        # 따라서 vision_node가 떠 있어야 이 화면이 나온다(안 뜨면 offline).
+        _republish("mm_front", [camera_ns, "/vision/annotated_image"]),
         *(_republish(name, topic) for name, topic in FIXED_CAMERAS),
 
         # 브라우저가 base 토픽(/ui/<pane>)을 요청하면 압축 transport를
