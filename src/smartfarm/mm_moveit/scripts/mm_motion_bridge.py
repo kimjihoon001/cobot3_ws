@@ -721,7 +721,13 @@ class MMMotionBridge(Node):
             "LIN": 0.195,
             "CIRC": 0.195,
         }[motion] if velocity_scale is None else velocity_scale
-        goal.request.max_acceleration_scaling_factor = 0.30
+        # 2026-07-27: LIN(APPROACH→PREGRASP)에서 Pilz가 "joint_4 가속도 한계
+        # 초과, acceleration scaling factor를 낮추라"로 궤적 생성에 실패한다.
+        # 실측 위반값 (joint_limits.yaml의 joint_4 한계 = 5.0):
+        #   scale 0.30 → 6.64 / 6.53   (30% 초과)
+        #   scale 0.25 → 5.10 / 5.05   (1~2% 초과 — 아직 실패)
+        # 선형 외삽하면 0.245 이하가 필요하다. 여유를 두고 0.22로 둔다(예상 4.5).
+        goal.request.max_acceleration_scaling_factor = 0.22
         constraint = Constraints()
         pc = PositionConstraint()
         pc.header.frame_id = frame
