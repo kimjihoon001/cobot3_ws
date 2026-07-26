@@ -55,13 +55,14 @@ def deck_place_lift_setpoint(
     """데크 안착 폐루프의 다음 리프트 명령.
 
     팔레트는 포크에 강체 결속돼 있어 높이가 리프트로만 결정된다. 따라서 남은
-    잔차(z_measured - z_target)만큼 리프트를 낮추면 그대로 안착한다. 랙 픽업
-    안착 오프셋이 얼마든 실측 기준이라 상수 가정에 의존하지 않는다.
+    양의 잔차(z_measured - z_target)만큼 리프트를 낮추면 그대로 안착한다.
+    목표보다 낮아진 뒤 다시 올리면 팔레트가 내려갔다가 떠오르는 동작이 생기므로
+    이 단계는 절대로 상승 명령을 만들지 않는다.
 
     `lift_floor`는 개루프 목표에서 허용하는 최대 하강량을 강제해 폭주를 막고,
     `max_delta`는 틱당 변화량을 기존 lift step과 같은 속도로 제한한다.
     """
-    desired = lift_command - (z_measured - z_target)
+    desired = lift_command - max(0.0, z_measured - z_target)
     desired = clamp(desired, lift_floor, 2.0)
     return lift_command + clamp(desired - lift_command, -max_delta, max_delta)
 
@@ -265,7 +266,9 @@ class ForkLiftNode(Node):
         # 데크 안착 폐루프(2026-07-26). 개루프 하강이 끝난 뒤 실측 잔차를
         # 없앤다. 권장 초기값은 Codex 검수 결과를 따랐다 — [4] 임의에 가깝고
         # 시뮬 스윕으로 확정해야 한다.
-        self.declare_parameter("deck_place_tolerance", 0.010)
+        # 목표 지지면보다 높은 방향으로는 2mm까지만 허용한다. 목표를 통과한
+        # 뒤에는 다시 올리지 않고 현재 물리 자세를 즉시 deck Joint로 고정한다.
+        self.declare_parameter("deck_place_tolerance", 0.002)
         self.declare_parameter("deck_place_max_correction", 0.10)
         self.declare_parameter("deck_place_stable_sec", 0.4)
         self.declare_parameter("deck_place_stale_sec", 0.5)
@@ -1759,7 +1762,6 @@ class ForkLiftNode(Node):
             self._deck_place_lower(
                 pallet, place_lift, self._iw_place_forward_offset
             ),
-            self._wait(0.8, f"Pallet_{pallet:02d} supported on IW"),
             self._pallet_owner(
                 "deck",
                 pallet,
@@ -2886,16 +2888,32 @@ class ForkLiftNode(Node):
 
         z_target = target[2]
         error = z_measured - z_target
-        if abs(error) <= self._deck_place_tol:
-            if self._step_stable_since is None:
-                self._step_stable_since = now
-            if now - self._step_stable_since >= self._deck_place_stable_sec:
-                self.get_logger().info(
-                    f"데크 안착 폐루프 완료: 잔차={error:+.5f}m, "
-                    f"lift={self._lift_target:.5f}"
-                )
-                return True
+        if error < -0.025:
+            # Isaac의 deck 결속 게이트도 ±25mm 밖의 자세는 거부한다. 상승
+            # 복구는 금지했으므로 관통이 이 범위를 넘으면 그대로 고정하지 않고
+            # 수치가 보이는 실패로 종료한다.
+            self._fail(
+                f"데크 목표를 과도하게 통과해 고정 중단: "
+                f"잔차={error:+.5f}m, lift={self._lift_target:.5f}"
+            )
             return False
+        if error <= self._deck_place_tol:
+            # 하강 중 목표면에 처음 도달한 실제 리프트 위치를 hold한다. 기존
+            # 양방향 제어는 관성으로 목표를 지나친 뒤 상승 명령을 내렸고,
+            # 2026-07-27 bag에서는 -12.0mm까지 내려갔다가 +10.3mm로 떠올랐다.
+            # 다음 step은 대기 없이 owner를 deck으로 넘기며, Isaac FixedJoint는
+            # 이 순간의 팔레트 물리 자세를 그대로 보존한다.
+            if (
+                self._lift_feedback is not None
+                and math.isfinite(self._lift_feedback)
+            ):
+                self._lift_target = clamp(self._lift_feedback, 0.0, 2.0)
+            self._publish_command(0.0, 0.0)
+            self.get_logger().info(
+                f"데크 안착 하강 완료·현재 높이 고정: "
+                f"잔차={error:+.5f}m, lift={self._lift_target:.5f}"
+            )
+            return True
         self._step_stable_since = None
 
         lift_floor = max(0.0, step.lift - self._deck_place_max_correction)

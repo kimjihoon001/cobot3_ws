@@ -23,8 +23,8 @@ SYNTH_TARGET_Z = 0.284
 SYNTH_RESIDUAL = 0.055
 SYNTH_MEASURED_Z = SYNTH_TARGET_Z + SYNTH_RESIDUAL
 
-# 노드 기본값 (Codex 검수 권장값)
-TOL = 0.010
+# 노드 기본값
+TOL = 0.002
 MAX_CORRECTION = 0.10
 # loaded_lift_speed 0.15 m/s / control_rate 20 Hz
 MAX_DELTA = 0.15 / 20.0
@@ -80,10 +80,21 @@ def test_correction_is_clamped_to_the_floor():
     assert open_loop - lift == pytest.approx(MAX_CORRECTION, abs=1e-9)
 
 
-def test_upward_correction_when_pallet_is_too_low():
-    """지지면보다 낮으면(과압) 다시 올린다 — 게이트는 절대값 판정이다."""
+def test_never_commands_upward_when_pallet_is_below_target():
+    """목표를 지나친 뒤에도 상승시키지 않아 내려갔다 떠오르는 동작을 막는다."""
     nxt = deck_place_lift_setpoint(0.20, 0.10, 0.15, 0.10, MAX_DELTA)
-    assert nxt > 0.20
+    assert nxt == pytest.approx(0.20)
+
+
+def test_setpoint_is_monotonic_nonincreasing_across_target_crossing():
+    """양의 잔차에서 하강한 뒤 음의 잔차가 들어와도 명령은 되돌아가지 않는다."""
+    lift = 0.20
+    lowered = deck_place_lift_setpoint(
+        lift, 0.151, 0.150, 0.10, MAX_DELTA)
+    crossed = deck_place_lift_setpoint(
+        lowered, 0.145, 0.150, 0.10, MAX_DELTA)
+    assert lowered <= lift
+    assert crossed == pytest.approx(lowered)
 
 
 def test_lift_never_exceeds_the_mechanical_limit():
