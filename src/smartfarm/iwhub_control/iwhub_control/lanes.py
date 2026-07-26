@@ -27,7 +27,7 @@ BOTTOM_FREE_Y = -10.55
 TOP_FREE_Y = 10.55
 # 지게차 인계 정위치. yaw=π(−X 향함) = iw 스폰 orientation(SPAWN_YAW_DEG=180°) = iw_dock.py
 # canonical 도킹 자세. 포크는 도크 바로 위(0,14.5)에서 인계하므로 iw는 −X로 정차한다.
-DOCK = (0.0, 10.85, math.pi)
+DOCK = (0.0, 10.84885, math.pi)
 # 도크 직전 X=0 레인에서 이 Y부터 위로 곧게 +Y 접근한다(구간3 위 통로).
 DOCK_APPROACH_Y = 3.85
 
@@ -51,13 +51,14 @@ def clearance(x: float, y: float) -> float:
 
 
 # 현재 브랜치 Nav2 local costmap과 동일한 적재 외곽(base_link 프레임).
-# 전·후방 라이다 원점과 폭 0.802m 팔레트를 포함하며 아래 footprint_clear의
-# 기본 margin=0.05가 costmap footprint_padding과 같은 안전 여유를 더한다.
+# 폭 0.802m 팔레트를 포함한다. 기본 margin=0.05 적용 후 전방 라이다 원점
+# +0.65m와 실제 차체 후단 -1.0335m가 경계가 되도록 raw edge를 역산했다.
+# 이 값은 진단용이며 경로 veto에는 사용하지 않는다.
 FOOTPRINT = (
-    (0.65, 0.401),
-    (0.65, -0.401),
-    (-1.08, -0.401),
-    (-1.08, 0.401),
+    (0.60, 0.401),
+    (0.60, -0.401),
+    (-0.9835, -0.401),
+    (-0.9835, 0.401),
 )
 
 
@@ -312,24 +313,17 @@ def follow_route(
         ]
     if points[-1] != target:
         # 현재 브랜치의 접근방향 standoff를 쓰는 호출은 최종 1.2m 위치를
-        # 보존한다. 레인에서 이 점까지의 짧은 접근도 아래 swept-footprint
-        # 검사를 통과해야 하므로 배드를 가로지르는 목표는 안전하게 거부된다.
+        # 보존한다. 실제 충돌 여부는 Nav2 costmap과 local controller가 판단한다.
         points.append(target)
 
     route = _rounded_manhattan_route(
         points, start_yaw=syaw, arc_r=arc_r, step=step)
-    clear, collision_pose = footprint_clear(route)
-    if not clear:
-        raise ValueError(
-            "FOLLOW 레인 경로 footprint가 배드와 충돌: "
-            f"pose={collision_pose}"
-        )
     return route
 
 
 def dock_route(sx: float, sy: float, syaw: float, arc_r: float = 0.8,
                step: float = 0.5):
-    """iw (sx,sy,syaw) → 지게차 도크(0,10.85,+Y). 전진 전용, 시작 자세에서 연속 연결.
+    """iw (sx,sy,syaw) → 지게차 도크(0,10.84885,+Y). 전진 전용, 시작 자세에서 연속 연결.
 
     도크는 중앙 레인(X=0) 위에 있고 +Y로 접근해야 하므로:
       1) 배드 구간 안에서 출발하면 현재 세로 레인으로 가장 가까운 가로 통로까지 이동.
@@ -337,7 +331,10 @@ def dock_route(sx: float, sy: float, syaw: float, arc_r: float = 0.8,
       3) X=0 레인을 +Y로 곧게 도크까지 이동.
     적재 도킹 위치(-2.9,-9.4)는 배드 Y 구간 안이다. 여기서 곧바로 X축으로
     가로지르면 배드를 통과하므로 반드시 하단 가로 통로(y=-11.5)를 경유한다.
-    직선과 코너 원호는 접점에서 연속이며 전체 footprint sweep도 여기서 검증한다.
+    직선과 코너 원호는 접점에서 연속이다. 도크 출발 시 IW의 실제 자세가 레인
+    접선과 다르면 보수적인 정적 직사각형 sweep가 실제 자유 공간도 충돌로 오인할
+    수 있으므로, DOCK 경로는 여기서 사전 차단하지 않고 Nav2 costmap과 local
+    controller가 실시간 라이다를 포함해 충돌 여부를 판단한다.
     반환 = [(x,y,yaw), ...] (map 프레임).
     """
     dock_x, dock_y, dock_yaw = DOCK
@@ -361,13 +358,11 @@ def dock_route(sx: float, sy: float, syaw: float, arc_r: float = 0.8,
 
     route = _rounded_manhattan_route(
         points, start_yaw=float(syaw), arc_r=arc_r, step=step)
-    route.append((dock_x, dock_y, dock_yaw))
-    clear, collision_pose = footprint_clear(route)
-    if not clear:
-        raise ValueError(
-            "DOCK 레인 경로 footprint가 배드와 충돌: "
-            f"pose={collision_pose}"
-        )
+    # Nav2가 벽/인플레이션 영역 옆에서 canonical yaw(π)까지 맞추려 하면
+    # 마지막 90° 회전을 코스트맵 critic이 계속 거부해 무한 조정한다.
+    # Nav2 목표는 중앙 레인의 접근 접선(+Y)으로 끝내고, 성공 뒤
+    # mission_nav_node의 저속 DOCK_ALIGN이 직접 cmd_vel로 π까지 회전한다.
+    route.append((dock_x, dock_y, math.pi / 2.0))
     return route
 
 

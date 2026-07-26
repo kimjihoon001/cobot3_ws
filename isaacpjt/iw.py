@@ -34,6 +34,7 @@ class IwDriver(Driver):
         self._basket_pose_pub = None
         self._last_deck_geometry = None
         self._deck_geometry_error_logged = False
+        self._last_basket_slot = None
 
     def spawn(self, stage):
         self._iw.spawn(stage, self.root, POSE, yaw_deg=SPAWN_YAW_DEG)
@@ -136,13 +137,22 @@ class IwDriver(Driver):
                     (float(center[0]) - float(harvester_position[0])) ** 2
                     + (float(center[1]) - float(harvester_position[1])) ** 2
                 )
-                candidates.append((distance_xy, world))
+                candidates.append((distance_xy, world, ix, iy))
         if not candidates:
             return
 
         # 현재 통합 시나리오는 1개 적재 후 IW가 바로 지게차로 출발한다.
         # 따라서 매 시퀀스에서 MM에 가장 가까운 KLT 한 칸을 release 목표로 쓴다.
-        _, world = min(candidates, key=lambda candidate: candidate[0])
+        _, world, ix, iy = min(candidates, key=lambda candidate: candidate[0])
+        # 어느 칸을 골랐고 그 칸 원점이 맵 어디인지 한 번만 남긴다. 발행 XY가
+        # KLT 중앙인지 확인하려면 이 값과 팔레트 격자(pitch 0.31/0.25)를 대조한다.
+        chosen = (ix, iy)
+        if chosen != self._last_basket_slot:
+            self._last_basket_slot = chosen
+            origin = world.ExtractTranslation()
+            print(f"[IW Basket] KLT_{ix}{iy} 선택 — prim 원점 map="
+                  f"({float(origin[0]):.4f}, {float(origin[1]):.4f}, "
+                  f"{float(origin[2]):.4f})")
         # KLT 높이 0.146m × scale 0.85의 윗면보다 약 5cm 위.
         release = world.Transform(Gf.Vec3d(0.0, 0.0, 0.11205))
         quat = world.ExtractRotationQuat().GetNormalized()
@@ -165,12 +175,22 @@ class IwDriver(Driver):
         )
 
     def set_warehouse_pallet_attached(
-        self, attached: bool, pallet_id: int
+        self,
+        attached: bool,
+        pallet_id: int,
+        forward_offset: float = 0.0,
     ) -> bool:
         return bool(
             self._warehouse_dock
-            and self._warehouse_dock.set_pallet_on_deck(attached, pallet_id)
+            and self._warehouse_dock.set_pallet_on_deck(
+                attached, pallet_id, forward_offset
+            )
         )
+
+    def warehouse_deck_surface(self, forward_offset: float = 0.0):
+        if self._warehouse_dock is None:
+            raise ValueError("IW warehouse dock controller가 없습니다")
+        return self._warehouse_dock._deck_surface(forward_offset)
 
     def has_warehouse_pallet_attached(self) -> bool:
         return bool(

@@ -44,7 +44,7 @@ class MMMotionBridge(Node):
         # 기존 harvest_moveit/grasp_proto의 스쿱 수용 정밀도와 동일하다.
         self.declare_parameter("position_tolerance_m", 0.0025)
         self.declare_parameter("planning_time_sec", 8.0)
-        self.declare_parameter("velocity_scale", 0.50)
+        self.declare_parameter("velocity_scale", 0.65)
         self.declare_parameter("acceleration_scale", 0.30)
         self.declare_parameter(
             "planning_pipeline", "pilz_industrial_motion_planner")
@@ -201,7 +201,7 @@ class MMMotionBridge(Node):
                 "GO_HOME",
                 self._joint_goal(
                     HOME_Q,
-                    velocity_scale=0.70 if fast else None,
+                    velocity_scale=0.91 if fast else None,
                     acceleration_scale=0.50 if fast else None,
                 ),
             )
@@ -242,13 +242,17 @@ class MMMotionBridge(Node):
                 request_id, phase,
                 self._joint_goal(
                     positions,
-                    velocity_scale=0.70 if fast else None,
+                    velocity_scale=0.91 if fast else None,
                     acceleration_scale=0.50 if fast else None,
                 ))
             return
         align = command.get("azimuth_align")
         if isinstance(align, dict):
             self._start_azimuth_align(align)
+            return
+        wrist = command.get("wrist_rotate")
+        if isinstance(wrist, dict):
+            self._start_wrist_rotate(wrist)
             return
         bed_view = command.get("moveit_bed_view")
         if isinstance(bed_view, dict):
@@ -364,6 +368,56 @@ class MMMotionBridge(Node):
         self._queue(
             request_id, "BASKET_AZIMUTH_ALIGN",
             self._joint_goal(positions))
+
+    def _start_wrist_rotate(self, request: dict) -> None:
+        """현재 자세에서 joint_1~5를 고정하고 joint_6만 지정 각도 회전한다."""
+        try:
+            request_id = int(request.get("id", 0))
+            phase = str(request.get("phase", "BASKET_WRIST_ROTATE"))
+            angle = float(request["angle_rad"])
+            if (
+                phase != "BASKET_WRIST_ROTATE"
+                or not math.isfinite(angle)
+                or abs(abs(angle) - math.pi) > 1e-6
+            ):
+                raise ValueError("wrist rotate request")
+        except (KeyError, TypeError, ValueError):
+            self.get_logger().warning("잘못된 wrist_rotate 형식")
+            return
+        if not self._joint_state_ready():
+            self.get_logger().error(
+                "BASKET_WRIST_ROTATE: 최신 joint_states 없음 — 릴리즈 금지")
+            self._active_id = request_id
+            self._active_phase = phase
+            self._publish_motion(False, phase)
+            return
+
+        positions = {
+            name: float(self._joint_positions[name])
+            for name in (f"joint_{index}" for index in range(1, 7))
+        }
+        current = positions["joint_6"]
+        target = current + angle
+        # joint_6 범위는 ±2π다. 요청한 +180°가 상한을 넘을 때만 물리적으로
+        # 동일한 -180° 목표를 사용한다.
+        if target > 2.0 * math.pi:
+            target -= 2.0 * math.pi
+        elif target < -2.0 * math.pi:
+            target += 2.0 * math.pi
+        positions["joint_6"] = target
+        self.get_logger().info(
+            "플레이스 손목 회전: joint_1~5 고정, "
+            f"joint_6 {math.degrees(current):.1f}° → "
+            f"{math.degrees(target):.1f}° (Δ=180.0°)")
+        self._queue(
+            request_id,
+            phase,
+            self._joint_goal(
+                positions,
+                velocity_scale=0.80,
+                acceleration_scale=0.45,
+            ),
+        )
 
     def _base_goal(self) -> MoveGroup.Goal:
         goal = MoveGroup.Goal()
@@ -662,10 +716,10 @@ class MMMotionBridge(Node):
         # 전반적으로 조금 빠르게. GRASP(0.05)·CAPTURE_TRIM(0.035)은 명시 velocity_scale
         # 오버라이드라 그대로 저속 유지된다. LIN 은 삽입/후퇴 공용이므로 과하지 않게.
         goal.request.max_velocity_scaling_factor = {
-            "OMPL": 0.35,
-            "PTP": 0.40,
-            "LIN": 0.15,
-            "CIRC": 0.15,
+            "OMPL": 0.455,
+            "PTP": 0.52,
+            "LIN": 0.195,
+            "CIRC": 0.195,
         }[motion] if velocity_scale is None else velocity_scale
         goal.request.max_acceleration_scaling_factor = 0.30
         constraint = Constraints()

@@ -1,9 +1,6 @@
 # 지게차가 IW 도킹 잠금에 실패했을 때 Nav2 정밀 재정렬을 요청한다.
 int32 attempt
 string reason
-float64 target_x
-float64 target_y
-float64 target_yaw
 ---
 bool accepted
 string message

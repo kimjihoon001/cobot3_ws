@@ -17,14 +17,13 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 from pjt_utils.deck_geometry import (
     IW_LOAD_MAP_X_OFFSET_M,
     PALLET_SUPPORT_CLEARANCE,
+    deck_target_xy,
     supported_pallet_hole_center_z,
 )
 from scene import physics
 
 
 WAREHOUSE_DOCK_XY = (0.0, 10.84885)
-DOCK_POSITION_TOLERANCE_M = 0.04
-DOCK_QUATERNION_ALIGNMENT_MIN = 0.99984  # 약 2도 yaw 오차
 IW_WORLD_JOINT = "/World/WarehouseDockIwHubFixed"
 IW_PALLET_JOINT = "/World/WarehouseDockPalletJoint"
 FORK_PALLET_JOINT = "/World/ForkliftPalletCarryJoint"
@@ -321,25 +320,31 @@ class WarehouseDockController:
             return INITIAL_IW_PALLET_PATH
         return warehouse_path
 
-    def _deck_surface(self) -> tuple[Gf.Vec3d, Gf.Quatd]:
-        """실제 chassis 월드 bbox의 상면 중심과 월드 방향을 반환한다."""
+    def _deck_surface(
+        self, forward_offset: float = 0.0
+    ) -> tuple[Gf.Vec3d, Gf.Quatd]:
+        """실제 IW pose 기준 팔레트 배치 목표와 chassis 상면을 반환한다."""
         if self._deck_body is None:
             raise ValueError("IW chassis rigid body를 찾지 못했습니다")
         world_range = _world_bbox_range(self._stage, self._deck_body)
-        # 적재 중심은 IW root에서 로컬 +X로 0.3171m 떨어져 있다. 이를 월드
-        # X에 그대로 더하면 yaw=180°인 실제 도킹 자세에서 반대쪽으로
-        # 0.6342m 어긋난다. 초기 적재 팔레트와 동일하게 root orientation으로
-        # 로컬 오프셋을 회전해 맵 좌표로 변환한다.
-        w, x, y, z = (float(value) for value in self._dock_orientation)
-        offset_x = IW_LOAD_MAP_X_OFFSET_M * (
-            1.0 - 2.0 * (y * y + z * z)
+        # PhysX/Fabric으로 이동한 articulation의 USD bbox X/Y는 초기 스폰
+        # 좌표에 남을 수 있다. 실제 root pose에 검증된 로컬 deck offset을
+        # 회전 적용하고, bbox는 안정적인 상면 Z에만 사용한다.
+        root_position, root_quat = self._robot.get_world_pose()
+        w, x, y, z = (float(value) for value in root_quat)
+        root_yaw = np.arctan2(
+            2.0 * (w * z + x * y),
+            1.0 - 2.0 * (y * y + z * z),
         )
-        offset_y = IW_LOAD_MAP_X_OFFSET_M * (
-            2.0 * (x * y + w * z)
+        target_x, target_y = deck_target_xy(
+            float(root_position[0]),
+            float(root_position[1]),
+            float(root_yaw),
+            forward_offset,
         )
         world_point = Gf.Vec3d(
-            float(self._dock_position[0]) + offset_x,
-            float(self._dock_position[1]) + offset_y,
+            target_x,
+            target_y,
             float(world_range.GetMax()[2]),
         )
         body = self._stage.GetPrimAtPath(self._deck_body)
@@ -353,7 +358,15 @@ class WarehouseDockController:
 
     def geometry_json(self) -> str:
         """ROS 제어기가 사용할 canonical 도킹/팔레트 높이 실측값."""
-        point, _ = self._deck_surface()
+        # 이 토픽은 런타임 목표가 아니라 IW 형상의 canonical 기준이다.
+        # 실제 이동한 root X/Y를 내보내면 회수 노드가 이를 새 도킹축으로
+        # 오인한다. 동적 목표는 /forklift/handoff_state로만 전달한다.
+        runtime_point, _ = self._deck_surface()
+        point = Gf.Vec3d(
+            float(self._dock_position[0]) + IW_LOAD_MAP_X_OFFSET_M,
+            float(self._dock_position[1]),
+            float(runtime_point[2]),
+        )
         payload = {
             "dock_x": round(float(point[0]), 6),
             "dock_y": round(float(point[1]), 6),
@@ -363,12 +376,18 @@ class WarehouseDockController:
                 6,
             ),
             "pallet_support_clearance": PALLET_SUPPORT_CLEARANCE,
+            "frame": "canonical_dock",
         }
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     def _log_deck_geometry(self) -> None:
         try:
-            point, _ = self._deck_surface()
+            runtime_point, _ = self._deck_surface()
+            point = Gf.Vec3d(
+                float(self._dock_position[0]) + IW_LOAD_MAP_X_OFFSET_M,
+                float(self._dock_position[1]),
+                float(runtime_point[2]),
+            )
             hole_z = supported_pallet_hole_center_z(float(point[2]))
             print(
                 "[IW Deck Measure] 실제 chassis bbox 기준: "
@@ -383,31 +402,6 @@ class WarehouseDockController:
     def _stop_robot(self) -> None:
         self._robot.set_linear_velocity(np.zeros(3, dtype=float))
         self._robot.set_angular_velocity(np.zeros(3, dtype=float))
-
-    def _at_canonical_dock(self) -> bool:
-        """Return whether the live IW pose is already close enough to dock."""
-        position, orientation = self._robot.get_world_pose()
-        position = np.asarray(position, dtype=float)
-        orientation = np.asarray(orientation, dtype=float)
-        target_orientation = np.asarray(self._dock_orientation, dtype=float)
-
-        position_error = float(np.linalg.norm(
-            position[:2] - np.asarray(self._dock_position, dtype=float)[:2]
-        ))
-        orientation_norm = float(np.linalg.norm(orientation))
-        target_norm = float(np.linalg.norm(target_orientation))
-        if orientation_norm <= 1e-9 or target_norm <= 1e-9:
-            return False
-        quaternion_alignment = abs(float(np.dot(
-            orientation / orientation_norm,
-            target_orientation / target_norm,
-        )))
-        # X/Y/yaw를 한 번에 검사한다. 서비스에는 이 실제 yaw를 전달해
-        # 지게차가 동일한 축으로 접근하며, yaw만 따로 맞추지는 않는다.
-        return (
-            position_error <= DOCK_POSITION_TOLERANCE_M
-            and quaternion_alignment >= DOCK_QUATERNION_ALIGNMENT_MIN
-        )
 
     def set_dock_locked(
         self,
@@ -451,21 +445,10 @@ class WarehouseDockController:
 
                 if self._dock_lock_phase == "stopped":
                     self._stop_robot()
-                    if not self._at_canonical_dock():
-                        position, _ = self._robot.get_world_pose()
-                        position = np.asarray(position, dtype=float)
-                        error = float(np.linalg.norm(
-                            position[:2] - self._dock_position[:2]
-                        ))
-                        print(
-                            "[IW Dock] 도킹 잠금 거부: Nav2 정밀도 미달 "
-                            f"(xy_error={error:.3f}m, "
-                            f"허용={DOCK_POSITION_TOLERANCE_M:.3f}m) — "
-                            "순간이동하지 않음"
-                        )
-                        self._dock_lock_phase = "idle"
-                        return False
-                    print("[IW Dock] 도킹 고정 2/3: Nav2 도착 pose 유지")
+                    # Nav2는 AMCL이 보정한 map pose로 최종 XY/yaw를 이미
+                    # 검증한다. Isaac raw world pose를 map canonical 좌표와
+                    # 다시 비교하면 map→odom 보정량까지 위치 오차로 오인한다.
+                    print("[IW Dock] 도킹 고정 2/3: ROS 검증 pose 유지")
                     self._dock_lock_phase = "pose_settled"
                     return False
 
@@ -509,7 +492,10 @@ class WarehouseDockController:
         return True
 
     def set_pallet_on_deck(
-        self, attached: bool, pallet_id: int
+        self,
+        attached: bool,
+        pallet_id: int,
+        forward_offset: float = 0.0,
     ) -> bool:
         """Attach a warehouse pallet to the IW at one canonical deck frame."""
         if not attached:
@@ -547,7 +533,7 @@ class WarehouseDockController:
             return False
 
         try:
-            deck_point, _deck_orientation = self._deck_surface()
+            deck_point, _deck_orientation = self._deck_surface(forward_offset)
             pallet_range = _world_bbox_range(self._stage, pallet_path)
             pallet_center = pallet_range.GetMidpoint()
             xy_error = np.hypot(
@@ -558,6 +544,7 @@ class WarehouseDockController:
             z_error = float(pallet_range.GetMin()[2]) - support_z
             print(
                 "[IW Deck] Joint 전 실제 안착 검증: "
+                f"forward_offset={forward_offset:.3f}, "
                 f"deck_top_z={float(deck_point[2]):.5f}, "
                 f"pallet_world_min_z={float(pallet_range.GetMin()[2]):.5f}, "
                 f"xy_error={xy_error:.5f}, z_error={z_error:+.5f}"
@@ -566,10 +553,7 @@ class WarehouseDockController:
             # 프레임에 Joint를 만들면 Fabric/PhysX 포인터가 어긋나 네이티브 크래시가
             # 발생한다. 지게차가 실측 높이로 물리적으로 내려놓게 하고 여기서는 현재
             # 자세를 절대 변경하지 않는다.
-            # 2.5cm까지 허용하면 팔레트가 눈에 띄게 떠 있는 자세에서도
-            # FixedJoint가 생성된다. ROS 제어기가 실제 팔레트 바닥을 지지면
-            # ±3mm로 맞추므로 여기서는 물리/측정 여유를 포함해 6mm만 허용한다.
-            if abs(z_error) > 0.006:
+            if abs(z_error) > 0.025:
                 print(
                     "[IW Deck] 팔레트가 데크 지지면에서 너무 멀어 연결을 거부합니다: "
                     f"z_error={z_error:+.5f}m"

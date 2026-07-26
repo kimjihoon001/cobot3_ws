@@ -21,6 +21,34 @@ PALLET_SUPPORT_CLEARANCE = 0.002
 IW_LOAD_MAP_X_OFFSET_M = 0.3171
 
 
+def deck_target_xy(
+    root_x: float,
+    root_y: float,
+    root_yaw: float,
+    forward_offset: float = 0.0,
+) -> tuple[float, float]:
+    """현재 IW root 자세에서 팔레트 배치 목표의 월드 X/Y를 계산한다.
+
+    canonical IW는 yaw=180°일 때 root보다 world +X로 0.3171m 떨어진 곳이
+    데크 중심이다. 따라서 root 로컬 좌표에서는 deck=(-0.3171, 0)이다.
+    추가 배치량은 도킹한 지게차의 전진축(IW yaw + 90°)으로 적용한다.
+    """
+    values = (root_x, root_y, root_yaw, forward_offset)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("IW 자세와 배치 오프셋은 유한한 값이어야 합니다")
+    if not 0.0 <= forward_offset <= 0.8:
+        raise ValueError("배치 전진 오프셋은 0.0~0.8m 사이여야 합니다")
+
+    deck_local_x = -IW_LOAD_MAP_X_OFFSET_M
+    deck_x = root_x + deck_local_x * math.cos(root_yaw)
+    deck_y = root_y + deck_local_x * math.sin(root_yaw)
+    fork_heading = root_yaw + math.pi / 2.0
+    return (
+        deck_x + forward_offset * math.cos(fork_heading),
+        deck_y + forward_offset * math.sin(fork_heading),
+    )
+
+
 def supported_pallet_origin_z(
     deck_top_z: float,
     pallet_local_min_z: float,

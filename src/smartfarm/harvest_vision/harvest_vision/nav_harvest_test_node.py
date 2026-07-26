@@ -103,22 +103,39 @@ class NavHarvestTestNode(Node):
         # 수확점(-0.54,-8.19)에서 베드 장축 방향으로 올라간 다음 서쪽(-X)을
         # 향하는 자세이므로 최종 yaw는 pi다.
         # ── MM 피항 (IW 하역 출발 전) ──────────────────────────────────
-        # 최종 피항점과, 회전을 수행할 교차통로 Y. 값은 2026-07-25
-        # sim_diag_204420의 static map·global costmap 실측으로 검증했다:
-        #   (0,-3.85)   footprint 최대비용 0, 중심→장애물 1.75 m, 전 방위 회전 가능
-        #   (-2.90,-3.85) footprint 최대비용 0, 중심→장애물 1.75 m
-        # 실행 시점에도 costmap으로 다시 검사하고, 막혀 있으면 근처 free pose로
-        # 옮긴다(_nearest_clear). 좁은 배드 옆에서는 회전하지 않는다.
-        self.declare_parameter("iw_yield_x", -2.90)
-        self.declare_parameter("iw_yield_y", -3.85)
-        self.declare_parameter("iw_yield_yaw", math.pi)
+        # 중간 waypoint를 만들지 않는다. 사용자가 지정한 최종 자세로 goal을
+        # 하나만 보내고, 그 goal이 성공해야 IW 출발을 허가한다. 경로 자체는
+        # Nav2에 맡긴다 — 2026-07-25 23:38 런에서 0.43 m짜리 중간 goal이
+        # MM 몸길이(0.96 m)보다 짧아 DWB가 40초간 제자리에서 진동했고,
+        # 같은 날 최종 목적지만 찍었을 때는 정상 주행했다.
+        #   iw_yield_goal_*: 출처[1] — 사용자가 RViz로 직접 찍은 최종 피항
+        #     자세 그대로다. sim_diag_20260725_231443 bag의
+        #     /harvester_0/goal_pose 두 번째(최종) 메시지.
+        #   iw_yield_lane_x: IW가 북상하는 세로 레인 X. 경로 생성에는 쓰지
+        #     않고, IW 조기 출발 허가용 측방 여유 계산에만 쓴다.
+        self.declare_parameter("iw_yield_lane_x", 0.0)
+        self.declare_parameter("iw_yield_goal_x", -1.4009)
+        self.declare_parameter("iw_yield_goal_y", -3.5716)
+        self.declare_parameter("iw_yield_goal_yaw", 3.0339)
+        # ── 피항 안전검사 (sim_diag_20260725_플레이스 이후 충돌 기준) ─────
+        # 검사 기준은 lethal/occupied(254)뿐이다. inflation(253)은 통과시킨다 —
+        # 수확 위치는 이랑 옆이라 시작 footprint가 항상 253 위에 얹혀 있고,
+        # 그것만으로 실패시키면 피항 자체가 불가능하다(START_BLOCKED 회귀).
         self.declare_parameter("yield_costmap_topic",
                                "global_costmap/costmap_raw")
-        # harvester_nav2.yaml의 MM footprint 반길이/반폭.
+        # harvester_nav2.yaml(moveit_nav2.yaml)의 MM footprint 반길이/반폭.
         self.declare_parameter("yield_footprint_half_length_m", 0.48)
         self.declare_parameter("yield_footprint_half_width_m", 0.40)
-        # footprint 검사 실패 시 free pose를 찾을 탐색 반경.
+        # waypoint가 막혔을 때 레인/진행방향을 유지한 채 흔들어볼 탐색 반경.
         self.declare_parameter("yield_pose_search_span_m", 0.60)
+        # ── IW 조기 출발 허가 ──────────────────────────────────────────
+        # 마지막 단계까지 기다리면 한 단계라도 늦어질 때 IW가 영영 못 움직인다.
+        # MM footprint가 IW 주행 레인에서 이만큼 벗어나면 그 자리에서 허가한다.
+        # 유도[2] — IW global footprint 반폭 0.451 + inscribed 0.436 = 0.887.
+        # ★사용자 지정 피항점은 서향 기준 여유가 0.921 m뿐이라(동쪽 모서리
+        #   -1.4009+0.48=-0.921) 요구치를 3.4 cm 넘긴다. 임계를 0.90으로 두면
+        #   최종 자세 직전에야 허가가 나가므로 이론 최소값에 맞춘다.
+        self.declare_parameter("iw_release_clearance_m", 0.887)
 
         latched = QoSProfile(
             depth=1,
@@ -167,7 +184,7 @@ class NavHarvestTestNode(Node):
             self._nav_status_callback,
             10,
         )
-        # 피항 단계 좌표를 실제 costmap으로 검증하기 위한 구독.
+        # 피항 waypoint를 실제 costmap으로 검증한다.
         self.create_subscription(
             Costmap,
             str(self.get_parameter("yield_costmap_topic").value),
@@ -245,7 +262,12 @@ class NavHarvestTestNode(Node):
         # 지나간 단계의 늦은 action status가 다음 단계를 완료 처리하지 않도록
         # 피항이 발행한 모든 goal ID를 따로 모아둔다.
         self._yield_goal_ids: set[bytes] = set()
-        self._costmap = None
+        self._costmap: Costmap | None = None
+        self._yield_goal_handle = None
+        # 피항이 시작된 순간부터 IW 복귀까지 True. 이 동안 MM은 수확 게이트를
+        # 열지 않고, 주행 도착을 "수확 위치 도착"으로 처리하지도 않는다.
+        self._yield_active = False
+        self._yield_released = False
         fixed_delay = float(
             self.get_parameter("fixed_goal_send_delay_sec").value)
         self._fixed_goal_deadline_ns = (
@@ -391,6 +413,10 @@ class NavHarvestTestNode(Node):
                 elif goal_id in self._yield_goal_ids:
                     # 지난 단계의 늦은 status — 다음 단계를 완료 처리하지 않는다.
                     continue
+                elif self._yield_active:
+                    # 피항 중 수동(RViz) 목표 도착 — 팔 홈/베드뷰/탐색으로
+                    # 넘어가면 그대로 다음 파지 준비가 된다. 정지만 한다.
+                    self._publish_status("MM_YIELDING_MANUAL_GOAL_REACHED")
                 else:
                     self._schedule_post_nav_manipulation()
             elif entry.status in (GoalStatus.STATUS_CANCELED,
@@ -623,8 +649,19 @@ class NavHarvestTestNode(Node):
 
     def _iw_yield_request_callback(self, msg: Bool) -> None:
         """IW 하역 출발 전에 MM을 교차통로 옆 레인으로 이동시킨다."""
-        if not msg.data or not self._iw_full:
+        if not msg.data:
             return
+        if not self._iw_full:
+            # 코디네이터만 재시작하면 메모리의 적재 상태는 사라지지만 IW는
+            # WAITING_MM_YIELD에서 request=true를 계속 유지한다. 이 요청은
+            # IW가 PREPARE_FORKLIFT까지 완료했다는 권위 있는 복구 신호이므로
+            # 재수확으로 돌아가지 말고 피항 상태를 복원한다.
+            self._iw_full = True
+            self._placed = True
+            self._publish_enable(False)
+            self._publish_status("MM_YIELD_STATE_RECOVERED_FROM_IW_REQUEST")
+            self.get_logger().warning(
+                "IW 피항 요청으로 재시작 전 적재 상태 복원")
         if (self._yield_goal_pending or self._yield_goal_id is not None
                 or self._active_goal is not None):
             return
@@ -642,6 +679,8 @@ class NavHarvestTestNode(Node):
         self._yield_stages = stages
         self._yield_stage_index = 0
         self._yield_goal_ids = set()
+        self._yield_active = True
+        self._yield_released = False
         self.get_logger().info(
             "MM 피항 경로 " + " → ".join(
                 f"{label}({x:.2f},{y:.2f},{math.degrees(yaw):.0f}°)"
@@ -661,6 +700,7 @@ class NavHarvestTestNode(Node):
             return
         goal_id = bytes(handle.goal_id.uuid)
         self._yield_goal_id = goal_id
+        self._yield_goal_handle = handle
         self._yield_goal_ids.add(goal_id)
         self._known_goals.add(goal_id)
         self._active_goal = goal_id
@@ -668,11 +708,18 @@ class NavHarvestTestNode(Node):
         self._publish_status(
             f"MM_YIELDING_{self._yield_stage_index + 1}_{label}")
 
+    # ── 피항 costmap/footprint 검사 ────────────────────────────────────
+    # nav2_costmap_2d 상수: 254 = LETHAL_OBSTACLE(실제 장애물),
+    # 253 = INSCRIBED_INFLATED_OBSTACLE, 255 = NO_INFORMATION.
+    # 우리는 254만 통행 불가로 본다. 253은 inflation이라 통과시킨다.
+    LETHAL_COST = 254
+    UNKNOWN_COST = 255
+
     def _costmap_callback(self, msg: Costmap) -> None:
         self._costmap = msg
 
     def _costmap_cost(self, x: float, y: float) -> int:
-        """map 좌표의 costmap 비용. costmap 밖이면 -1."""
+        """map 좌표의 costmap 비용. costmap이 없거나 범위 밖이면 -1."""
         grid = self._costmap
         if grid is None:
             return -1
@@ -684,32 +731,51 @@ class NavHarvestTestNode(Node):
             return -1
         return int(grid.data[j * info.size_x + i])
 
-    def _footprint_clear(self, x: float, y: float, yaw: float) -> bool:
-        """MM 전체 footprint 셀이 inscribed(253) 미만인가."""
-        if self._costmap is None:
-            return False
+    def _footprint_cells(self, x: float, y: float, yaw: float):
+        """(x,y,yaw) 자세의 MM footprint를 덮는 셀 비용을 순회한다."""
         half_l = float(self.get_parameter(
             "yield_footprint_half_length_m").value)
         half_w = float(self.get_parameter(
             "yield_footprint_half_width_m").value)
-        step = max(0.025, float(self._costmap.metadata.resolution))
+        step = max(0.025, float(self._costmap.metadata.resolution)
+                   if self._costmap is not None else 0.05)
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
-        length_steps = int(2.0 * half_l / step) + 1
-        width_steps = int(2.0 * half_w / step) + 1
-        for a in range(length_steps + 1):
-            body_x = -half_l + min(2.0 * half_l, a * step)
-            for b in range(width_steps + 1):
-                body_y = -half_w + min(2.0 * half_w, b * step)
-                cost = self._costmap_cost(
-                    x + cos_y * body_x - sin_y * body_y,
-                    y + sin_y * body_x + cos_y * body_y)
-                if cost < 0 or cost >= 253:
-                    return False
+        a = -half_l
+        while a <= half_l + 1e-9:
+            b = -half_w
+            while b <= half_w + 1e-9:
+                yield self._costmap_cost(
+                    x + cos_y * a - sin_y * b,
+                    y + sin_y * a + cos_y * b)
+                b += step
+            a += step
+
+    def _footprint_lethal_free(self, x: float, y: float, yaw: float) -> bool:
+        """footprint 안에 lethal(254) 셀이 없는가. inflation(253)은 허용."""
+        if self._costmap is None:
+            return False
+        for cost in self._footprint_cells(x, y, yaw):
+            if cost < 0:                    # costmap 밖 — 검증 불가
+                return False
+            if cost == self.LETHAL_COST:
+                return False
         return True
 
-    def _nearest_clear(self, x, y, yaw, axis: str):
-        """의도를 유지한 채 한 축으로만 흔들어 가장 가까운 free pose를 찾는다."""
-        if self._footprint_clear(x, y, yaw):
+    def _footprint_max_cost(self, x: float, y: float, yaw: float) -> int:
+        """footprint 최대 비용. 미지(255)는 비용 비교에서 제외한다."""
+        worst = 0
+        for cost in self._footprint_cells(x, y, yaw):
+            if cost < 0 or cost == self.UNKNOWN_COST:
+                continue
+            worst = max(worst, cost)
+        return worst
+
+    def _pose_clear(self, x: float, y: float, yaws) -> bool:
+        return all(self._footprint_lethal_free(x, y, yaw) for yaw in yaws)
+
+    def _nearest_free(self, x: float, y: float, yaws, axis: str):
+        """레인/진행방향을 유지한 채 한 축으로만 흔들어 free pose를 찾는다."""
+        if self._pose_clear(x, y, yaws):
             return x, y
         span = float(self.get_parameter("yield_pose_search_span_m").value)
         step = 0.05
@@ -718,7 +784,7 @@ class NavHarvestTestNode(Node):
             for sign in (1.0, -1.0):
                 cand_x = x + (offset * sign if axis == "x" else 0.0)
                 cand_y = y + (offset * sign if axis == "y" else 0.0)
-                if self._footprint_clear(cand_x, cand_y, yaw):
+                if self._pose_clear(cand_x, cand_y, yaws):
                     self.get_logger().warning(
                         f"피항 waypoint 보정: ({x:.2f},{y:.2f}) → "
                         f"({cand_x:.2f},{cand_y:.2f}) [{axis}축 {offset:.2f}m]")
@@ -726,21 +792,61 @@ class NavHarvestTestNode(Node):
             offset += step
         return None
 
-    def _lane_center_x(self, x0: float, y0: float) -> float | None:
-        """현재 Y에서 로봇이 있는 자유 구간의 중심 X. 좁은 배드 통로 중심 복귀용."""
-        if self._costmap_cost(x0, y0) >= 253:
+    def _lane_clearance(self):
+        """MM footprint가 IW 주행 레인에서 얼마나 물러났는지(m). TF 실패 시 None.
+
+        IW는 lane_x 세로 레인을 타고 북상한다. MM은 그 서쪽으로 빠지므로,
+        footprint의 가장 동쪽(레인 쪽) 모서리와 레인 중심 사이 거리를 본다.
+        """
+        try:
+            transform = self._buffer.lookup_transform(
+                str(self.get_parameter("map_frame").value),
+                str(self.get_parameter("base_frame").value),
+                rclpy.time.Time(), timeout=Duration(seconds=0.2))
+        except TransformException:
             return None
-        step = 0.05
-        limit = 2.0
-        low = high = x0
-        while x0 - low < limit and self._costmap_cost(low - step, y0) in range(0, 253):
-            low -= step
-        while high - x0 < limit and self._costmap_cost(high + step, y0) in range(0, 253):
-            high += step
-        return (low + high) / 2.0
+        x = float(transform.transform.translation.x)
+        y = float(transform.transform.translation.y)
+        rotation = transform.transform.rotation
+        yaw = 2.0 * math.atan2(float(rotation.z), float(rotation.w))
+        half_l = float(self.get_parameter(
+            "yield_footprint_half_length_m").value)
+        half_w = float(self.get_parameter(
+            "yield_footprint_half_width_m").value)
+        cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+        east = max(x + cos_y * a - sin_y * b
+                   for a in (-half_l, half_l) for b in (-half_w, half_w))
+        lane_x = float(self.get_parameter("iw_yield_lane_x").value)
+        return lane_x - east, y
+
+    def _maybe_release_iw_by_clearance(self) -> None:
+        """마지막 단계를 기다리지 않고, 레인에서 충분히 비켰으면 IW를 보낸다.
+
+        전 단계 완료를 기다리면 한 단계라도 실패/지연될 때 IW가 영영 못
+        움직인다. 통과에 필요한 여유만 확보되면 그 시점에 허가한다.
+        """
+        measured = self._lane_clearance()
+        if measured is None:
+            return
+        clearance, _ = measured
+        required = float(self.get_parameter("iw_release_clearance_m").value)
+        if clearance < required:
+            return
+        self._yield_released = True
+        self._iw_yield_complete_pub.publish(Bool(data=True))
+        self._publish_status("MM_YIELD_CLEAR_IW_RELEASED")
+        self.get_logger().info(
+            f"MM이 IW 레인에서 {clearance:.2f} m 비켰다(필요 {required:.2f} m) "
+            "→ 남은 피항 단계와 무관하게 IW 하역 출발 허가")
+
+    def _cancel_yield_goal(self) -> None:
+        handle = self._yield_goal_handle
+        self._yield_goal_handle = None
+        if handle is not None:
+            handle.cancel_goal_async()
 
     def _build_yield_stages(self):
-        """실측 pose·costmap에서 단계별 목표를 만든다. 실패하면 None."""
+        """현재 pose에서 하드코딩 3단계 피항 경로를 만든다. 실패하면 None."""
         map_frame = str(self.get_parameter("map_frame").value)
         base_frame = str(self.get_parameter("base_frame").value)
         try:
@@ -758,50 +864,33 @@ class NavHarvestTestNode(Node):
             return None
         x0 = float(transform.transform.translation.x)
         y0 = float(transform.transform.translation.y)
-        corridor_y = float(self.get_parameter("iw_yield_y").value)
-        final_x = float(self.get_parameter("iw_yield_x").value)
-        final_yaw = float(self.get_parameter("iw_yield_yaw").value)
-        north = math.pi / 2.0 if corridor_y > y0 else -math.pi / 2.0
+        rotation = transform.transform.rotation
+        yaw0 = 2.0 * math.atan2(float(rotation.z), float(rotation.w))
+        goal_x = float(self.get_parameter("iw_yield_goal_x").value)
+        goal_y = float(self.get_parameter("iw_yield_goal_y").value)
+        goal_yaw = float(self.get_parameter("iw_yield_goal_yaw").value)
 
-        lane_x = self._lane_center_x(x0, y0)
-        if lane_x is None:
+        # 0. 시작점은 occupied일 때만 실패시킨다. 수확 자세는 이랑 옆이라
+        #    footprint가 inflation(253) 안에 있는 게 정상이고, 그것만으로
+        #    막으면 피항을 아예 시작할 수 없다.
+        if not self._footprint_lethal_free(x0, y0, yaw0):
             self.get_logger().error(
-                f"MM 피항: 현재 위치({x0:.2f},{y0:.2f})가 이미 inflated 영역")
-            self._publish_status("ERROR_MM_YIELD_START_BLOCKED")
+                f"MM 피항: 시작 footprint가 occupied({x0:.2f},{y0:.2f})")
+            self._publish_status("ERROR_MM_YIELD_START_OCCUPIED")
             return None
 
-        stages: list[tuple[str, float, float, float]] = []
-        # 1a. 좁은 배드 통로에서는 먼저 레인 중심으로 붙는다. 이 정렬 없이
-        #     대각선으로 나가면 footprint가 이랑 inflation으로 들어가 planner가
-        #     경로를 못 만든다(2026-07-25 sim_diag_204420 실패 원인).
-        if abs(lane_x - x0) > 0.05:
-            spot = self._nearest_clear(lane_x, y0, north, "x")
-            if spot is None:
-                self._publish_status("ERROR_MM_YIELD_NO_LANE_CENTER")
-                return None
-            stages.append(("LANE_CENTER", spot[0], spot[1], north))
-            lane_x = spot[0]
-        # 1b. 레인을 따라 교차통로 중심까지 직진(횡이동 없음).
-        spot = self._nearest_clear(lane_x, corridor_y, north, "y")
-        if spot is None:
-            self._publish_status("ERROR_MM_YIELD_NO_CORRIDOR")
-            return None
-        corridor_point = spot
-        stages.append(("CORRIDOR", spot[0], spot[1], north))
-        # 2. 교차통로 중심에서만 회전한다(좁은 배드 옆 회전 금지).
-        if not self._footprint_clear(corridor_point[0], corridor_point[1],
-                                     final_yaw):
-            self._publish_status("ERROR_MM_YIELD_NO_TURN_SPACE")
-            return None
-        stages.append(("TURN", corridor_point[0], corridor_point[1],
-                       final_yaw))
-        # 3. IW 반대쪽 최종 피항점.
-        spot = self._nearest_clear(final_x, corridor_point[1], final_yaw, "x")
+        # 1. 최종 피항 자세 하나만 보낸다. 중간 waypoint를 끼우지 않는다 —
+        #    2026-07-25 23:38 런에서 0.43 m짜리 정렬 goal이 MM 몸길이(0.96 m)
+        #    보다 짧아 DWB가 제자리에서 40초간 진동했다. 같은 날 사용자가
+        #    최종 목적지만 찍었을 때는 Nav2가 정상적으로 계획·주행했다.
+        spot = self._nearest_free(goal_x, goal_y, (goal_yaw,), "x")
         if spot is None:
             self._publish_status("ERROR_MM_YIELD_NO_FINAL_POSE")
             return None
-        stages.append(("YIELD", spot[0], spot[1], final_yaw))
-        return stages
+        # 2. 실제 주행 중 충돌 검사·감속·정지는 Nav2 local costmap과
+        #    controller에 맡긴다. 시작점→목표 직선이나 global plan을 별도
+        #    footprint로 재검사하면 실제 우회 경로까지 베드 관통으로 오판한다.
+        return [("YIELD", spot[0], spot[1], goal_yaw)]
 
     def _send_yield_stage(self) -> None:
         label, x, y, yaw = self._yield_stages[self._yield_stage_index]
@@ -825,13 +914,16 @@ class NavHarvestTestNode(Node):
     def _yield_stage_succeeded(self) -> None:
         label = self._yield_stages[self._yield_stage_index][0]
         self._yield_goal_id = None
+        self._yield_goal_handle = None
         self._yield_stage_index += 1
         if self._yield_stage_index < len(self._yield_stages):
             self._send_yield_stage()
             return
-        # 최종 단계까지 성공했을 때만 IW 하역 출발을 허가한다.
+        # 최종 단계까지 성공. 거리 기준으로 이미 허가했으면 다시 보내지 않는다.
         self._yield_stages = []
-        self._iw_yield_complete_pub.publish(Bool(data=True))
+        if not self._yield_released:
+            self._yield_released = True
+            self._iw_yield_complete_pub.publish(Bool(data=True))
         self._publish_status("WAITING_IW_RETURN")
         self.get_logger().info(
             f"MM 피항 완료({label}) → IW 하역 출발 허가, 복귀까지 대기")
@@ -841,10 +933,16 @@ class NavHarvestTestNode(Node):
         label = (self._yield_stages[index][0]
                  if index < len(self._yield_stages) else "UNKNOWN")
         self._yield_goal_id = None
+        self._yield_goal_handle = None
         self._yield_stages = []
         # 중간 단계 실패 시 다음 단계로 넘어가지 않는다. IW는 허가를 못 받아
-        # WAITING_MM_YIELD로 정차한 채 남는다.
-        self._iw_yield_complete_pub.publish(Bool(data=False))
+        # WAITING_MM_YIELD로 정차한 채 남는다. 단, 이미 레인에서 충분히 비켜
+        # 허가가 나갔다면(거리 기준) 그 허가는 되돌리지 않는다 — IW는 이미
+        # 출발했고, 여기서 False를 보내면 상태만 어긋난다.
+        if not self._yield_released:
+            self._iw_yield_complete_pub.publish(Bool(data=False))
+        # 실패해도 _yield_active는 유지한다. MM이 아직 레인을 막고 있을 수
+        # 있으므로 수확을 재개하면 안 된다.
         self._publish_status(f"ERROR_MM_YIELD_{index + 1}_{label}_{reason}")
         self.get_logger().error(
             f"MM 피항 {index + 1}단계({label}) 실패({reason}) — "
@@ -1135,7 +1233,15 @@ class NavHarvestTestNode(Node):
 
     def _iw_status_callback(self, msg: String) -> None:
         """iw 가 지게차에 도착하면 하역을 트리거한다(/forklift/amr_docked True)."""
-        if msg.data.strip().upper() == "ARRIVED_FORKLIFT":
+        status = msg.data.strip().upper()
+        if status == "RETURNED" and self._yield_active:
+            # IW가 MM 부근으로 돌아왔다 = 피항 임무 종료. 이제부터 수확 게이트를
+            # 다시 열 수 있다.
+            self._yield_active = False
+            self._yield_released = False
+            self._publish_status("IW_RETURNED_YIELD_RELEASED")
+            self.get_logger().info("IW 복귀 확인 — 피항 상태 해제")
+        if status == "ARRIVED_FORKLIFT":
             self._forklift_dock_pub.publish(Bool(data=True))
             self._publish_status("IW_DOCKED_FORKLIFT_TRIGGERED")
             self.get_logger().info(
@@ -1148,11 +1254,14 @@ class NavHarvestTestNode(Node):
             self._post_nav_settle_deadline_ns = 0
             self._begin_post_nav_home()
         if (bool(self.get_parameter("auto_nav_goal").value)
+                and not self._yield_active      # 피항 중 고정 목표 재전송 금지
                 and not self._fixed_goal_sent
                 and not self._fixed_goal_pending
                 and self._active_goal is None
                 and now >= self._fixed_goal_deadline_ns):
             self._send_fixed_nav_goal()
+        if self._yield_active and not self._yield_released:
+            self._maybe_release_iw_by_clearance()
         # 실제 운용에서는 IW 슬롯 선택기의 좌표만 쓴다. 모의 좌표 자동 주입은
         # use_mock_basket=true인 독립 시험에서만 허용한다.
         if (bool(self.get_parameter("use_mock_basket").value)
@@ -1185,6 +1294,12 @@ class NavHarvestTestNode(Node):
             self._publish_status("ERROR_TOMATO_SEARCH_TIMEOUT")
 
     def _publish_enable(self, enabled: bool) -> None:
+        # 피항 중에는 어떤 경로로도 수확 게이트를 열지 않는다. 피항 이동이
+        # 끝나면 다음 파지 준비(홈→베드뷰→탐색)로 넘어가던 회귀를 막는다.
+        if enabled and self._yield_active:
+            self.get_logger().info(
+                "피항 중 — 수확 게이트 개방 요청 무시", throttle_duration_sec=5.0)
+            return
         self._enable_pub.publish(Bool(data=enabled))
 
     def _publish_status(self, state: str) -> None:

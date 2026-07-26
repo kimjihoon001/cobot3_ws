@@ -86,14 +86,14 @@ controller_server:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: false
       min_vel_x: 0.0
-      max_vel_x: 0.50
+      max_vel_x: 1.00
       max_vel_theta: 0.80
       min_speed_xy: 0.0
-      max_speed_xy: 0.50
+      max_speed_xy: 1.00
       min_speed_theta: 0.0
-      acc_lim_x: 1.2
+      acc_lim_x: 2.4
       acc_lim_theta: 1.6
-      decel_lim_x: -1.5
+      decel_lim_x: -3.0
       decel_lim_theta: -2.0
       vx_samples: 25
       vtheta_samples: 35
@@ -105,20 +105,18 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint",
-                "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
+                "PathAlign", "PathDist", "GoalDist"]
       # 기존 0.05는 경로 관련 critic(18~32)에 비해 장애물 비용을 사실상
       # 무시해 고속 주행 시 회피가 너무 늦었다. 최고속도는 유지하되 장애물
       # 근접 궤적이 일찍 탈락하도록 기본값보다 약간 강하게 평가한다.
-      # 중심점 비용만 보는 BaseObstacle 대신 전체 1.73×0.802m footprint를
-      # 매 trajectory pose에서 검사한다. 레인 고정보다 동적 장애물 회피를 우선한다.
-      ObstacleFootprint.scale: 32.0
-      PathAlign.scale: 12.0
+      BaseObstacle.scale: 2.0
+      PathAlign.scale: 24.0
       PathAlign.forward_point_distance: 0.35
-      GoalAlign.scale: 10.0
+      GoalAlign.scale: 18.0
       GoalAlign.forward_point_distance: 0.35
-      PathDist.scale: 16.0
-      GoalDist.scale: 14.0
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
       RotateToGoal.scale: 20.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
@@ -142,10 +140,9 @@ local_costmap:
       resolution: 0.05
       # IW 차체뿐 아니라 폭 0.802m 팔레트/KLT 적재 외곽을 로컬 충돌 검사에
       # 사용한다. 회전·TF·5cm costmap 셀 오차를 흡수하도록 모든 방향에
-      # 5cm padding을 추가한다.
-      # 앞/뒤 라이다 프레임(+0.65 / -1.08)이 실제 스캔 원점이라 footprint 앞/뒤를
-      # 거기까지 맞춘다(폭 ±0.401 유지). 브래킷은 없지만 스캔·충돌 외곽 기준은 라이다다.
-      footprint: "[[0.65, 0.401], [0.65, -0.401], [-1.08, -0.401], [-1.08, 0.401]]"
+      # 전방은 전방 라이다 원점 +0.65m, 후방은 실제 본체 후단 -1.0335m에
+      # 맞춘다. 5cm padding을 역산한 raw edge는 +0.60m / -0.9835m다.
+      footprint: "[[0.60, 0.401], [0.60, -0.401], [-0.9835, -0.401], [-0.9835, 0.401]]"
       footprint_padding: 0.05
       # 중앙 측면은 두 라이다 모두 최소 감지거리 안쪽이 될 수 있다. 정적 벽이 스캔에서
       # 사라져도 ObstacleFootprint가 계속 검사하도록 static layer를 로컬에도 유지한다.
@@ -193,7 +190,7 @@ global_costmap:
       robot_base_frame: iwhub_0/base_link
       # 계획 단계에서는 회전 중 팔레트 앞 모서리가 베드에 붙지 않도록 실제 외곽보다
       # 앞/좌우로 5cm 넓힌다. 로컬 정지 footprint와 분리해 조기 정지는 만들지 않는다.
-      footprint: "[[0.70, 0.451], [0.70, -0.451], [-1.08, -0.401], [-1.08, 0.401]]"
+      footprint: "[[0.65, 0.451], [0.65, -0.451], [-1.0335, -0.401], [-1.0335, 0.401]]"
       footprint_padding: 0.0
       resolution: 0.05
       track_unknown_space: true
@@ -270,10 +267,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.65, 0.0, 0.80]
+    max_velocity: [1.00, 0.0, 0.80]
     # DWB min_vel_x=0.0과 함께 후진 속도를 막는다. 좁은 아일서 임의 후진 불가.
     min_velocity: [0.0, 0.0, -0.80]
-    max_accel: [1.2, 0.0, 1.6]
-    max_decel: [-1.5, 0.0, -2.0]
+    max_accel: [2.4, 0.0, 1.6]
+    max_decel: [-3.0, 0.0, -2.0]
     odom_topic: "odom"
     odom_duration: 0.1

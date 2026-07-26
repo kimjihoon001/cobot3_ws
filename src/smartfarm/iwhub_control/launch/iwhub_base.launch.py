@@ -82,7 +82,6 @@ def generate_launch_description():
                 "ns": "iwhub_0",
                 "odom_frame": "iwhub_0/odom",
                 "base_frame": "iwhub_0/base_link",
-                # Collision Monitor 도입 전 검증된 FOLLOW 경로를 직접 실행한다.
                 "cmd_vel_topic": "/iwhub_0/cmd_vel",
                 "odom_topic": "/iwhub_0/odom",
                 "publish_odom": ParameterValue(publish_odom, value_type=bool),

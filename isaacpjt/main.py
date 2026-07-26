@@ -83,14 +83,11 @@ if MM_TELEOP and NAV_DRIVE:
 # 지게차+운반 AMR만 선택하고 수확 MM이 없으면 창고 자동화 단독 시험으로 본다. 이 모드에서는
 # iw.py가 AMR을 창고 도킹 위치에 빈 상태로 놓아 첫 팔레트 상차를 바로 시험한다.
 WAREHOUSE_TEST = (
-    "--warehouse-test" in sys.argv
-    or (
-        "--iw" in sys.argv
-        and "--fork" in sys.argv
-        and not (NAV_DRIVE or NAV_ODOM or NAV_SCAN)
-        and "--mm" not in sys.argv
-        and "--moveit" not in sys.argv
-    )
+    "--iw" in sys.argv
+    and "--fork" in sys.argv
+    and not (NAV_DRIVE or NAV_ODOM or NAV_SCAN)
+    and "--mm" not in sys.argv
+    and "--moveit" not in sys.argv
 )
 # 4분할 모니터링 UI용 고정 감시 카메라 3대. 카메라 하나마다 씬을 다시
 # 렌더하므로 기본은 꺼두고 모니터링 화면이 필요할 때만 켠다.

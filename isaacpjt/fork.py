@@ -65,7 +65,11 @@ class ForkDriver(Driver):
         self._pallet_attached = False
         self._deck_pallet_attached = False
         self._iw_dock_locked = False
+        # ROS 명령 수신 프레임과 무관하게 IW의 다단계 잠금을 physics
+        # frame마다 진행할 수 있도록 마지막 요청값을 래치한다.
+        self._iw_dock_lock_requested = False
         self._pallet_id = 0
+        self._deck_forward_offset = 0.0
         self._deck_release_pending = False
         self._deck_clear_streak = 0
         self._deck_pickup_prevalidated = False
@@ -139,6 +143,7 @@ class ForkDriver(Driver):
             pallet_attach_request = None
             deck_attach_request = None
             dock_lock_request = None
+            deck_forward_offset_request = None
             pallet_id_request = self._pallet_id
             for name, value in zip(names, positions):
                 if not np.isfinite(value):
@@ -156,6 +161,10 @@ class ForkDriver(Driver):
                     dock_lock_request = float(value) >= 0.5
                 elif name == "pallet_id":
                     pallet_id_request = max(0, min(5, int(round(float(value)))))
+                elif name == "pallet_deck_forward_offset":
+                    deck_forward_offset_request = max(
+                        0.0, min(0.8, float(value))
+                    )
             for name, value in zip(names, velocities):
                 if name == "back_wheel_drive" and np.isfinite(value):
                     # 스파이크에서 확인된 ForkliftB 구동 부호: 음수가 전진이다.
@@ -169,7 +178,9 @@ class ForkDriver(Driver):
             ):
                 self._controller.set_fork(self._pickup_lift_override)
             if dock_lock_request is not None:
-                self._set_iw_dock_locked(dock_lock_request)
+                self._iw_dock_lock_requested = dock_lock_request
+            if deck_forward_offset_request is not None:
+                self._deck_forward_offset = deck_forward_offset_request
             if (
                 pallet_attach_request is not None
                 or deck_attach_request is not None
@@ -205,6 +216,12 @@ class ForkDriver(Driver):
             if not self._command_watchdog_reported:
                 print("[Forklift Watchdog] ROS 명령 0.5초 단절 — 즉시 정지")
                 self._command_watchdog_reported = True
+        # IW 잠금은 정지 → pose 확인 → 고정 생성 사이에 각각 physics frame이
+        # 필요하다. 새 ROS 메시지가 들어온 프레임에서만 호출하면 첫 단계에
+        # 머물 수 있으므로 래치된 요청을 매 frame 진행한다.
+        if self._iw_dock_lock_requested or self._iw_dock_locked:
+            self._set_iw_dock_locked(self._iw_dock_lock_requested)
+
         # 수신한 포크·조향·구동 목표를 Isaac 아티큘레이션에 매 프레임 반영한다.
         # ForkliftB는 후륜이 회전해도 바닥에서 헛돌 수 있으므로, 검증 스파이크와
         # 같은 physics timestep 기반 평면 차량 운동으로 GUI 차체를 이동한다.
@@ -318,15 +335,24 @@ class ForkDriver(Driver):
             else None
         )
         iw_tilt_deg = None
+        iw_position_json = None
+        iw_yaw = None
         deck_target_position_json = None
         if self._iw_driver is not None and self._iw_driver.robot is not None:
             try:
-                _, iw_quat = self._iw_driver.robot.get_world_pose()
+                iw_position, iw_quat = self._iw_driver.robot.get_world_pose()
+                iw_position_json = [float(value) for value in iw_position]
                 w, x, y, z = (float(value) for value in iw_quat)
+                iw_yaw = math.atan2(
+                    2.0 * (w * z + x * y),
+                    1.0 - 2.0 * (y * y + z * z),
+                )
                 del w, z
                 up_z = max(-1.0, min(1.0, 1.0 - 2.0 * (x * x + y * y)))
                 iw_tilt_deg = math.degrees(math.acos(up_z))
-                deck_point, _ = self._iw_driver._deck_surface()
+                deck_point, _ = self._iw_driver.warehouse_deck_surface(
+                    self._deck_forward_offset
+                )
                 deck_target_position_json = [
                     float(deck_point[0]),
                     float(deck_point[1]),
@@ -345,11 +371,14 @@ class ForkDriver(Driver):
                 "fork_collision_filtered": fork_collision_filtered,
                 "dock_locked": self._iw_dock_locked,
                 "iw_available": self._iw_driver is not None,
+                "iw_world_position": iw_position_json,
+                "iw_world_yaw": iw_yaw,
                 "pallet_z": pallet_z,
                 "pallet_position": pallet_position_json,
                 "pallet_target_position": (
                     deck_target_position_json
                 ),
+                "deck_forward_offset": self._deck_forward_offset,
                 "forklift_position": forklift_position_json,
                 "pallet_rise": pallet_rise,
                 "expected_rise": expected_rise,
@@ -882,7 +911,9 @@ class ForkDriver(Driver):
             self._iw_driver.set_warehouse_pallet_deck_collision_filtered(
                 True, pallet_id
             )
-            if self._iw_driver.set_warehouse_pallet_attached(True, pallet_id):
+            if self._iw_driver.set_warehouse_pallet_attached(
+                True, pallet_id, self._deck_forward_offset
+            ):
                 self._deck_pallet_attached = True
                 self._pallet_id = pallet_id
             return
