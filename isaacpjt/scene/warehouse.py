@@ -265,6 +265,15 @@ class Warehouse:
                 # 중첩되어 "missing xformstack reset" 경고가 매 프레임 뜬다. 빈 장식이므로
                 # 물리를 꺼 순수 시각으로 만든다 → 팔레트 강체에 흡수(2026-07-20 GPU 실측).
                 physics.disable_physics(stage, kp)
+                # 지게차가 이 팔레트를 IW 데크에 얹으면 iw.py 가 여기서 만든
+                # KLT_SlotCenter 를 릴리즈 목표로 발행한다. small_KLT.usd 의
+                # root pivot 은 시각 메시의 기하 중심이므로(S3 에셋 실측)
+                # 격자 원점이 곧 슬롯 중심이다 — robots/iwhub.py 와 동일 규칙.
+                center_prim = UsdGeom.Xform.Define(
+                    stage, f"{path}/KLT_SlotCenter_{ix}{iy}"
+                ).GetPrim()
+                set_ps(center_prim, (ox, oy, kz), ident)
+                set_sc(center_prim, klt_scale)
                 # 에셋의 무거운 텍스처 머티리얼을 벗기고 displayColor 로 칠한다.
                 # 실제 KLT 를 텍스처째 넣으면 재질 예산이 밀려 식물 색이 죽었다(2026-07-20).
                 for m in Usd.PrimRange(kprim):

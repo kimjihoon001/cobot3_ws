@@ -407,8 +407,11 @@ class IwHub:
         # 충돌체로 쓰면 바닥/벽 사이에 틈이 생겨 작은 토마토가 빠지거나, 반대로
         # 입구를 덮는 convex hull이 생길 수 있다. Load 강체 아래에 바닥+4면의
         # 보이지 않는 analytic box를 두어 열린 바구니 충돌 형상을 명시한다.
-        klt_outer_x = KLT_SIZE[0] * klt_scale
-        klt_outer_y = KLT_SIZE[1] * klt_scale
+        # small_KLT.usd의 실제 시각 긴 축은 IW/팔레트 로컬 Y다. 기존 값은
+        # 선언 치수를 그대로 X/Y에 넣어 보이지 않는 analytic shell만 90°
+        # 돌아가 있었다.
+        klt_outer_x = KLT_SIZE[1] * klt_scale
+        klt_outer_y = KLT_SIZE[0] * klt_scale
         klt_height = KLT_SIZE[2] * klt_scale
         # 시각 KLT의 안쪽 벽면은 10mm 기준이다. 충돌 벽은 내부 공간을
         # 좁히지 않고 바깥쪽으로만 30mm까지 두껍게 해 측면 tunneling을 막는다.
@@ -518,11 +521,11 @@ class IwHub:
         # 사전 적재분은 낙하로 쌓이지 않으므로 KLT 바닥에 닿는 안착 높이에 바로 둔다.
         # 바닥 윗면 = 팔레트 윗면 + 시각 바닥 두께, 거기에 과실 반지름을 더한다.
         tz_rest = PALLET_SIZE[2] + klt_floor_visual_t + phys_cfg.fruit_collision_radius_m
-        # KLT 내부 유효 폭(=벽 안쪽) 안에서 5개가 서로 겹치지 않는 3+2 배치.
-        # 지름 68mm < x간격 70mm, y간격 74mm 이고 최외곽도 내벽 안에 들어온다.
+        # 실제 긴 Y축을 따라 3개, 짧은 X축을 따라 2열로 놓는다.
+        # 지름 68mm < y간격 70mm, x간격 74mm 이고 최외곽도 내벽 안이다.
         prefill_offsets = (
-            (-0.070, -0.037), (0.000, -0.037), (+0.070, -0.037),
-            (-0.035, +0.037), (+0.035, +0.037),
+            (-0.037, -0.070), (-0.037, 0.000), (-0.037, +0.070),
+            (+0.037, -0.035), (+0.037, +0.035),
         )
         tmat = physics.create_physics_material(
             stage, f"{root}/PhysMat/tomato",
@@ -541,17 +544,38 @@ class IwHub:
                 set_pose(stage.GetPrimAtPath(kp), (ox, oy, kz), ident)
                 set_scale(stage.GetPrimAtPath(kp), klt_scale)
                 physics.disable_physics(stage, kp)         # 에셋 자체 강체 제거(중첩경고 §8)
+                # small_KLT.usd의 root pivot은 시각 메시의 기하 중심이다
+                # (S3 에셋 실측: /SmallKLT world bbox mid=(0, 1e-8, 3e-9)m,
+                #  size=(0.1978, 0.2966, 0.1464) → 긴 축이 로컬 Y).
+                # 따라서 격자 원점이 곧 슬롯 중심이며 보정이 필요 없다.
+                # 런타임 bbox로 재측정하지 않는다 — 참조가 아직 합성되지
+                # 않은 시점에는 ComputeWorldBound가 예외 없이 빈 범위를
+                # 돌려주고, 그 GetMidpoint()가 (0,0,0)이라 8칸 전부 팔레트
+                # 원점으로 무너진다(2026-07-27 실측 회귀).
+                slot_x, slot_y = ox, oy
+                center_path = f"{load}/KLT_SlotCenter_{ix}{iy}"
+                center_prim = UsdGeom.Xform.Define(
+                    stage, center_path
+                ).GetPrim()
+                set_pose(center_prim, (slot_x, slot_y, kz), ident)
+                # 기존 release offset 0.11205가 KLT scale을 포함해 적용되도록
+                # 시각 prim과 동일한 scale을 준다.
+                set_scale(center_prim, klt_scale)
+                log(
+                    f"[IwHub] KLT_{ix}{iy} 슬롯 중심(격자 원점): "
+                    f"({slot_x:+.4f}, {slot_y:+.4f})"
+                )
                 # 초기 적재 여부와 무관하게 8개 KLT 모두 실제로 토마토를 받을 수
                 # 있어야 한다. 시각 메시의 convex 근사 대신 입구가 열려 있음이
                 # 보장되는 바닥+4벽 충돌체를 Load 강체 아래에 직접 구성한다.
-                add_klt_shell(ix, iy, ox, oy)
+                add_klt_shell(ix, iy, slot_x, slot_y)
                 if (ix, iy) not in filled or not ripe:
                     continue
                 for k, (dx, dy) in enumerate(prefill_offsets):   # 토마토 5개
                     body, calyx = rng.choice(ripe)
                     # 고정 배치에 아주 작은 흔들림만 줘 격자처럼 보이지 않게 한다.
-                    jx = ox + dx + rng.uniform(-0.002, 0.002)
-                    jy = oy + dy + rng.uniform(-0.002, 0.002)
+                    jx = slot_x + dx + rng.uniform(-0.002, 0.002)
+                    jy = slot_y + dy + rng.uniform(-0.002, 0.002)
                     tz = tz_rest
                     yaw = rng.uniform(-math.pi, math.pi)    # 개체마다 다른 방위
                     tp = f"{tgroup}/T_{ix}{iy}_{k}"

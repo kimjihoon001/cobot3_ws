@@ -812,14 +812,19 @@ class MMDriver(Driver):
             return
         index = self._klt_cursor % 8
         ix, iy = divmod(index, 2)
-        path = f"/World/IwHubCargo/Pallet_00/KLT_{ix}{iy}"
-        klt = self._stage.GetPrimAtPath(path)
-        if not klt.IsValid():
+        pallet = "/World/IwHubCargo/Pallet_00"
+        center = self._stage.GetPrimAtPath(
+            f"{pallet}/KLT_SlotCenter_{ix}{iy}")
+        if not center.IsValid():
+            # 이전에 저장한 구형 씬과의 호환용 폴백. 새 씬은 반드시
+            # robots/iwhub.py가 만든 명시적 슬롯 중앙을 사용한다.
+            center = self._stage.GetPrimAtPath(f"{pallet}/KLT_{ix}{iy}")
+        if not center.IsValid():
             return
         cache = UsdGeom.XformCache()
-        # KLT 피벗은 높이 중심이다. 내부 중앙보다 2cm 위를 토마토 중심 목표로
-        # 사용해 바닥과 초기 중첩하지 않게 한다.
-        world = cache.GetLocalToWorldTransform(klt).Transform(
+        # small_KLT의 root pivot은 기하 중심이라 격자 원점이 곧 슬롯 중심이다
+        # (S3 에셋 실측). 명시적 KLT_SlotCenter 기준 2cm 위를 목표로 쓴다.
+        world = cache.GetLocalToWorldTransform(center).Transform(
             Gf.Vec3d(0.0, 0.0, 0.02))
         world_to_base = cache.GetLocalToWorldTransform(base).GetInverse()
         point = world_to_base.Transform(world)
@@ -837,12 +842,26 @@ class MMDriver(Driver):
         index = max(0, min(7, int(index)))
         ix, iy = divmod(index, 2)
         klt_path = f"/World/IwHubCargo/Pallet_00/KLT_{ix}{iy}"
+        center_path = (
+            f"/World/IwHubCargo/Pallet_00/KLT_SlotCenter_{ix}{iy}")
         load_path = "/World/IwHubCargo/Pallet_00"
         fruit_path = self._grasped_fruit
         klt = self._stage.GetPrimAtPath(klt_path)
+        center = self._stage.GetPrimAtPath(center_path)
+        if not center.IsValid():
+            # 구형 씬 폴백. 새 씬에서는 이 분기로 들어가면 중앙 보정이
+            # 적용되지 않으므로 로그로 즉시 식별할 수 있게 한다.
+            center = klt
+            print(
+                f"[KLT Place] {center_path} 없음 — legacy KLT 원점 폴백",
+                flush=True,
+            )
         fruit = self._stage.GetPrimAtPath(fruit_path)
         load = self._stage.GetPrimAtPath(load_path)
-        if not (klt.IsValid() and fruit.IsValid() and load.IsValid()):
+        if not (
+            klt.IsValid() and center.IsValid()
+            and fruit.IsValid() and load.IsValid()
+        ):
             print(f"[KLT Place] 대상 prim 없음: {klt_path}", flush=True)
             return False
 
@@ -863,7 +882,7 @@ class MMDriver(Driver):
         # 바닥 위치로 순간이동하거나 곧바로 조인트를 붙이지는 않는다.
         physics.set_kinematic(fruit, True)
         cache = UsdGeom.XformCache()
-        desired_world = cache.GetLocalToWorldTransform(klt).Transform(
+        desired_world = cache.GetLocalToWorldTransform(center).Transform(
             Gf.Vec3d(0.0, 0.0, 0.10))
         parent = fruit.GetParent()
         desired_local = cache.GetLocalToWorldTransform(
