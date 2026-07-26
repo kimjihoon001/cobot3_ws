@@ -15,6 +15,11 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+# qos_bridge → republish 사이의 중간 토픽. /ui/* 는 브라우저가 보는 이름이라
+# 여기에 섞지 않는다.
+MM_FRONT_RELAY = "/relay/mm_front"
 
 # (pane 이름, Isaac raw 토픽). MM 전방은 로봇에 달린 D455라 네임스페이스가
 # 실행 모드에 따라 달라져서 아래에서 따로 만든다.
@@ -55,7 +60,22 @@ def generate_launch_description():
         # 생 RGB가 아니라 vision_node가 박스를 그려 낸 쪽을 받는다. 1번 화면은
         # 검출을 보여주는 자리인데 /rgb를 받으면 박스 없는 원본만 나온다.
         # 따라서 vision_node가 떠 있어야 이 화면이 나온다(안 뜨면 offline).
-        _republish("mm_front", [camera_ns, "/vision/annotated_image"]),
+        #
+        # vision_node는 센서 QoS(BEST_EFFORT)로 발행하는데 republish는
+        # RELIABLE로만 구독해서 직접 연결하면 프레임이 0장이다. qos_bridge가
+        # 그 한 홉만 QoS를 바꿔 통과시킨다(자세한 이유는 qos_bridge.py).
+        Node(
+            package="monitor_ui",
+            executable="qos_bridge",
+            name="qos_bridge_mm_front",
+            parameters=[{
+                "in_topic": ParameterValue(
+                    [camera_ns, "/vision/annotated_image"], value_type=str),
+                "out_topic": MM_FRONT_RELAY,
+            }],
+            output="screen",
+        ),
+        _republish("mm_front", MM_FRONT_RELAY),
         *(_republish(name, topic) for name, topic in FIXED_CAMERAS),
 
         # 브라우저가 base 토픽(/ui/<pane>)을 요청하면 압축 transport를
