@@ -12,7 +12,7 @@
 | `smartfarm_interfaces` | 공용 | 커스텀 msg 정의 (아래 표) |
 | `harvest_vision` | 트랙 A (이현민) | `vision_node`, `harvest_fsm_node`, `tray_manager_node` |
 | `fleet_dispatch` | 트랙 B (김지훈) | `fleet_dispatch_node`, nav2/AMCL 런치 자리 |
-| `warehouse_dock` | 트랙 C (김민성) | `handoff_node`, `fork_lift_node` |
+| `warehouse_dock` | 트랙 C (김민성) | `fork_lift_node`, `fork_lift_return_node` |
 | `smartfarm_common` | A+B 스켈레톤, C가 로직 완성 | `warehouse_manager_node`, `logger_node` |
 
 ## 토픽 흐름 (기능 플로우 1~13단계 대응)
@@ -24,12 +24,12 @@
 | 6 | `tray_manager_node` | `/tray/status` | `smartfarm_interfaces/TrayStatus` | `logger_node` |
 | 8 | `tray_manager_node` | `/dispatch/transport_request` | `smartfarm_interfaces/TransportRequest` | `fleet_dispatch_node` |
 | 9 | `fleet_dispatch_node` | (액션) `/<amr_id>/navigate_to_pose` | `nav2_msgs/action/NavigateToPose` | 운반 AMR Nav2 |
-| 10 | `handoff_node` | `/handoff/tray_ready` | `smartfarm_interfaces/HandoffEvent` | `fork_lift_node`, `warehouse_manager_node` |
+| 10 | ~~`handoff_node`~~ | ~~`/handoff/tray_ready`~~ | ~~`smartfarm_interfaces/HandoffEvent`~~ | **폐기(2026-07-26)** — `iwhub_control/mission_nav_node.py`의 `_request_forklift_cycle()`이 도착 판정+지게차 활성화를 서비스 `/forklift/start_cycle`(`ForkliftCycle`) 호출로 대체함. `handoff_node.py`는 삭제. (`fork_lift_node.py`에 `HandoffEvent` 레거시 구독이 남아있으나 아무도 발행하지 않음) |
 | 11 | `warehouse_manager_node` | `/warehouse/slot_assignment` | `smartfarm_interfaces/SlotAssignment` | `fork_lift_node`, `logger_node` |
 | 11 | `fork_lift_node` | `/forklift/task_complete` | `std_msgs/Int32` (tray_id) | `warehouse_manager_node`, `logger_node` |
 | 11 | `fork_lift_node` | `/forklift/clear` | `std_msgs/Bool` | `fleet_dispatch_node` (AMR 출발 허가) |
 | - | `fork_lift_node` | `/forklift/status` | `std_msgs/String` | 운영자·logger_node |
-| - | 각 로봇 AMCL | `/<amr_id>/amcl_pose` | `geometry_msgs/PoseWithCovarianceStamped` | `handoff_node` (도착 판정용) |
+| - | 각 로봇 AMCL | `/<amr_id>/amcl_pose` | `geometry_msgs/PoseWithCovarianceStamped` | `mission_nav_node` (도착 판정용) |
 
 ## ⚠ 실제 Isaac 브리지와의 차이 (isaacpjt/README.md, ros/robot_bridge.py 확인 결과 — [1] 출처)
 
@@ -56,8 +56,13 @@ Nav2/AMCL은 어디에도 없다. 통합 전에 팀 전체가 확인해야 하�
 
 ## 아직 안 정해진 것 (통합 전 확정 필요 — TODO)
 
-- **[수정] 사전 적재 값**: 브리핑 FR9는 "시작 시 50%(3개) 사전 적재"였지만 실제 `pjt_config/settings.py`(`TrayConfig.preloaded`)는 **0**으로 확정됨(정량 검증 목적상 사전 적재는 성공률을 부풀린다는 이유) — `tray_manager_node`도 이에 맞춰 `INITIAL_FILLED=0`, 운반 트리거는 일단 만재(6개) 기준으로 바꿔둠. 부분 적재 트리거가 필요하면 트랙 B와 협의 필요
+- ~~**[수정] 사전 적재 값**~~: **레거시(2026-07-26 주석)** — 아래는 전부 `tray_manager_node`(MM 위 트레이 버퍼) 기준이며, **실제 동작 경로에는 그런 트레이가 없다**. MM은 IW 바스켓 슬롯에 직접 놓는다.
+  - 원문: 브리핑 FR9는 "시작 시 50%(3개) 사전 적재"였지만 실제 `pjt_config/settings.py`(`TrayConfig.preloaded`)는 **0**으로 확정됨(정량 검증 목적상 사전 적재는 성공률을 부풀린다는 이유) — `tray_manager_node`도 이에 맞춰 `INITIAL_FILLED=0`, 운반 트리거는 일단 만재(6개) 기준. 부분 적재 트리거가 필요하면 트랙 B와 협의 필요
+  - **현재 경로에서는 이렇게 바뀌었다** (혼동 주의 — 위의 "사전 적재"와 아래의 "사전 적재"는 서로 다른 것이다):
+    - **IW KLT 사전 적재 = 30개**: `isaacpjt/robots/iwhub.py`가 IW 데크 팔레트 뒤쪽 6칸에 5개씩 채운다. 이건 성공률 지표에 들어가는 적재가 아니라 **"이미 수확해 실어둔" 씬 연출**이다(콜라이더만 있고 Load 강체에 흡수됨). MM이 실제로 놓는 칸은 앞열 2칸뿐이다.
+    - **운반 트리거 = `harvest_fsm_node`의 `place_target_count`(기본 2)**: 트레이 만재(6개)가 아니라 IW 앞열 빈 칸 수에 맞춘 값이다.
+    - **부분 적재 트리거는 구현됨**: 수확 최종 실패·탐색 타임아웃 시 `_depart_with_partial_load()`가 목표 개수를 못 채워도 실은 게 있으면 `PREPARE_FORKLIFT`를 보낸다(0개면 안 보냄). 트랙 B 협의 항목이 아니라 트랙 A 코디네이터 내부 판단으로 정리됐다.
 - **[4] 임의로 둔 파라미터**: 운반 AMR 대수/네임스페이스(`amr_ids`), 인계 위치 좌표(`handoff_pose_x/y`), 정적맵 경로 — 트랙 B의 SLAM 1회 생성 결과 나오면 채움
 - **섹터 ID ↔ 슬롯 ID 1:1 매핑 규칙표**: `warehouse_manager_node`에 TODO로 남김, 브리핑 문서상 트랙 C 담당
-- **tray_id 부여/일치 방식**: `harvest_fsm_node`(발생) → `handoff_node`(HandoffEvent.tray_id)까지 어떻게 같은 tray_id로 유지할지 트랙 A·B·C 합의 필요
+- ~~**tray_id 부여/일치 방식**~~: **무효(2026-07-26)** — MM이 트레이 버퍼 없이 IW 바스켓 슬롯(`/iw/basket/empty_slot_pose`)에 직접 배치하므로 tray_id 체인 자체가 없다. 지금 식별자는 지게차 팔레트 번호 기반(`ForkliftCycle` 서비스 인자)
 - 각 노드 콜백 내부 실제 로직(YOLO 추론, Pick&Place, 포크 제어 등)은 전부 TODO — 이번 스켈레톤은 **토픽·메시지 인터페이스 고정**이 목적

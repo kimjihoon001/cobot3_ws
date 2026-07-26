@@ -20,7 +20,7 @@ import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from std_msgs.msg import Bool
 
-from harvest_vision.nav_harvest_test_node import NavHarvestTestNode
+from harvest_vision.harvest_fsm_node import HarvestFsmNode
 
 
 class _Recorder:
@@ -96,7 +96,7 @@ class _FakeTransform:
 @pytest.fixture
 def node():
     rclpy.init()
-    node = NavHarvestTestNode()
+    node = HarvestFsmNode()
     node._iw_yield_complete_pub = _Recorder()
     node._status_pub = _Recorder()
     node._sent = []

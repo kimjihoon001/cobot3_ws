@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import rclpy
 
-from .nav_harvest_test_node import NavHarvestTestNode
+from .harvest_fsm_node import HarvestFsmNode
 
 
-class FixedHarvestMoveItNode(NavHarvestTestNode):
+class FixedHarvestMoveItNode(HarvestFsmNode):
     """map=(-0.54, -8.19) 대기 위치를 기본값으로 사용하는 원샷 수확 노드."""
 
     def __init__(self) -> None:

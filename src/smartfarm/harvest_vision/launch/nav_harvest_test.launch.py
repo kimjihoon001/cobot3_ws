@@ -28,8 +28,8 @@ def generate_launch_description():
         ),
         Node(
             package="harvest_vision",
-            executable="nav_harvest_test_node",
-            name="nav_harvest_test_node",
+            executable="harvest_fsm_node",
+            name="harvest_fsm_node",
             output="screen",
             parameters=[test, {"use_sim_time": True}],
         ),

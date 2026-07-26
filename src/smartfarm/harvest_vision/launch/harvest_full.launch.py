@@ -4,9 +4,9 @@
   - vision_node            : /harvester_0/rgb,depth → YOLO 검출 → /vision/* 발행
   - vision_debug_view      : /vision/annotated_image 를 OpenCV 창으로 (비전 디버깅)
   - manipulator_target_node: /vision/approach_target → /harvester_0/cmd rmp_target (파지, 검증된 경로)
-  - nav_harvest_test_node  : 섹터 이동→인식→수확→모의 바스켓 오케스트레이션
+  - harvest_fsm_node       : 섹터 이동→인식→수확→모의 바스켓 오케스트레이션
 
-Nav2 는 **따로** 켠다 (아래 README 명령 참조). harvester_0 자체 이동은 nav_harvest_test_node 가
+Nav2 는 **따로** 켠다 (아래 README 명령 참조). harvester_0 자체 이동은 harvest_fsm_node 가
 /harvester_0/cmd 의 base 텔레포트로 하며, Nav2(/cmd_vel) 를 쓰려면 main.py --nav + 별도 런치.
 
 사용:
@@ -55,8 +55,8 @@ def generate_launch_description():
             parameters=[base, test, sim_time],
         ),
         Node(
-            package="harvest_vision", executable="nav_harvest_test_node",
-            name="nav_harvest_test_node", output="screen",
+            package="harvest_vision", executable="harvest_fsm_node",
+            name="harvest_fsm_node", output="screen",
             parameters=[test, sim_time],
         ),
     ])

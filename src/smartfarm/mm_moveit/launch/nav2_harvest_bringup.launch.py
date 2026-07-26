@@ -111,9 +111,9 @@ def generate_launch_description():
         DeclareLaunchArgument("initial_pose_y", default_value="-12.0"),
         DeclareLaunchArgument("initial_pose_yaw", default_value="0.0"),
         DeclareLaunchArgument(
-            "coordinator_executable", default_value="nav_harvest_test_node"),
+            "coordinator_executable", default_value="harvest_fsm_node"),
         DeclareLaunchArgument(
-            "coordinator_name", default_value="nav_harvest_test_node"),
+            "coordinator_name", default_value="harvest_fsm_node"),
         # 통합 이동→수확 시험은 기억해 둔 수확 대기 위치로 자동 이동하는 런치다.
         # false이면 좌표가 설정돼 있어도 coordinator가 목표를 전송하지 않고
         # READY_FOR_NAV_GOAL에서 계속 대기한다.

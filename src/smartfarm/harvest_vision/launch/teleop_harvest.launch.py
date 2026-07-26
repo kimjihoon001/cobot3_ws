@@ -6,7 +6,7 @@ YOLO 검출이 불안정해 뺐다(direct_sim_grasp=true). 맵의 시뮬 좌표�
 그 텔레옵에서 'h' 를 누르면 /harvest_test/enable 에 True 가 나가 그 자리에서 수확 시작.
 
 게이트 값은 nav_harvest_test.yaml 을 재사용한다 (command_enabled=true,
-external_harvest_gate_enabled=true, direct_sim_grasp=true). nav_harvest_test_node 는
+external_harvest_gate_enabled=true, direct_sim_grasp=true). harvest_fsm_node 는
 띄우지 않으므로 enable 을 외부(텔레옵)가 직접 제어한다.
 """
 import os

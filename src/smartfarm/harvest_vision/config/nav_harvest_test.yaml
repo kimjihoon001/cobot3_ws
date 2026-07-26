@@ -56,7 +56,7 @@ manipulator_target_node:
     # UR10e를 최대한 펴고 joint_4 대체 IK를 먼저 사용한다. 1.50m를 넘는 목표만 재정차한다.
     workspace_max_xy_radius_m: 1.50
 
-nav_harvest_test_node:
+harvest_fsm_node:
   ros__parameters:
     nav_status_topic: /navigate_to_pose/_action/status
     harvest_enable_topic: harvest_test/enable
