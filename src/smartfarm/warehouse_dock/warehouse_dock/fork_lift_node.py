@@ -45,6 +45,27 @@ def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+def deck_place_lift_setpoint(
+    lift_command: float,
+    z_measured: float,
+    z_target: float,
+    lift_floor: float,
+    max_delta: float,
+) -> float:
+    """데크 안착 폐루프의 다음 리프트 명령.
+
+    팔레트는 포크에 강체 결속돼 있어 높이가 리프트로만 결정된다. 따라서 남은
+    잔차(z_measured - z_target)만큼 리프트를 낮추면 그대로 안착한다. 랙 픽업
+    안착 오프셋이 얼마든 실측 기준이라 상수 가정에 의존하지 않는다.
+
+    `lift_floor`는 개루프 목표에서 허용하는 최대 하강량을 강제해 폭주를 막고,
+    `max_delta`는 틱당 변화량을 기존 lift step과 같은 속도로 제한한다.
+    """
+    desired = lift_command - (z_measured - z_target)
+    desired = clamp(desired, lift_floor, 2.0)
+    return lift_command + clamp(desired - lift_command, -max_delta, max_delta)
+
+
 def wrap_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 
@@ -241,6 +262,14 @@ class ForkLiftNode(Node):
         # 랙 Y 삽입 0.65m에서 포크 처짐까지 포함한 실측 보정값.
         # 진입 순간 상단 접촉을 피하면서 실물리 포크 처짐을 보상하는 높이.
         self.declare_parameter("rack_pickup_height_correction", 0.020)
+        # 데크 안착 폐루프(2026-07-26). 개루프 하강이 끝난 뒤 실측 잔차를
+        # 없앤다. 권장 초기값은 Codex 검수 결과를 따랐다 — [4] 임의에 가깝고
+        # 시뮬 스윕으로 확정해야 한다.
+        self.declare_parameter("deck_place_tolerance", 0.010)
+        self.declare_parameter("deck_place_max_correction", 0.10)
+        self.declare_parameter("deck_place_stable_sec", 0.4)
+        self.declare_parameter("deck_place_stale_sec", 0.5)
+        self.declare_parameter("deck_place_timeout", 20.0)
         self.declare_parameter("step_timeout", 60.0)
         self.declare_parameter("u_turn_timeout", 60.0)
         # 각 Step에 정의된 시간 제한만 일괄 확장한다. 의도적인 settle/wait
@@ -290,6 +319,7 @@ class ForkLiftNode(Node):
         self._handoff_iw_available = False
         self._handoff_deck_collision_filtered = False
         self._handoff_fork_collision_filtered = False
+        self._handoff_pallet_min_z: float | None = None
         self._handoff_pallet_rise: float | None = None
         self._handoff_expected_rise: float | None = None
         self._handoff_carry_pose_error: float | None = None
@@ -503,6 +533,45 @@ class ForkLiftNode(Node):
         )
         self._yaw_tol = float(self.get_parameter("yaw_tolerance").value)
         self._lift_tol = float(self.get_parameter("lift_tolerance").value)
+        self._deck_place_tol = float(
+            self.get_parameter("deck_place_tolerance").value)
+        self._deck_place_max_correction = float(
+            self.get_parameter("deck_place_max_correction").value)
+        self._deck_place_stable_sec = float(
+            self.get_parameter("deck_place_stable_sec").value)
+        self._deck_place_stale_sec = float(
+            self.get_parameter("deck_place_stale_sec").value)
+        self._deck_place_timeout = float(
+            self.get_parameter("deck_place_timeout").value)
+        # 잘못된 값으로 조용히 돌면 팔레트를 눌러버리거나 영영 수렴하지 않는다.
+        # 결속 게이트 허용치(±0.025)보다 느슨한 tolerance는 통과 못 할 높이에서
+        # 성공을 선언하므로 특히 위험하다.
+        if not 0.001 <= self._deck_place_tol <= 0.025:
+            raise ValueError(
+                "deck_place_tolerance는 0.001~0.025m 사이여야 합니다: "
+                f"{self._deck_place_tol}"
+            )
+        if not 0.0 < self._deck_place_max_correction <= 0.30:
+            raise ValueError(
+                "deck_place_max_correction은 0~0.30m 사이여야 합니다: "
+                f"{self._deck_place_max_correction}"
+            )
+        if not 0.0 <= self._deck_place_stable_sec <= 5.0:
+            raise ValueError(
+                "deck_place_stable_sec는 0~5s 사이여야 합니다: "
+                f"{self._deck_place_stable_sec}"
+            )
+        if not 0.0 < self._deck_place_stale_sec <= 5.0:
+            raise ValueError(
+                "deck_place_stale_sec는 0~5s 사이여야 합니다: "
+                f"{self._deck_place_stale_sec}"
+            )
+        if self._deck_place_timeout <= self._deck_place_stable_sec:
+            raise ValueError(
+                "deck_place_timeout은 stable_sec보다 커야 합니다: "
+                f"timeout={self._deck_place_timeout}, "
+                f"stable={self._deck_place_stable_sec}"
+            )
         self._loaded_lift_speed = float(
             self.get_parameter("loaded_lift_speed").value
         )
@@ -733,6 +802,7 @@ class ForkLiftNode(Node):
                     raise ValueError(f"{name}가 유한수가 아님")
                 return result
 
+            pallet_min_z = optional_float("pallet_min_z")
             pallet_rise = optional_float("pallet_rise")
             expected_rise = optional_float("expected_rise")
             carry_pose_error = optional_float("carry_pose_error")
@@ -767,6 +837,7 @@ class ForkLiftNode(Node):
         self._handoff_iw_available = iw_available
         self._handoff_deck_collision_filtered = deck_collision_filtered
         self._handoff_fork_collision_filtered = fork_collision_filtered
+        self._handoff_pallet_min_z = pallet_min_z
         self._handoff_pallet_rise = pallet_rise
         self._handoff_expected_rise = expected_rise
         self._handoff_carry_pose_error = carry_pose_error
@@ -1685,6 +1756,9 @@ class ForkLiftNode(Node):
             ),
             self._wait(0.5, "IW loaded placement settle"),
         ] + slow_lower + [
+            self._deck_place_lower(
+                pallet, place_lift, self._iw_place_forward_offset
+            ),
             self._wait(0.8, f"Pallet_{pallet:02d} supported on IW"),
             self._pallet_owner(
                 "deck",
@@ -1804,6 +1878,20 @@ class ForkLiftNode(Node):
                 self._yaw_tol if yaw_tolerance is None else yaw_tolerance
             ),
             timeout=self._step_timeout,
+        )
+
+    def _deck_place_lower(
+        self, pallet: int, open_loop_lift: float, forward_offset: float
+    ) -> Step:
+        """개루프 하강 목표에서 시작해 실측 잔차를 없애는 폐루프 안착 step."""
+        return Step(
+            kind="deck_place_lower",
+            label=f"Pallet_{pallet:02d} closed-loop seat on IW deck",
+            lift=clamp(open_loop_lift, 0.0, 2.0),
+            deck_forward_offset=forward_offset,
+            # 내부 deadline(deck_place_timeout)이 먼저 수치와 함께 실패시킨다.
+            # 이 값은 제네릭 타임아웃의 안전망일 뿐이다.
+            timeout=self._deck_place_timeout * 3.0,
         )
 
     def _lift(self, target: float, label: str) -> Step:
@@ -2136,6 +2224,8 @@ class ForkLiftNode(Node):
             done = self._run_pose_check(step, now)
         elif step.kind == "lift":
             done = self._run_lift(step, now, elapsed)
+        elif step.kind == "deck_place_lower":
+            done = self._run_deck_place_lower(step, now)
         elif step.kind == "coupler":
             self._pallet_target_command = step.pallet_id
             self._pallet_attached_command = step.attached
@@ -2729,6 +2819,95 @@ class ForkLiftNode(Node):
                 f"lift_joint 피드백 없음: {step.label}을 시간 기준으로 통과"
             )
             return self._carried_pallet_state_valid(now, step)
+        return False
+
+    def _run_deck_place_lower(self, step: Step, now: float) -> bool:
+        """개루프 하강 뒤 남은 잔차를 실측 기준으로 없앤다.
+
+        2026-07-26 sim_diag_223158: 개루프 목표까지 정확히 내렸는데도 팔레트가
+        지지면보다 +5.475cm 높아 결속 게이트(±2.5cm)를 통과하지 못하고 transfer
+        단계가 타임아웃했다. 리프트 추종 오차는 5.5µm였으므로 제어가 아니라
+        높이 계산의 모델 오차다. 여기서는 게이트가 보는 값과 같은 기준
+        (pallet_min_z − 지지면)으로 닫는다.
+        """
+        # 목표·게이트·echo가 같은 forward offset을 쓰게 먼저 명령을 갱신한다.
+        self._deck_forward_offset_command = step.deck_forward_offset
+        self._publish_command(0.0, 0.0)
+
+        # 제네릭 타임아웃은 라벨만 남긴다. 여기서 먼저 수치와 함께 실패시켜
+        # bag을 열지 않고도 원인을 알 수 있게 한다.
+        if now - self._step_started > self._deck_place_timeout:
+            target_z = (
+                None if self._handoff_pallet_target_position is None
+                else round(self._handoff_pallet_target_position[2], 5)
+            )
+            state_age = (
+                None if self._handoff_state_time is None
+                else round(now - self._handoff_state_time, 3)
+            )
+            self._fail(
+                f"데크 안착 폐루프 실패: {step.label} — "
+                f"z_meas={self._handoff_pallet_min_z}, "
+                f"z_target={target_z}, "
+                f"lift_cmd={self._lift_target:.5f}, "
+                f"lift_actual={self._lift_feedback}, "
+                f"offset_echo={self._handoff_deck_forward_offset}, "
+                f"offset_step={step.deck_forward_offset:.3f}, "
+                f"state_age={state_age}s"
+            )
+            return False
+
+        if (
+            self._handoff_state_time is None
+            or now - self._handoff_state_time > self._deck_place_stale_sec
+        ):
+            self._step_stable_since = None
+            return False
+
+        # echo된 offset이 이번 step 값과 다르면 목표가 다른 기준으로 계산된
+        # 것이다. 추측해서 내리지 않는다(_run_handoff_align과 같은 규칙).
+        if (
+            self._handoff_deck_forward_offset is None
+            or abs(
+                self._handoff_deck_forward_offset - step.deck_forward_offset
+            ) > 0.001
+        ):
+            self._step_stable_since = None
+            return False
+
+        target = self._handoff_pallet_target_position
+        # pallet_position(강체 원점)으로 폴백하지 않는다. 피벗이 바닥이 아닌
+        # 팔레트에서는 원점이 bbox 최저점보다 높아, 그 차이만큼 정상 팔레트를
+        # 더 내리눌러 버린다. 게이트가 보는 값이 없으면 안전하게 실패시킨다.
+        z_measured = self._handoff_pallet_min_z
+        if target is None or z_measured is None:
+            self._step_stable_since = None
+            return False
+
+        z_target = target[2]
+        error = z_measured - z_target
+        if abs(error) <= self._deck_place_tol:
+            if self._step_stable_since is None:
+                self._step_stable_since = now
+            if now - self._step_stable_since >= self._deck_place_stable_sec:
+                self.get_logger().info(
+                    f"데크 안착 폐루프 완료: 잔차={error:+.5f}m, "
+                    f"lift={self._lift_target:.5f}"
+                )
+                return True
+            return False
+        self._step_stable_since = None
+
+        lift_floor = max(0.0, step.lift - self._deck_place_max_correction)
+        max_delta = self._loaded_lift_speed / self._control_rate
+        self._lift_target = deck_place_lift_setpoint(
+            self._lift_target, z_measured, z_target, lift_floor, max_delta
+        )
+        self.get_logger().info(
+            f"데크 안착 폐루프: 잔차={error:+.5f}m, "
+            f"lift={self._lift_target:.5f} (하한 {lift_floor:.5f})",
+            throttle_duration_sec=1.0,
+        )
         return False
 
     def _carried_pallet_state_valid(self, now: float, step: Step) -> bool:

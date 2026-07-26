@@ -338,6 +338,18 @@ class ForkDriver(Driver):
         iw_position_json = None
         iw_yaw = None
         deck_target_position_json = None
+        # ★목표·게이트·텔레메트리가 반드시 같은 forward_offset을 쓰게 한 번만
+        #   읽어 둔다. 아래 echo 필드도 이 값을 그대로 내보내므로, ROS가
+        #   자기 step 값과 대조해 불일치를 검출할 수 있다.
+        deck_forward_offset = self._deck_forward_offset
+        pallet_min_z = None
+        if self._iw_driver is not None:
+            try:
+                pallet_min_z = self._iw_driver.warehouse_pallet_min_z(
+                    pallet_path
+                )
+            except Exception:
+                pallet_min_z = None
         if self._iw_driver is not None and self._iw_driver.robot is not None:
             try:
                 iw_position, iw_quat = self._iw_driver.robot.get_world_pose()
@@ -351,7 +363,7 @@ class ForkDriver(Driver):
                 up_z = max(-1.0, min(1.0, 1.0 - 2.0 * (x * x + y * y)))
                 iw_tilt_deg = math.degrees(math.acos(up_z))
                 deck_point, _ = self._iw_driver.warehouse_deck_surface(
-                    self._deck_forward_offset
+                    deck_forward_offset
                 )
                 deck_target_position_json = [
                     float(deck_point[0]),
@@ -375,10 +387,12 @@ class ForkDriver(Driver):
                 "iw_world_yaw": iw_yaw,
                 "pallet_z": pallet_z,
                 "pallet_position": pallet_position_json,
+                # 결속 게이트가 z_error를 재는 값과 동일한 기준(월드 bbox 최저점).
+                "pallet_min_z": pallet_min_z,
                 "pallet_target_position": (
                     deck_target_position_json
                 ),
-                "deck_forward_offset": self._deck_forward_offset,
+                "deck_forward_offset": deck_forward_offset,
                 "forklift_position": forklift_position_json,
                 "pallet_rise": pallet_rise,
                 "expected_rise": expected_rise,
