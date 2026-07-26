@@ -28,7 +28,7 @@ ACTIVE_SEQUENCE_STATES = {
     "RETRACT_CIRC", "RETRACT_LIN",
     "RETRACT", "PRE_PLACE",
     "PRE_PLACE_BED_VIEW", "WAIT_BASKET_AT_BED_VIEW", "BASKET_AZIMUTH_ALIGN",
-    "BASKET_APPROACH", "BASKET_WRIST_ROTATE", "PLACE_RELEASING",
+    "BASKET_APPROACH", "PLACE_RELEASING",
     "BASKET_RETRACT", "POST_PLACE_BED_VIEW", "PLACE_FAILED_HOLDING",
     "GO_HOME",
     "NAV_REPOSITION_REQUIRED",
@@ -220,10 +220,7 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter("scoop_tip_below_tcp_m", 0.057)
         self.declare_parameter("basket_pose_above_rim_m", 0.0331)
         # 바구니 단계 전용 툴 자세 — 수확용 _harvest_orientation을 재사용하지
-        # 않는다. 우선 연직 하방 자세로 릴리즈점까지 이동한 뒤, 별도의
-        # BASKET_WRIST_ROTATE 단계에서 joint_1~5를 고정하고 joint_6만 180°
-        # 회전한다. quaternion IK에만 맡기면 다른 관절에 회전이 분산되어
-        # 실제 joint_6이 돌지 않을 수 있다.
+        # 않는다. 연직 하방 자세로 릴리즈점까지 이동한 뒤 그 자리에서 연다.
         self.declare_parameter(
             "basket_tool_orientation",
             [1.0, 0.0, 0.0, 0.0])
@@ -1321,12 +1318,9 @@ class ManipulatorTargetNode(Node):
             else:
                 self._send_rmp_goal(self._basket_release, "BASKET_APPROACH")
         elif self._state == "BASKET_APPROACH":
-            # 접근점이 곧 릴리즈점이다. 여기서 바로 열지 않고 joint_6만
-            # 180° 회전한 결과를 확인한 뒤 릴리즈한다.
+            # 접근점이 곧 릴리즈점이다. 도달하면 바로 연다.
             self._basket_release_reached = True
             self._log_release_clearance()
-            self._send_basket_wrist_rotate()
-        elif self._state == "BASKET_WRIST_ROTATE":
             self._transition("PLACE_RELEASING", stop=True)
             self._deadline_ns = (
                 self.get_clock().now().nanoseconds
@@ -1710,26 +1704,6 @@ class ManipulatorTargetNode(Node):
             },
         })))
 
-    def _send_basket_wrist_rotate(self) -> None:
-        """플레이스 위치에서 joint_6만 180° 회전하도록 요청한다."""
-        self._sequence_id += 1
-        self._pending_id = self._sequence_id
-        self._transition("BASKET_WRIST_ROTATE")
-        timeout = float(self.get_parameter("motion_timeout_sec").value)
-        self._deadline_ns = (
-            self.get_clock().now().nanoseconds + int(timeout * 1e9)
-        )
-        self._isaac_command_pub.publish(String(data=json.dumps({
-            "wrist_rotate": {
-                "id": self._pending_id,
-                "phase": "BASKET_WRIST_ROTATE",
-                "angle_rad": math.pi,
-            }
-        })))
-        self.get_logger().info(
-            "플레이스 후 안전 접기 — 바구니 방위(joint_1) 유지, "
-            "joint_2~6을 먼저 접은 뒤 HOME 복귀")
-
     def _start_basket_retract(self) -> None:
         """릴리즈점에서 같은 수직선으로 바구니 상부 안전점까지 LIN 후퇴한다."""
         if self._basket_place is None:
@@ -1785,7 +1759,7 @@ class ManipulatorTargetNode(Node):
 
     _BASKET_PHASE_STATES = (
         "PRE_PLACE_BED_VIEW", "WAIT_BASKET_AT_BED_VIEW", "BASKET_AZIMUTH_ALIGN",
-        "BASKET_APPROACH", "BASKET_WRIST_ROTATE", "PLACE_RELEASING",
+        "BASKET_APPROACH", "PLACE_RELEASING",
         "BASKET_RETRACT",
         "POST_PLACE_BED_VIEW",
     )
