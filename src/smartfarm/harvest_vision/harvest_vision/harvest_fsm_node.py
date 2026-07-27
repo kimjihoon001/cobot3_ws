@@ -37,8 +37,10 @@ class HarvestFsmNode(Node):
             "nav_status_topic", "/navigate_to_pose/_action/status")
         self.declare_parameter("harvest_enable_topic", "harvest_test/enable")
         # IW를 하역장으로 보내기 전에 데크에 실어야 하는 토마토 개수.
-        # 앞열 빈 KLT가 2칸이므로 기본 2 — 한 칸에 하나씩 들어간다.
-        self.declare_parameter("place_target_count", 2)
+        # 앞열 빈 KLT는 2칸이지만 real_main은 수확 1회로 고정한다 — 다회 수확은
+        # multiple_harvest 브랜치에서 2로 검증 중. 2 이상이면 1회차 플레이스 후
+        # HOME 왕복 없이 BED_VIEW로 돌아가 다음 수확을 이어간다.
+        self.declare_parameter("place_target_count", 1)
         self.declare_parameter(
             "place_more_pending_topic", "harvest_test/place_more_pending")
         self.declare_parameter(

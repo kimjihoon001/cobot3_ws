@@ -38,8 +38,10 @@ MM Nav2 수확 위치 이동
   → 팔레트 교환 후 resume_harvest 수신
 ```
 
-기본 적재 목표는 `place_target_count=2`다. 1회차 플레이스 후에는 접힌 팔을 HOME까지
-왕복시키지 않고 `joint_1` 중심으로 BED_VIEW로 돌아가 두 번째 수확을 시작한다.
+기본 적재 목표는 `place_target_count=1`이다(real_main 기준 — 수확 1회 후 바로
+하역). 2 이상으로 올리면 1회차 플레이스 후 접힌 팔을 HOME까지 왕복시키지 않고
+`joint_1` 중심으로 BED_VIEW로 돌아가 다음 수확을 이어간다(multiple_harvest 브랜치
+기본값 2, 앞열 빈 KLT 2칸 기준).
 
 ## 3. 코드 지도
 
@@ -200,10 +202,10 @@ basket max reach = 1.45 m
 
 목표가 workspace 밖이면 무리하게 계획하지 않고 재배치 요청 또는 실패 경로로 간다.
 
-### 2회 플레이스
+### 다회 플레이스 (real_main 기본값 1 = 비활성)
 
-- 기본 `place_target_count=2`
-- 1회차 후 `place_more_pending=true`
+- real_main 기본 `place_target_count=1` → 아래 경로는 타지 않고 1회 플레이스 후 바로 하역
+- 2 이상일 때: 1회차 후 `place_more_pending=true`
 - `POST_PLACE_BED_VIEW`에서 HOME 명령 없이 다음 BED_VIEW
 - 2회차 후 HOME 복귀
 - 목표 개수를 채우면 `/iw/mission=PREPARE_FORKLIFT`

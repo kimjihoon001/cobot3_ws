@@ -61,7 +61,7 @@ Nav2/AMCL은 어디에도 없다. 통합 전에 팀 전체가 확인해야 하�
   - 원문: 브리핑 FR9는 "시작 시 50%(3개) 사전 적재"였지만 실제 `pjt_config/settings.py`(`TrayConfig.preloaded`)는 **0**으로 확정됨(정량 검증 목적상 사전 적재는 성공률을 부풀린다는 이유) — `tray_manager_node`도 이에 맞춰 `INITIAL_FILLED=0`, 운반 트리거는 일단 만재(6개) 기준. 부분 적재 트리거가 필요하면 트랙 B와 협의 필요
   - **현재 경로에서는 이렇게 바뀌었다** (혼동 주의 — 위의 "사전 적재"와 아래의 "사전 적재"는 서로 다른 것이다):
     - **IW KLT 사전 적재 = 30개**: `isaacpjt/robots/iwhub.py`가 IW 데크 팔레트 뒤쪽 6칸에 5개씩 채운다. 이건 성공률 지표에 들어가는 적재가 아니라 **"이미 수확해 실어둔" 씬 연출**이다(콜라이더만 있고 Load 강체에 흡수됨). MM이 실제로 놓는 칸은 앞열 2칸뿐이다.
-    - **운반 트리거 = `harvest_fsm_node`의 `place_target_count`(기본 2)**: 트레이 만재(6개)가 아니라 IW 앞열 빈 칸 수에 맞춘 값이다.
+    - **운반 트리거 = `harvest_fsm_node`의 `place_target_count`(real_main 기본 1)**: 트레이 만재(6개)와 무관하다. IW 앞열 빈 KLT는 2칸이라 최대 2까지 올릴 수 있고, 다회 수확은 `multiple_harvest` 브랜치에서 2로 검증 중이다.
     - **부분 적재 트리거는 구현됨**: 수확 최종 실패·탐색 타임아웃 시 `_depart_with_partial_load()`가 목표 개수를 못 채워도 실은 게 있으면 `PREPARE_FORKLIFT`를 보낸다(0개면 안 보냄). 트랙 B 협의 항목이 아니라 트랙 A 코디네이터 내부 판단으로 정리됐다.
 - **[4] 임의로 둔 파라미터**: 운반 AMR 대수/네임스페이스(`amr_ids`), 인계 위치 좌표(`handoff_pose_x/y`), 정적맵 경로 — 트랙 B의 SLAM 1회 생성 결과 나오면 채움
 - ~~**섹터 ID ↔ 슬롯 ID 1:1 매핑 규칙표**~~: **무효(2026-07-27)** — `fork_lift_node.py`가 `RACK_CENTER_X`(6칸) + 팔레트 번호로 어느 랙에 넣을지 내부에서 결정한다. 별도 매핑 노드(`warehouse_manager_node`)는 삭제
