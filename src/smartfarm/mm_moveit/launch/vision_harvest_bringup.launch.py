@@ -75,6 +75,12 @@ def generate_launch_description():
         parameters=[sim, {
             "group_name": "mm_manipulator",
             "planning_frame": "base_link",
+            # 토마토와 바구니 모두 단일 관절 변화 120도까지 허용한다.
+            "ik_max_single_joint_change_rad": 2.0943951024,
+            "basket_ik_max_single_joint_change_rad": 2.0943951024,
+            "ik_candidate_timeout_sec": 0.45,
+            "tcp_stall_timeout_sec": 3.0,
+            "tcp_stall_min_progress_m": 0.001,
         }],
         remappings=_TF_REMAP,
     )
@@ -91,7 +97,14 @@ def generate_launch_description():
             "isaac_command_topic": "cmd",
             "target_class_topic": "vision/target_class",
             "state_topic": "manipulator/target_state",
+            # 이 토픽은 mm_motion_bridge.py의 phase 진행 상태(APPROACH→PREGRASP
+            # 등)용이다 — mm_motion_bridge.py 소스에 "pipeline_status"가
+            # 하드코딩돼 있어 이름을 바꾸면 안 된다(2026-07-27 확인: "status"로
+            # 바꿨더니 GRASP_VERIFY는 되는데 APPROACH→PREGRASP가 95초 넘게
+            # 멈췄다). Isaac의 grasp_check/blade 응답은 별도 파라미터
+            # isaac_status_topic이 받는다.
             "rmp_status_topic": "pipeline_status",
+            "isaac_status_topic": "status",
             "sim_tomato_topic": "sim/tomato",
             "harvest_enable_topic": "harvest_test/enable",
             "mobility_ready_topic": "manipulator/mobility_ready",
@@ -108,6 +121,10 @@ def generate_launch_description():
             "home_after_attempt": True,
             "single_shot_harvest": True,
             "retry_after_failure": False,
+            # 실패한 궤적을 되풀이하거나 다른 과실을 자동 선택하지 않는다.
+            # 안전 홈 복귀 후 다음 명시적 수확 명령을 기다린다.
+            "approach_retry_max": 0,
+            "bed_view_retry_max": 0,
             "basket_pose_max_age_sec": 2.0,
             "use_iw_tf_basket_fallback": True,
             "iw_base_frame": "iwhub_0/base_link",

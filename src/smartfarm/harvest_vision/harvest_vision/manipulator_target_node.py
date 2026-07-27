@@ -55,8 +55,19 @@ class ManipulatorTargetNode(Node):
         self.declare_parameter(
             "state_topic", "/harvester_0/manipulator/target_state"
         )
+        # mm_motion_bridge.py(ROS쪽 MoveIt 브리지)의 phase 진행 상태(reached,
+        # phase=APPROACH/PREGRASP/GRASP/...) 채널 — _status_callback이 이걸로
+        # APPROACH→PREGRASP→GRASP를 이어간다.
         self.declare_parameter(
             "rmp_status_topic", "/harvester_0/rmpflow/status"
+        )
+        # Isaac(mm.py)의 grasp_check/gripper/blade 응답 채널 — 위와는 완전히
+        # 별개 토픽인데 같은 _status_callback이 필드로 구분해서 처리한다.
+        # 하나로 합치면(둘 중 하나만 구독하면) 그 절반이 영원히 안 온다
+        # (2026-07-27 확인 — rmp_status_topic을 이걸로 바꿨더니 GRASP_VERIFY는
+        # 되는데 APPROACH→PREGRASP가 95초 넘게 멈췄다).
+        self.declare_parameter(
+            "isaac_status_topic", "/harvester_0/status"
         )
         self.declare_parameter("basket_pose_topic", "/iw/basket/empty_slot_pose")
         # IW 슬롯 선택기가 최근에 발행한 실제 좌표만 사용한다. 오래된 좌표를 들고
@@ -332,6 +343,7 @@ class ManipulatorTargetNode(Node):
         class_topic = str(self.get_parameter("target_class_topic").value)
         state_topic = str(self.get_parameter("state_topic").value)
         status_topic = str(self.get_parameter("rmp_status_topic").value)
+        isaac_status_topic = str(self.get_parameter("isaac_status_topic").value)
         basket_topic = str(self.get_parameter("basket_pose_topic").value)
         enable_topic = str(self.get_parameter("harvest_enable_topic").value)
         mobility_topic = str(self.get_parameter("mobility_ready_topic").value)
@@ -354,6 +366,8 @@ class ManipulatorTargetNode(Node):
         self.create_subscription(PoseStamped, input_topic, self._target_callback, 10)
         self.create_subscription(String, class_topic, self._class_callback, 10)
         self.create_subscription(String, status_topic, self._status_callback, 10)
+        self.create_subscription(
+            String, isaac_status_topic, self._status_callback, 10)
         self.create_subscription(PoseStamped, basket_topic, self._basket_callback, 10)
         self.create_subscription(Bool, enable_topic, self._enable_callback, 10)
         self.create_subscription(
@@ -410,11 +424,40 @@ class ManipulatorTargetNode(Node):
                 timeout=Duration(seconds=timeout),
             )
         except TransformException as exc:
-            self.get_logger().warning(
-                f"TF 변환 실패 ({msg.header.frame_id} -> {base_frame}): {exc}",
-                throttle_duration_sec=2.0,
-            )
-            return
+            # 시뮬레이션 부하로 센서 stamp가 TF보다 잠깐 앞서면 future
+            # extrapolation이 발생한다. 진행 중인 시퀀스는 위에서 잠겨 있고
+            # 타깃 획득 시 로봇은 정차 상태이므로 최신 공통 TF로 한 번 재시도한다.
+            latest_target = PoseStamped()
+            latest_target.header.frame_id = msg.header.frame_id
+            latest_target.header.stamp = Time().to_msg()
+            latest_target.pose = msg.pose
+            latest_camera_origin = PoseStamped()
+            latest_camera_origin.header.frame_id = msg.header.frame_id
+            latest_camera_origin.header.stamp = Time().to_msg()
+            latest_camera_origin.pose.orientation.w = 1.0
+            try:
+                target = self._buffer.transform(
+                    latest_target,
+                    base_frame,
+                    timeout=Duration(seconds=timeout),
+                )
+                camera = self._buffer.transform(
+                    latest_camera_origin,
+                    base_frame,
+                    timeout=Duration(seconds=timeout),
+                )
+                self.get_logger().warning(
+                    "센서 시각의 TF가 아직 없어 최신 TF로 타깃을 변환했습니다: "
+                    f"{exc}",
+                    throttle_duration_sec=2.0,
+                )
+            except TransformException as fallback_exc:
+                self.get_logger().warning(
+                    f"TF 변환 실패 ({msg.header.frame_id} -> {base_frame}): "
+                    f"{fallback_exc}",
+                    throttle_duration_sec=2.0,
+                )
+                return
 
         # tf2가 반환한 frame_id를 신뢰하되, 배포판별 구현 차이에 대비해 정규화한다.
         target.header.frame_id = base_frame

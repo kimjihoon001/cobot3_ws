@@ -69,6 +69,12 @@ def generate_launch_description():
             "mobility_ready_topic": "manipulator/mobility_ready",
             "require_moveit_ready": True,
             "moveit_ready_topic": "moveit_ready",
+            # 이 토픽은 mm_motion_bridge.py(ROS쪽 MoveIt 브리지)의 GO_HOME/
+            # BED_VIEW phase 상태용이다 — mm_motion_bridge.py 소스에 "pipeline_status"가
+            # 하드코딩돼 있어 여기서 이름을 바꾸면 안 된다(2026-07-27 확인:
+            # "status"로 바꿨더니 GO_HOME→BED_VIEW 전환이 깨졌다). Isaac의
+            # grasp_check/blade 응답(/{ns}/status)은 manipulator_target_node의
+            # rmp_status_topic이 별도로 받는다.
             "rmpflow_status_topic": "pipeline_status",
             "isaac_command_topic": "cmd",
             "reposition_request_topic": "nav/reposition_request",

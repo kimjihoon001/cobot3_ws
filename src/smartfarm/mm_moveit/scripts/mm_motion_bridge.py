@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 
 import rclpy
 from geometry_msgs.msg import Pose, PoseStamped
@@ -21,9 +22,11 @@ from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Bool, String
+from tf2_ros import Buffer, TransformException, TransformListener
 
 
 HOME_Q = {
@@ -63,6 +66,10 @@ class MMMotionBridge(Node):
         self.declare_parameter(
             "basket_ik_joint_change_weights", [0.3, 3.0, 3.0, 3.0, 4.0, 4.0])
         self.declare_parameter("ik_max_single_joint_change_rad", 2.40)
+        # 뒤쪽의 낮은 바구니로 펼칠 때는 APPROACH보다 joint_2 변화가 크므로
+        # 과실 접근 제한과 분리한다.
+        self.declare_parameter(
+            "basket_ik_max_single_joint_change_rad", 2.40)
         # 바구니 접근은 아래보기 자세만 지정하고 손목 yaw는 자유다. 머지 이전
         # grasp_proto.py와 같이 base-Z yaw 후보를 돌려 IK가 풀리는 해를 찾는다.
         self.declare_parameter(
@@ -77,12 +84,23 @@ class MMMotionBridge(Node):
         self.declare_parameter("ik_max_inflight_requests", 6)
         # 그래도 응답이 유실되면 여기서 끊고 지금까지 모인 해로 진행한다.
         self.declare_parameter("ik_search_timeout_sec", 6.0)
+        # 느린 머신에서는 ik_candidate_timeout_sec 안에 compute_ik 응답이
+        # 못 들어와 매번 다른 후보 집합이 모일 수 있다. 후보가 없거나 관절변화
+        # 제한을 만족하는 해가 없으면 같은 목표로 timeout을 늘려 재탐색한다.
+        self.declare_parameter("ik_retry_max_attempts", 1)
+        self.declare_parameter("ik_retry_timeout_scale", 2.0)
         self.declare_parameter("joint_state_max_age_sec", 0.5)
         self.declare_parameter("control_failure_retries", 2)
         self.declare_parameter("move_action_ready_timeout_sec", 10.0)
         self.declare_parameter("move_action_diagnostic_period_sec", 5.0)
+        # 실제 궤적 실행 중 harvest_tcp 위치가 이 거리 이상 진행하지 않은 채
+        # timeout을 넘기면 controller 장기 정체로 판단해 즉시 취소한다.
+        self.declare_parameter("tcp_stall_timeout_sec", 3.0)
+        self.declare_parameter("tcp_stall_min_progress_m", 0.001)
 
         self._move = ActionClient(self, MoveGroup, "move_action")
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
         self._compute_ik = self.create_client(GetPositionIK, "compute_ik")
         self._compute_fk = self.create_client(GetPositionFK, "compute_fk")
         self._status_pub = self.create_publisher(String, "pipeline_status", 20)
@@ -115,9 +133,16 @@ class MMMotionBridge(Node):
         self._ik_deadline_ns = 0
         self._ik_candidates: list[dict[str, float]] = []
         self._ik_context: tuple[int, str, MoveGroup.Goal] | None = None
+        self._ik_pose_args: tuple = ([0.0, 0.0, 0.0], "", None, None)
+        self._ik_retry_count = 0
+        self._ik_retry_scale = 1.0
         self._move_ready = False
         self._move_wait_started_ns = self.get_clock().now().nanoseconds
         self._last_move_diagnostic_ns = 0
+        self._execution_started = False
+        self._tcp_progress_position: tuple[float, float, float] | None = None
+        self._tcp_last_progress_monotonic = 0.0
+        self._tcp_stall_triggered = False
         self.create_subscription(
             JointState, "joint_states", self._joint_state, 20)
         self.create_timer(0.1, self._dispatch)
@@ -444,11 +469,17 @@ class MMMotionBridge(Node):
         approach_direction: list[float] | None,
         tool_orientation: list[float] | None,
         fallback_goal: MoveGroup.Goal,
+        is_retry: bool = False,
     ) -> None:
         """여러 IK seed의 충돌 없는 해 중 현재 관절 변화가 가장 작은 해를 고른다."""
         key = (request_id, phase)
         if self._ik_active_key == key:
             return
+        if not is_retry:
+            self._ik_retry_count = 0
+            self._ik_retry_scale = 1.0
+        self._ik_pose_args = (
+            position, frame, approach_direction, tool_orientation)
         if not self._joint_state_ready():
             self.get_logger().warning(
                 "APPROACH IK용 최신 joint_states 없음 — 기존 Pose 계획으로 시도")
@@ -535,7 +566,8 @@ class MMMotionBridge(Node):
             request.ik_request.avoid_collisions = True
             request.ik_request.timeout = Duration(
                 seconds=float(self.get_parameter(
-                    "ik_candidate_timeout_sec").value)).to_msg()
+                    "ik_candidate_timeout_sec").value)
+                * self._ik_retry_scale).to_msg()
             self._ik_pending += 1
             future = self._compute_ik.call_async(request)
             future.add_done_callback(
@@ -617,6 +649,29 @@ class MMMotionBridge(Node):
         if self._ik_pending <= 0 and not self._ik_queue:
             self._finish_ranked_ik(generation)
 
+    def _retry_ranked_ik(
+        self, request_id: int, phase: str, fallback_goal: MoveGroup.Goal,
+        reason: str,
+    ) -> bool:
+        """느린 머신에서 timeout 부족으로 놓친 해를 더 긴 timeout으로 재탐색."""
+        max_retries = max(0, int(
+            self.get_parameter("ik_retry_max_attempts").value))
+        if self._ik_retry_count >= max_retries:
+            return False
+        self._ik_retry_count += 1
+        self._ik_retry_scale = float(
+            self.get_parameter("ik_retry_timeout_scale").value)
+        position, frame, approach_direction, tool_orientation = (
+            self._ik_pose_args)
+        self.get_logger().warning(
+            f"{phase} {reason} — 동일 목표로 재탐색 "
+            f"({self._ik_retry_count}/{max_retries}, "
+            f"timeout ×{self._ik_retry_scale:.1f})")
+        self._start_ranked_approach_ik(
+            request_id, phase, position, frame, approach_direction,
+            tool_orientation, fallback_goal, is_retry=True)
+        return True
+
     def _finish_ranked_ik(self, generation: int) -> None:
         if generation != self._ik_generation or self._ik_context is None:
             return
@@ -628,9 +683,16 @@ class MMMotionBridge(Node):
         self._ik_deadline_ns = 0
         self._ik_target = None
         if not self._ik_candidates:
-            self.get_logger().warning(
-                "APPROACH 사전 IK 후보 없음 — 기존 Pose 계획으로 시도")
-            self._queue(request_id, phase, fallback_goal)
+            if self._retry_ranked_ik(
+                    request_id, phase, fallback_goal, "사전 IK 후보 없음"):
+                return
+            # 사전 IK 검증을 통과하지 못한 상태에서 Pose 계획으로 우회하면
+            # 관절변화 제한 없이 반대 IK branch로 크게 휘두를 수 있다.
+            self.get_logger().error(
+                f"{phase} 사전 IK 후보 없음 — 안전을 위해 동작 취소")
+            self._active_id = request_id
+            self._active_phase = phase
+            self._publish_motion(False, phase)
             return
         weight_param = ("basket_ik_joint_change_weights"
                         if phase == "BASKET_APPROACH"
@@ -651,8 +713,12 @@ class MMMotionBridge(Node):
                 float(weight) * delta * delta
                 for weight, delta in zip(weights, changes(solution)))
 
-        max_change = float(
-            self.get_parameter("ik_max_single_joint_change_rad").value)
+        max_change_param = (
+            "basket_ik_max_single_joint_change_rad"
+            if phase == "BASKET_APPROACH"
+            else "ik_max_single_joint_change_rad"
+        )
+        max_change = float(self.get_parameter(max_change_param).value)
         # 단일 관절 제한을 넘는 해는 경고 후 강행하지 않고 후보에서 제외한다.
         # 그런 해는 팔이 크게 휘둘려 베드·IW를 지나가는 경로가 된다.
         within_limit = [candidate for candidate in self._ik_candidates
@@ -670,6 +736,10 @@ class MMMotionBridge(Node):
                 "(Δq=[" + ", ".join(
                     f"{math.degrees(delta):.0f}°" for delta in deltas) + "])")
         if not within_limit:
+            if self._retry_ranked_ik(
+                    request_id, phase, fallback_goal,
+                    "관절변화 제한을 만족하는 IK 해 없음"):
+                return
             self.get_logger().error(
                 f"{phase} 관절변화 제한을 만족하는 IK 해 없음 — 동작 취소")
             self._active_id = request_id
@@ -726,8 +796,9 @@ class MMMotionBridge(Node):
         # 실측 위반값 (joint_limits.yaml의 joint_4 한계 = 5.0):
         #   scale 0.30 → 6.64 / 6.53   (30% 초과)
         #   scale 0.25 → 5.10 / 5.05   (1~2% 초과 — 아직 실패)
-        # 선형 외삽하면 0.245 이하가 필요하다. 여유를 두고 0.22로 둔다(예상 4.5).
-        goal.request.max_acceleration_scaling_factor = 0.22
+        # Jazzy 실측에서 0.22도 joint_4 감속 5.16225로 한계 5.0을 3.2%
+        # 초과했다. 변동 여유를 포함해 0.20으로 낮춘다.
+        goal.request.max_acceleration_scaling_factor = 0.20
         constraint = Constraints()
         pc = PositionConstraint()
         pc.header.frame_id = frame
@@ -960,6 +1031,7 @@ class MMMotionBridge(Node):
 
     def _dispatch(self) -> None:
         now = self.get_clock().now().nanoseconds
+        self._monitor_tcp_progress()
         # IK 응답이 유실되면 조용히 멈추지 않고 여기서 끊는다.
         if (self._ik_context is not None
                 and self._ik_deadline_ns
@@ -1021,9 +1093,60 @@ class MMMotionBridge(Node):
         self._active_phase = phase
         self._active_goal_message = goal
         self._send_pending = True
-        future = self._move.send_goal_async(goal)
+        self._execution_started = False
+        self._tcp_progress_position = None
+        self._tcp_last_progress_monotonic = 0.0
+        self._tcp_stall_triggered = False
+        future = self._move.send_goal_async(
+            goal, feedback_callback=self._move_feedback)
         future.add_done_callback(self._goal_response)
         self.get_logger().info(f"MoveIt 명령 id={request_id} phase={phase}")
+
+    def _move_feedback(self, message) -> None:
+        """MoveGroup가 계획을 끝내고 실제 controller 감시에 들어간 때를 잡는다."""
+        state = str(getattr(message.feedback, "state", "")).upper()
+        if state == "MONITOR" and not self._execution_started:
+            self._execution_started = True
+            self._tcp_progress_position = None
+            self._tcp_last_progress_monotonic = time.monotonic()
+
+    def _monitor_tcp_progress(self) -> None:
+        """실행 중 TCP 위치가 멈추면 장기 controller timeout 전에 취소한다."""
+        if (self._goal_handle is None or not self._execution_started
+                or self._tcp_stall_triggered
+                or self._active_phase == "BASKET_WRIST_ROTATE"):
+            return
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                str(self.get_parameter("planning_frame").value),
+                "harvest_tcp", Time())
+        except TransformException:
+            return
+        translation = transform.transform.translation
+        position = (float(translation.x), float(translation.y),
+                    float(translation.z))
+        now = time.monotonic()
+        if self._tcp_progress_position is None:
+            self._tcp_progress_position = position
+            self._tcp_last_progress_monotonic = now
+            return
+        progress = math.dist(position, self._tcp_progress_position)
+        min_progress = max(0.0, float(self.get_parameter(
+            "tcp_stall_min_progress_m").value))
+        if progress >= min_progress:
+            self._tcp_progress_position = position
+            self._tcp_last_progress_monotonic = now
+            return
+        timeout = max(0.1, float(self.get_parameter(
+            "tcp_stall_timeout_sec").value))
+        if now - self._tcp_last_progress_monotonic < timeout:
+            return
+        self._tcp_stall_triggered = True
+        self.get_logger().error(
+            f"{self._active_phase} TCP 위치가 {timeout:.1f}초 동안 "
+            f"{min_progress * 1000.0:.1f}mm 이상 변하지 않음 — 동작 취소")
+        self._goal_handle.cancel_goal_async()
+        self._publish_motion(False, self._active_phase)
 
     def _goal_response(self, future) -> None:
         self._send_pending = False
@@ -1041,6 +1164,13 @@ class MMMotionBridge(Node):
         code = None
         if response is not None:
             code = int(response.result.error_code.val)
+        if self._tcp_stall_triggered:
+            # 실패 상태는 stall 감지 시 이미 즉시 발행했다. cancel 결과로 같은
+            # 실패를 중복 발행하거나 CONTROL_FAILED 자동 재시도를 하지 않는다.
+            self._goal_handle = None
+            self._execution_started = False
+            self._tcp_progress_position = None
+            return
         if code == 1:
             self._last_succeeded = (self._active_id, self._active_phase)
         elif (code == -4
@@ -1061,6 +1191,8 @@ class MMMotionBridge(Node):
             return
         self._publish_motion(code == 1, self._active_phase, code)
         self._goal_handle = None
+        self._execution_started = False
+        self._tcp_progress_position = None
 
     def _publish_motion(
         self, reached: bool, phase: str, error_code: int | None = None
