@@ -6,7 +6,14 @@
 
 ## 실행
 
-터미널 3개가 필요하다.
+처음 한 번만:
+
+```bash
+cd ~/cobot3_ws && colcon build --packages-select monitor_ui
+cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm install
+```
+
+그다음부터는 터미널 3개.
 
 ```bash
 # 1) Isaac — --cctv 를 빼면 고정 카메라가 안 뜬다
@@ -105,7 +112,8 @@ ffmpeg -i "http://localhost:8080/stream?topic=/ui/overview&type=ros_compressed" 
 필요하다. 없으면 web_video_server가 raw 토픽을 찾다가 프레임을 하나도
 못 내보낸다(경계 헤더만 나온다).
 
-**CAM-01만 OFFLINE** — MM을 안 띄웠거나 `camera_ns`가 다르다.
+**CAM-01만 OFFLINE** — MM을 안 띄웠거나 `camera_ns`가 다르다. 이 칸은
+`vision_node`가 그린 박스 영상을 받으므로 검출 노드가 떠 있어야 나온다.
 
 ## 카메라 위치 조정
 
