@@ -101,6 +101,7 @@ class TomatoPlants:
         self._hq_calyx_up = None
         self._hq_scale = self._measure_hq_scale()
         self._hq_count = 0
+        self._static_fruit_count = 0
         self._stem_tex = self._cfg.stem_textured and has_tex
         variants = self._find_usd_variants()
         self._fruit_material = physics.create_physics_material(
@@ -147,6 +148,12 @@ class TomatoPlants:
                  c.aisle_x, c.aisle_y, c.row_spacing))
         print("[Scene] 베드 복제 기준: Sector_00/Row_00 (min X, min Y) — "
               "식물·토마토 상대 패턴 전 베드 동일")
+        if self._assets.physics_radius > 0.0:
+            live = self._fruit_count - self._static_fruit_count
+            print("[Scene] 물리 과실 %d개 (반경 %.1fm) / 시각 전용 %d개 — "
+                  "강체·조인트 %d쌍을 솔버에서 제외"
+                  % (live, self._assets.physics_radius,
+                     self._static_fruit_count, self._static_fruit_count))
         if self._hq_scale is not None:
             cx, cy = self._assets.hq_center
             print("[Scene] 고화질 과실 %d개 (수확 반경 %.1fm @ (%.2f, %.2f)) "
@@ -258,6 +265,19 @@ class TomatoPlants:
             return
         sh.CreateInput("bias", Sdf.ValueTypeNames.Float4).Set(
             Gf.Vec4f(b, b, b, 0.0))
+
+    def _use_physics(self, x: float, y: float) -> bool:
+        """이 과실에 물리(강체·콜라이더·꽃자루 조인트)를 붙일 것인가.
+
+        반경 밖은 시각 전용이라 PhysX 솔버에서 통째로 빠진다. 반경은 팔 도달
+        범위(약 1m)보다 넉넉히 잡아, 로봇이 닿을 수 있는 과실은 전부 포함되게 한다.
+        radius<=0 이면 종전처럼 전 과실에 물리를 붙인다.
+        """
+        r = self._assets.physics_radius
+        if r <= 0.0:
+            return True
+        cx, cy = self._assets.hq_center
+        return math.hypot(x - cx, y - cy) <= r
 
     def _use_hq(self, x: float, y: float) -> bool:
         """수확 정차 위치 반경 안인가. 전부 바꾸면 무거워서 이 구간만 HQ 로 쓴다."""
@@ -605,6 +625,31 @@ class TomatoPlants:
         # 반지름은 월드 m 를 과실 스케일로 나눠 로컬 단위로 지정한다.
         # HQ 과실은 배율이 달라서(에셋 원본 크기가 다름) 반드시 이 과실의 s 로 나눈다.
         # self._assets.scale 로 나누면 HQ 만 콜라이더가 17배로 커진다.
+        # 반경 밖 과실은 **시각 전용**이다 — 강체·콜라이더·조인트를 아예 안 붙인다.
+        # 540개 전부에 dynamic 강체 + FixedJoint + sleep 비활성을 걸면 PhysX 가 매 스텝
+        # 540개를 전부 푼다(잠들지 않으므로). 실제로 수확하는 건 수확 정차 위치 주변
+        # 몇 개뿐이고 나머지는 배경이라 매달려만 있으면 된다. (2026-07-27 — 시뮬이
+        # 실시간의 0.19배까지 떨어져 기동 타임아웃이 연쇄로 터진 뒤 도입)
+        calyx_up = (self._hq_calyx_up if (hq and self._hq_calyx_up)
+                    else c.fruit_calyx_up)
+        live = self._use_physics(stem_x, stem_y)
+        if not live:
+            self._static_fruit_count += 1
+            pedicel.spawn(stage, plant_path + "/Stem", path, stem_pt,
+                          (pos[0], pos[1], pos[2] + calyx_up),
+                          self._ped_cfg, self._phys.pedicel_hold_force,
+                          self._phys.pedicel_hold_torque,
+                          viz_root=plant_path, make_joint=False)
+            self._fruits.append({
+                "id": len(self._fruits),
+                "path": path,
+                "class_name": class_name,
+                "position": (pos[0], pos[1], pos[2] + self._elevation),
+                "joint": "",          # 조인트 없음 = 수확 대상 아님
+                "sector": sector,
+                "static": True,
+            })
+            return
         physics.add_sphere_collider(
             stage, path + "/Collision",
             self._phys.fruit_collision_radius_m / s)
@@ -634,10 +679,8 @@ class TomatoPlants:
         # 과실은 꼭지가 위를 향하게 스폰되므로 위로 올린 점이 꼭지 위치. (조인트 물리 앵커는
         # 과실 원점=중심 그대로 두어 안정적, 시각 꽃자루만 꼭지로 — pedicel.spawn 의 fruit_point
         # 은 세그먼트용이라 조인트 프레임엔 영향 없다.)
-        # HQ 는 꼭지가 자체 메시라 높이가 다르다(실측 63mm vs 저폴리 33mm). 고정값을
-        # 쓰면 꽃자루가 몸통 속에 박히므로 에셋에서 잰 꼭지 끝을 쓴다.
-        calyx_up = (self._hq_calyx_up if (hq and self._hq_calyx_up)
-                    else c.fruit_calyx_up)
+        # calyx_up 은 위에서 구했다 — HQ 는 꼭지가 자체 메시라 높이가 다르다
+        # (실측 63mm vs 저폴리 33mm). 고정값을 쓰면 꽃자루가 몸통 속에 박힌다.
         calyx = (pos[0], pos[1], pos[2] + calyx_up)
 
         # dynamic 과실을 static 줄기에 **비파단** FixedJoint로 매단다. 팔 kp=1e5에서는
