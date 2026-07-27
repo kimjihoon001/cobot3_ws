@@ -17,6 +17,8 @@ republish에 qos_overrides 파라미터를 줘도 적용되지 않는다(2026-07
 """
 from __future__ import annotations
 
+import os
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -43,11 +45,19 @@ class QosBridge(Node):
 def main() -> None:
     rclpy.init()
     node = QosBridge()
+    is_jazzy = os.environ.get("ROS_DISTRO") == "jazzy"
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        # Jazzy는 SIGINT 중 destroy_node()가 다시 KeyboardInterrupt를 받을 수
+        # 있어서 context를 먼저 닫는다. Humble은 기존 종료 순서를 유지한다.
+        try:
+            if is_jazzy and rclpy.ok():
+                rclpy.shutdown()
+            node.destroy_node()
+            if not is_jazzy and rclpy.ok():
+                rclpy.shutdown()
+        except KeyboardInterrupt:
+            pass

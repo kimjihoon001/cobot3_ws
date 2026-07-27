@@ -71,6 +71,14 @@ topics:
   harvester_0/scoop/release_debug:
     type: std_msgs/msg/String
 
+  # YOLO 박스가 그려진 영상은 Jazzy(109)의 vision_node가 만든다.
+  # Humble(108) 쪽에서 UI를 실행할 때도 볼 수 있도록 역방향으로 중계한다.
+  harvester_0/vision/annotated_image:
+    type: sensor_msgs/msg/Image
+    reversed: true
+    qos:
+      reliability: best_effort
+
   # ===== IW(iwhub_0) — isaacpjt/iw.py, settings.py IwHubNavConfig 실측. =====
   # 이 워크스테이션에선 아직 안 띄움 — iw.py 실행 전 실제 토픽/타입 재확인 권장.
   iwhub_0/joint_states:

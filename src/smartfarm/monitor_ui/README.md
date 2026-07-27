@@ -45,7 +45,9 @@ apt 목록 대신
 python isaacpjt/main.py --cctv --mm --iw --fork
 
 # 2) UI 스택 (영상 + rosbridge + 상태 집계 + 녹화 제어)
-export ROS_DOMAIN_ID=108
+# Jazzy 워크스테이션: 로컬 YOLO 토픽 사용
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=109
 source ~/cobot3_ws/install/setup.bash
 ros2 launch monitor_ui ui.launch.py
 
@@ -61,8 +63,9 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev
 google-chrome --start-fullscreen --app=http://localhost:5173
 ```
 
-`ROS_DOMAIN_ID=108`을 빠뜨리면 토픽이 하나도 안 보인다. `~/.bashrc` 기본값이
-109라 여기서 가장 자주 막힌다.
+Jazzy UI는 domain 109에서 로컬 YOLO 결과를 받는다. Humble UI를 domain 108에서
+실행하면 domain_bridge가 `/harvester_0/vision/annotated_image`를 109→108로
+넘긴다. 브리지 설정 변경 후 `docker/domain_bridge/run.sh --build`로 재빌드한다.
 
 `--moveit`으로 띄웠으면 카메라 네임스페이스가 다르다:
 
@@ -130,7 +133,7 @@ ffmpeg -i "http://localhost:8080/stream?topic=/ui/overview&type=ros_compressed" 
 
 ## 막혔을 때
 
-**화면이 전부 NO SIGNAL** — Isaac에 `--cctv`가 빠졌거나 도메인이 108이 아니다.
+**화면이 전부 NO SIGNAL** — Isaac에 `--cctv`가 빠졌거나 UI가 실행 중인 배포판의 도메인이 아니다(Jazzy 109, Humble 108).
 `ros2 topic list | grep cctv`로 확인한다.
 
 **토픽은 있는데 그림이 안 나옴** — 스트림 URL에 `type=ros_compressed`가

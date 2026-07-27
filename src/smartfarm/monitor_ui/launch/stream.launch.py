@@ -7,8 +7,8 @@ Isaac이 내보내는 raw RGB를 JPEG로 바꾼 뒤(web_video_server가 raw를 �
     ros2 launch monitor_ui stream.launch.py
     → http://localhost:8080 에 /ui/* 네 개가 보이면 배선 성공
 
-Isaac과 같은 ROS_DOMAIN_ID에서 실행해야 한다. 창고 자동화는 108을 쓰는데
-~/.bashrc 기본값은 109라 그대로 열면 토픽이 하나도 안 보인다.
+Jazzy에서 실행하면 로컬 vision_node의 YOLO 결과를 받고, Humble에서 실행하면
+domain_bridge가 109→108로 넘긴 같은 토픽을 받는다.
 """
 
 from launch import LaunchDescription
