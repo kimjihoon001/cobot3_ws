@@ -10,6 +10,13 @@
   LD_LIBRARY_PATH=<isaac>/exts/isaacsim.ros2.bridge/humble/lib:$LD_LIBRARY_PATH \\
   RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=108 \\
   isaac_python main.py --mm --iw --fork   (로봇 3대 전부 — 물류 루프 데모)
+  (Isaac은 domain 108/Humble 고정이 기본 구조 — docker/domain_bridge/로
+   109(Jazzy 워크스테이션)와 중계한다. 아래는 domain_bridge 없이 Isaac과
+   Jazzy를 같은 domain에 직접 물리는 실험용으로만 쓸 것 — Humble 내장
+   Fast-DDS(2.6.10)가 Jazzy Fast-DDS(2.14.x)의 ros_discovery_info CDR을
+   잘못 해석해 abort()하는 크래시가 확인됐다(2026-07-27), 우회 시도이며
+   미검증)
+  ISAACPJT_ROS_DISTRO=jazzy isaac_python main.py --mm
   isaac_python main.py --iw               (내 로봇만 — 개인 작업)
   isaac_python main.py                    (로봇 없이 씬만)
   isaac_python main.py --no-ros --mm      (씬+로봇만, 브리지 끔)
@@ -103,43 +110,58 @@ if not NO_ROS:
 
 
 def _bootstrap_isaac_ros2() -> None:
-    """Isaac 내장 Humble 라이브러리를 잡은 환경으로 main.py를 한 번 재실행한다."""
+    """Isaac 내장 ROS 2 라이브러리를 잡은 환경으로 main.py를 한 번 재실행한다.
+
+    ISAACPJT_ROS_DISTRO 환경변수로 배포판을 고른다(기본 humble). 현재 확정
+    구조는 Isaac=Humble(domain 108) 고정, 워크스테이션=Jazzy(domain 109),
+    그 사이는 domain_bridge가 중계한다(docker/domain_bridge/). 일반
+    ROS_DISTRO를 그대로 봤다면 Jazzy가 source된 터미널에서 isaac_python을
+    켰을 때 Isaac까지 Jazzy 브리지를 골라버려 이 구조와 충돌한다(2026-07-27
+    확인) — 그래서 범용 ROS_DISTRO가 아니라 이 전용 변수만 본다.
+
+    Jazzy 브리지 선택은 domain_bridge 없이 Isaac과 워크스테이션을 같은
+    domain에 직접 물리는 실험용으로만 쓴다 — 그 경우 Humble Fast-DDS(2.6.10)가
+    Jazzy Fast-DDS(2.14.x)의 ros_discovery_info CDR을 잘못 해석해 abort()하는
+    크래시가 확인돼서(2026-07-27) 우회 시도용으로 남겨둔 것이지, 지금의
+    domain_bridge 구조에서 쓰라는 게 아니다.
+    """
     if NO_ROS:
         return
 
+    distro = os.environ.get("ISAACPJT_ROS_DISTRO", "humble")
     # resolve()하면 kit/python 심볼릭 링크가 Packman 캐시 경로로 바뀔 수 있으므로
     # 링크 경로 자체의 부모를 훑는다(forklift_teleop.py에서 검증한 방식).
     executable = Path(sys.executable).absolute()
     for parent in executable.parents:
-        humble = parent / "exts" / "isaacsim.ros2.bridge" / "humble"
-        if (humble / "lib").is_dir():
+        bridge_root = parent / "exts" / "isaacsim.ros2.bridge" / distro
+        if (bridge_root / "lib").is_dir():
             break
     else:
         print(
-            "[RosBridge] Isaac 내장 Humble 경로를 자동으로 찾지 못했습니다. "
+            f"[RosBridge] Isaac 내장 {distro} 경로를 자동으로 찾지 못했습니다. "
             "LD_LIBRARY_PATH를 직접 설정해야 합니다."
         )
         return
 
-    marker = str(humble)
+    marker = str(bridge_root)
     if os.environ.get("ISAACPJT_ROS_ROOT") == marker:
         return
 
     env = os.environ.copy()
     env["ISAACPJT_ROS_ROOT"] = marker
     env["LD_LIBRARY_PATH"] = os.pathsep.join(
-        part for part in (str(humble / "lib"), env.get("LD_LIBRARY_PATH")) if part
+        part for part in (str(bridge_root / "lib"), env.get("LD_LIBRARY_PATH")) if part
     )
-    rclpy_path = humble / "rclpy"
+    rclpy_path = bridge_root / "rclpy"
     if rclpy_path.is_dir():
         env["PYTHONPATH"] = os.pathsep.join(
             part for part in (str(rclpy_path), env.get("PYTHONPATH")) if part
         )
-    env.setdefault("ROS_DISTRO", "humble")
+    env["ROS_DISTRO"] = distro
     env["ROS_DOMAIN_ID"] = "108"
     env["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
     env["ROS_LOCALHOST_ONLY"] = "0"
-    print(f"[RosBridge] Isaac 내장 ROS 2 환경 적용: {humble}", flush=True)
+    print(f"[RosBridge] Isaac 내장 ROS 2 환경 적용: {bridge_root}", flush=True)
     os.execve(
         str(executable),
         [str(executable), str(Path(__file__).resolve()), *sys.argv[1:]],
