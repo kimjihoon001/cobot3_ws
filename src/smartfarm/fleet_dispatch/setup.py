@@ -23,12 +23,11 @@ setup(
     zip_safe=True,
     maintainer="rokey",
     maintainer_email="pfr0213@gmail.com",
-    description="트랙 B - 운반 배차: fleet_dispatch_node + nav2/AMCL 런치",
+    description="트랙 B - cmd_vel_watchdog + nav2_lifecycle_activator + nav2/AMCL 런치",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "fleet_dispatch_node = fleet_dispatch.fleet_dispatch_node:main",
             "cmd_vel_watchdog = fleet_dispatch.cmd_vel_watchdog:main",
             "nav2_lifecycle_activator = fleet_dispatch.nav2_lifecycle_activator:main",
         ],

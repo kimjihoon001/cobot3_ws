@@ -2,7 +2,7 @@
 <package format="3">
   <name>smartfarm_common</name>
   <version>0.0.1</version>
-  <description>트랙 A+B 공동 스켈레톤, 트랙 C가 로직 채움: warehouse_manager_node, logger_node</description>
+  <description>스마트팜 공통 패키지 (현재 노드 없음)</description>
   <maintainer email="pfr0213@gmail.com">rokey</maintainer>
   <license>Apache-2.0</license>
 

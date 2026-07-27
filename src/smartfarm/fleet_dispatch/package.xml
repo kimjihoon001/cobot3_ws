@@ -2,7 +2,7 @@
 <package format="3">
   <name>fleet_dispatch</name>
   <version>0.0.1</version>
-  <description>트랙 B - 운반 배차: fleet_dispatch_node + nav2/AMCL 런치(정적맵 1회 생성, 로컬라이제이션은 로봇별 개별 실행)</description>
+  <description>트랙 B - cmd_vel_watchdog + nav2_lifecycle_activator + nav2/AMCL 런치(정적맵 1회 생성, 로컬라이제이션은 로봇별 개별 실행)</description>
   <maintainer email="pfr0213@gmail.com">rokey</maintainer>
   <license>Apache-2.0</license>
 

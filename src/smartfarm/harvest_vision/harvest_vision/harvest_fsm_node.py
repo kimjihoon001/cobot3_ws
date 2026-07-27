@@ -164,7 +164,7 @@ class HarvestFsmNode(Node):
         self._isaac_command_pub = self.create_publisher(
             String, str(self.get_parameter("isaac_command_topic").value), 10)
         # IW 연동: mission_nav_node가 FOLLOW/FORKLIFT를 IW 전용 Nav2 goal로 변환한다.
-        # 만재(N=1) 도킹 완료 보고를 받으면 지게차 하역을 트리거한다.
+        # 만재(place_target_count개) 도킹 완료 보고를 받으면 지게차 하역을 트리거한다.
         self._iw_mission_pub = self.create_publisher(String, "/iw/mission", latched)
         self._iw_yield_complete_pub = self.create_publisher(
             Bool,
