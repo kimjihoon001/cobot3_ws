@@ -121,9 +121,9 @@ def generate_launch_description():
             "home_after_attempt": True,
             "single_shot_harvest": True,
             "retry_after_failure": False,
-            # 실패한 궤적을 되풀이하거나 다른 과실을 자동 선택하지 않는다.
-            # 안전 홈 복귀 후 다음 명시적 수확 명령을 기다린다.
-            "approach_retry_max": 0,
+            # IK·궤적·파지 실패 모두 접근 안전점으로 최대 2회 재시도한다.
+            # 두 번 모두 실패했을 때만 홈 복귀 후 다음 명시적 요청을 기다린다.
+            "approach_retry_max": 2,
             "bed_view_retry_max": 0,
             "basket_pose_max_age_sec": 2.0,
             "use_iw_tf_basket_fallback": True,

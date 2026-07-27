@@ -278,10 +278,10 @@ class ManipulatorTargetNode(Node):
         # 실패 후에도 명시적 요청 없이 새 과실을 자동으로 쫓지 않는다.
         self.declare_parameter("retry_after_failure", False)
         # 수확 실패 시 홈까지 가지 않고 APPROACH 안전점으로 후퇴해 재파지하는 최대 횟수.
-        # 소진하면 베드뷰 재관측으로 에스컬레이션한다. 0이면 즉시 베드뷰/홈 복귀.
-        self.declare_parameter("approach_retry_max", 1)
+        # 소진하면 홈으로 복귀한다. bed_view_retry_max를 켠 경우에만 재관측을 거친다.
+        self.declare_parameter("approach_retry_max", 2)
         # 접근점 재시도까지 소진한 뒤 베드뷰로 돌아가 좌표를 다시 받는 최대 횟수.
-        self.declare_parameter("bed_view_retry_max", 1)
+        self.declare_parameter("bed_view_retry_max", 0)
         # 타겟 좌표 안정화: 파지 시작 전, 좌표가 eps_m 이내로 N프레임 연속 고정돼야 수락.
         self.declare_parameter("target_stable_frames", 5)
         self.declare_parameter("target_stable_eps_m", 0.01)
@@ -1855,7 +1855,6 @@ class ManipulatorTargetNode(Node):
         # 도달하면 기존 흐름(APPROACH→PREGRASP→GRASP)이 그대로 이어진다.
         retry_max = int(self.get_parameter("approach_retry_max").value)
         if (not was_going_home
-                and self._state != "APPROACH"
                 and self._approach_retry_count < retry_max):
             self._approach_retry_count += 1
             self.get_logger().warning(
