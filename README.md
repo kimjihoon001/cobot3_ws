@@ -6,7 +6,7 @@ Isaac Sim 위에 온실·창고 씬을 세우고, **로봇 3대가 토마토를 
 
 ROS 2 패키지(`src/`)와 Isaac Sim 스크립트(`isaacpjt/`)를 하나의 저장소로 관리합니다.
 
-- ROS 2: Humble (`/opt/ros/humble`) — Jazzy도 지원, 차이는 [5.5](#55-jazzy-ubuntu-2404-에서-쓰려면)
+- ROS 2: Humble (`/opt/ros/humble`)
 - 통신: `ROS_DOMAIN_ID=108`, `RMW_IMPLEMENTATION=rmw_fastrtps_cpp`
 - 원격 저장소: <https://github.com/kimjihoon001/cobot3_ws.git>
 
@@ -189,15 +189,13 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev   # 처음 한 번은
 
 ### 5.1 apt 의존 패키지
 
-기준 배포판은 **Humble**(Ubuntu 22.04)이고, **Jazzy**(Ubuntu 24.04)도 거의 그대로
-쓸 수 있습니다(차이는 [5.5](#55-jazzy-ubuntu-2404-에서-쓰려면)). 아래는 배포판
-이름을 `$ROS_DISTRO`에서 읽으므로 어느 쪽이든 같은 명령입니다.
+기준 배포판은 **Humble**(Ubuntu 22.04)입니다.
 
 `ros-*-desktop`만으로는 **부족**합니다. 빠뜨리면 launch가 `package '...' not found`로
 즉사합니다.
 
 ```bash
-source /opt/ros/humble/setup.bash    # 또는 /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 sudo apt update
 
 # 기반 — MoveIt / ros2_control / 주행
@@ -217,8 +215,7 @@ sudo apt install -y \
   ros-$ROS_DISTRO-nav2-regulated-pure-pursuit-controller \
   ros-$ROS_DISTRO-slam-toolbox
 
-# Isaac ↔ MoveIt 하드웨어 인터페이스 — Humble만 바이너리가 있다.
-# Jazzy는 5.5의 소스 빌드로 대체한다.
+# Isaac ↔ MoveIt 하드웨어 인터페이스
 sudo apt install -y ros-$ROS_DISTRO-topic-based-ros2-control
 
 # 모니터링 UI 전용 (트랙 D — UI를 안 쓰면 생략 가능)
@@ -266,42 +263,10 @@ Node 18 이상(vite 6). `npm install`을 건너뛰면 `npm run dev`가 `> vite`�
 
 ```bash
 cd ~/cobot3_ws
-source /opt/ros/humble/setup.bash    # 또는 /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
 ```
-
-### 5.5 Jazzy (Ubuntu 24.04) 에서 쓰려면
-
-**검증은 Humble에서만 했습니다.** Jazzy는 아래 네 가지를 처리하면 뜨는 것까지는
-확인 가능한 상태지만, 전 공정을 돌려본 적은 없습니다.
-
-**① `topic_based_ros2_control` 소스 빌드** — 이것만 Jazzy 바이너리가 없습니다
-(noble 저장소 인덱스 확인). Isaac이 관절 명령을 토픽으로 받는 통로라 MM이 아예
-안 움직이므로 필수입니다. 상류에 `jazzy` 브랜치가 없어 `main`을 씁니다.
-
-```bash
-cd ~/cobot3_ws/src
-git clone https://github.com/PickNikRobotics/topic_based_ros2_control.git
-cd ~/cobot3_ws && colcon build --packages-select topic_based_ros2_control
-```
-
-**② `empy` 버전** — Humble/Iron은 3.3.4, Jazzy 이상은 4.x입니다. 섞이면
-`smartfarm_interfaces` 빌드가 `ModuleNotFoundError: No module named 'em'`으로
-깨집니다. `./scripts/fix_ros_build_env.sh`가 `$ROS_DISTRO`를 보고 맞는 쪽을 깔아 줍니다.
-
-**③ Nav2 파라미터 키** — `controller_server`의 진행 검사기 키가 Humble은
-`progress_checker_plugin`(단수), Jazzy는 `progress_checker_plugins`(리스트)입니다.
-`config/harvester_nav2.yaml`에는 **양쪽이 이미 병기**돼 있어 그대로 둬도 됩니다.
-다만 플래너·behavior 플러그인 이름이 Jazzy에서 `nav2_navfn_planner/NavfnPlanner`
-형태(슬래시)에서 `::` 형태로 정리됐습니다. 이 파일은 아직 슬래시 형태라, Nav2가
-플러그인을 못 찾으면 여기부터 보세요. **[4] 임의 — 미검증, TODO**
-
-**④ 파이썬** — Jazzy는 Python 3.12입니다. `numpy<2` 제약은 그대로 유효합니다
-(24.04의 `python3-numpy`도 1.26).
-
-Isaac Sim 쪽은 5.1이 Humble·Jazzy 양쪽 ROS 2 브리지를 제공하므로 `main.py`는
-그대로 씁니다.
 
 ---
 
