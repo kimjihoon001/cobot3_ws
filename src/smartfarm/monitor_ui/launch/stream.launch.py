@@ -31,6 +31,20 @@ FIXED_CAMERAS = (
 )
 
 
+def _sensor_qos_bridge(name, in_topic, out_topic):
+    """BEST_EFFORT 센서 영상을 RELIABLE republish 입력으로 변환한다."""
+    return Node(
+        package="monitor_ui",
+        executable="qos_bridge",
+        name=f"qos_bridge_{name}",
+        parameters=[{
+            "in_topic": in_topic,
+            "out_topic": out_topic,
+        }],
+        output="screen",
+    )
+
+
 def _republish(name, in_topic):
     """raw → JPEG 변환 노드 하나.
 
@@ -91,7 +105,14 @@ def generate_launch_description():
             output="screen",
         ),
         _republish("mm_front", MM_FRONT_RELAY),
-        *(_republish(name, topic) for name, topic in FIXED_CAMERAS),
+        *(
+            node
+            for name, topic in FIXED_CAMERAS
+            for node in (
+                _sensor_qos_bridge(name, topic, f"/relay/{name}"),
+                _republish(name, f"/relay/{name}"),
+            )
+        ),
 
         # 브라우저가 base 토픽(/ui/<pane>)을 요청하면 압축 transport를
         # 알아서 골라 쓴다. 확인용 토픽 목록은 http://localhost:8080 루트.

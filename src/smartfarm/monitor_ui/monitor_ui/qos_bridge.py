@@ -21,6 +21,9 @@ import os
 
 import rclpy
 from rclpy.node import Node
+from rclpy.exceptions import ParameterUninitializedException
+from rclpy.executors import ExternalShutdownException
+from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
@@ -29,12 +32,16 @@ class QosBridge(Node):
     def __init__(self) -> None:
         super().__init__("qos_bridge")
         self.declare_parameter("in_topic", "")
-        self.declare_parameter("fallback_topics", [])
+        self.declare_parameter(
+            "fallback_topics", Parameter.Type.STRING_ARRAY)
         self.declare_parameter("out_topic", "")
         in_topic = str(self.get_parameter("in_topic").value)
+        try:
+            fallback_value = self.get_parameter("fallback_topics").value
+        except ParameterUninitializedException:
+            fallback_value = []
         fallback_topics = [
-            str(topic) for topic in self.get_parameter("fallback_topics").value
-            if str(topic)
+            str(topic) for topic in fallback_value if str(topic)
         ]
         out_topic = str(self.get_parameter("out_topic").value)
         if not in_topic or not out_topic:
@@ -60,7 +67,7 @@ def main() -> None:
     is_jazzy = os.environ.get("ROS_DISTRO") == "jazzy"
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         # Jazzy는 SIGINT 중 destroy_node()가 다시 KeyboardInterrupt를 받을 수

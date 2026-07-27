@@ -79,6 +79,28 @@ topics:
     qos:
       reliability: best_effort
 
+  # Isaac(Humble 108)의 고정 CCTV를 Jazzy(109) UI 백엔드로 전달한다.
+  cctv/greenhouse:
+    type: sensor_msgs/msg/Image
+    qos:
+      reliability: best_effort
+
+  cctv/unloading:
+    type: sensor_msgs/msg/Image
+    qos:
+      reliability: best_effort
+
+  cctv/storage:
+    type: sensor_msgs/msg/Image
+    qos:
+      reliability: best_effort
+
+  cctv/overview:
+    type: sensor_msgs/msg/Image
+    qos:
+      reliability: best_effort
+
+
   # ===== IW(iwhub_0) — isaacpjt/iw.py, settings.py IwHubNavConfig 실측. =====
   # 이 워크스테이션에선 아직 안 띄움 — iw.py 실행 전 실제 토픽/타입 재확인 권장.
   iwhub_0/joint_states:
