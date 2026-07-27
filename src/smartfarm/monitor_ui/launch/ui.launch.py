@@ -30,12 +30,19 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument("camera_ns", default_value="harvester_0"),
+        DeclareLaunchArgument(
+            "mm_front_topic",
+            default_value=[
+                LaunchConfiguration("camera_ns"),
+                "/vision/annotated_image"],
+            description="CAM-01 raw Image 토픽"),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(share, "launch", "stream.launch.py")),
             launch_arguments={
                 "camera_ns": LaunchConfiguration("camera_ns"),
+                "mm_front_topic": LaunchConfiguration("mm_front_topic"),
             }.items()),
 
         IncludeLaunchDescription(AnyLaunchDescriptionSource(rosbridge)),

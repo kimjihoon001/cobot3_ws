@@ -62,6 +62,9 @@ export const CAMERAS: CameraSpec[] = [
  */
 export function cameraHealth(hz: number, stream: StreamState): CameraStatus {
   if (stream === "error" || stream === "reconnecting") return "error";
+  // 브라우저가 MJPEG 첫 프레임을 받은 것은 영상 연결의 직접 증거다.
+  // /ui/status(rosbridge)가 늦거나 끊겨 Hz가 0이어도 영상을 가리지 않는다.
+  if (stream === "playing" && hz <= 0) return "warning";
   if (hz <= 0) return "offline";
   if (hz < 10) return "warning";
   return "online";

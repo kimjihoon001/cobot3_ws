@@ -73,6 +73,16 @@ Jazzy UI는 domain 109에서 로컬 YOLO 결과를 받는다. Humble UI를 domai
 ros2 launch monitor_ui ui.launch.py camera_ns:=harvester_moveit
 ```
 
+CAM-01은 OpenCV 디버깅창과 같은 YOLO 박스 영상
+`/harvester_0/vision/annotated_image`를 표시한다. namespace 없이
+`harvest_full.launch.py`를 단독 실행해 디버깅창을 띄운 경우에는 토픽이
+`/vision/annotated_image`이므로 입력을 명시한다:
+
+```bash
+ros2 launch monitor_ui ui.launch.py \
+  mm_front_topic:=/vision/annotated_image
+```
+
 영상 배선만 따로 확인하려면 `stream.launch.py`를 직접 띄운다.
 
 ## 화면
@@ -140,8 +150,10 @@ ffmpeg -i "http://localhost:8080/stream?topic=/ui/overview&type=ros_compressed" 
 필요하다. 없으면 web_video_server가 raw 토픽을 찾다가 프레임을 하나도
 못 내보낸다(경계 헤더만 나온다).
 
-**CAM-01만 OFFLINE** — MM을 안 띄웠거나 `camera_ns`가 다르다. 이 칸은
-`vision_node`가 그린 박스 영상을 받으므로 검출 노드가 떠 있어야 나온다.
+**CAM-01만 OFFLINE** — MM을 안 띄웠거나 `camera_ns`가 다르거나 Isaac을
+`--no-camera`로 실행한 경우다. 디버깅창에는 영상이 보이는데 UI만 OFFLINE이면
+`ros2 topic list | grep annotated_image`로 실제 토픽 이름을 확인하고 위처럼
+`mm_front_topic`을 맞춘다.
 
 ## 카메라 위치 조정
 

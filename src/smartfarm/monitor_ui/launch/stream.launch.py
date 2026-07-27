@@ -51,26 +51,41 @@ def _republish(name, in_topic):
 
 
 def generate_launch_description():
-    # --moveit 실행이면 harvester_moveit, RMP 실행이면 harvester_0으로 뜬다.
+    # --moveit 실행이면 harvester_moveit, 기본 통합 실행이면 harvester_0으로 뜬다.
     camera_ns = LaunchConfiguration("camera_ns")
+    mm_front_topic = LaunchConfiguration("mm_front_topic")
 
     return LaunchDescription([
         DeclareLaunchArgument("camera_ns", default_value="harvester_0"),
+        DeclareLaunchArgument(
+            "mm_front_topic",
+            default_value=[camera_ns, "/vision/annotated_image"],
+            description=(
+                "CAM-01 raw Image 토픽. 기본은 vision_debug_view와 같은 "
+                "/<camera_ns>/vision/annotated_image."
+            ),
+        ),
 
-        # 생 RGB가 아니라 vision_node가 박스를 그려 낸 쪽을 받는다. 1번 화면은
-        # 검출을 보여주는 자리인데 /rgb를 받으면 박스 없는 원본만 나온다.
-        # 따라서 vision_node가 떠 있어야 이 화면이 나온다(안 뜨면 offline).
+        # CAM-01은 vision_debug_view와 같은 annotated 토픽을 받는다. 통합
+        # 파이프라인은 /harvester_0/vision/annotated_image이고, namespace 없이
+        # harvest_full.launch.py를 단독 실행할 때는 /vision/annotated_image다.
+        # 후자는 mm_front_topic launch 인자로 명시한다.
         #
-        # vision_node는 센서 QoS(BEST_EFFORT)로 발행하는데 republish는
-        # RELIABLE로만 구독해서 직접 연결하면 프레임이 0장이다. qos_bridge가
-        # 그 한 홉만 QoS를 바꿔 통과시킨다(자세한 이유는 qos_bridge.py).
+        # D455와 vision_node 모두 센서 QoS(BEST_EFFORT)로 발행하지만 republish는
+        # RELIABLE 구독이라 직접 연결되지 않는다. qos_bridge가 그 한 홉만 바꾼다.
         Node(
             package="monitor_ui",
             executable="qos_bridge",
             name="qos_bridge_mm_front",
             parameters=[{
-                "in_topic": ParameterValue(
-                    [camera_ns, "/vision/annotated_image"], value_type=str),
+                "in_topic": ParameterValue(mm_front_topic, value_type=str),
+                # 비전 실행 방식마다 namespace가 달라진다. 사용자가 launch
+                # 인자를 몰라도 현재 발행 중인 디버깅 영상을 자동으로 받는다.
+                "fallback_topics": [
+                    "/vision/annotated_image",
+                    "/harvester_0/vision/annotated_image",
+                    "/harvester_moveit/vision/annotated_image",
+                ],
                 "out_topic": MM_FRONT_RELAY,
             }],
             output="screen",

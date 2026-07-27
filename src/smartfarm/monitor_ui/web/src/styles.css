@@ -227,6 +227,13 @@ body {
   display: block;
 }
 
+/* CAM-01의 4:3 디버깅 영상을 관제 타일 크기에 맞춘다. 원본 ROS 영상과
+   검출 좌표는 수정하지 않고 브라우저 표시에서만 중앙 기준으로 채운다. */
+.pane-video-fill {
+  object-fit: cover;
+  object-position: center;
+}
+
 /* 영상을 가리지 않고 위에 얹는다. 상태 피드만 끊긴 경우에도 그림은 계속
    보여야 하므로 배경을 깔지 않는다. */
 .pane-nosignal {

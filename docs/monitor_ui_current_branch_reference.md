@@ -41,7 +41,7 @@ REC 버튼
 
 | pane | 토픽 | 위치 → 대상 | 부감각 |
 |---|---|---|---|
-| CAM-01 MM D455 / YOLO | `/harvester_0/rgb` | 로봇 장착 | — |
+| CAM-01 MM D455 / YOLO | `/harvester_0/vision/annotated_image` (통합), `/vision/annotated_image` (비전 단독) | 로봇 장착 | — |
 | CAM-02 GREENHOUSE | `/cctv/greenhouse` | (6.05, −4.0, 4.2) → (0, 0, 1.0) | 24° |
 | CAM-03 UNLOADING | `/cctv/unloading` | (3.0, 15.5, 3.8) → (0, 11.5, 0.8) | 31° |
 | CAM-04 STORAGE | `/cctv/storage` | (5.5, 15.0, 3.9) → (0, 20.4, 1.2) | 19° |

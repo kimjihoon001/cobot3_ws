@@ -29,17 +29,29 @@ class QosBridge(Node):
     def __init__(self) -> None:
         super().__init__("qos_bridge")
         self.declare_parameter("in_topic", "")
+        self.declare_parameter("fallback_topics", [])
         self.declare_parameter("out_topic", "")
         in_topic = str(self.get_parameter("in_topic").value)
+        fallback_topics = [
+            str(topic) for topic in self.get_parameter("fallback_topics").value
+            if str(topic)
+        ]
         out_topic = str(self.get_parameter("out_topic").value)
         if not in_topic or not out_topic:
             raise SystemExit("in_topic / out_topic 파라미터가 필요합니다.")
 
         # 발행은 기본(RELIABLE) — 뒤에 붙는 republish가 그걸 요구한다.
         self._pub = self.create_publisher(Image, out_topic, 1)
-        self.create_subscription(
-            Image, in_topic, self._pub.publish, qos_profile_sensor_data)
-        self.get_logger().info(f"QoS 브리지: {in_topic} → {out_topic}")
+        # 실행 launch에 따라 vision_node namespace가 달라질 수 있다. 같은 토픽은
+        # 중복 구독하지 않고, 실제 발행자가 존재하는 입력 어느 쪽이든 relay한다.
+        inputs = list(dict.fromkeys([in_topic, *fallback_topics]))
+        self._subscriptions = [
+            self.create_subscription(
+                Image, topic, self._pub.publish, qos_profile_sensor_data)
+            for topic in inputs
+        ]
+        self.get_logger().info(
+            f"QoS 브리지: {', '.join(inputs)} → {out_topic}")
 
 
 def main() -> None:

@@ -37,11 +37,15 @@ export default function CameraTile({
   const [attempt, setAttempt] = useState(0);
   const [lastOk, setLastOk] = useState<string | null>(null);
 
+  const markPlaying = () => {
+    setStream("playing");
+    setLastOk(new Date().toLocaleTimeString("ko-KR"));
+  };
+
   // 프레임이 실제로 도착하는지는 ROS 쪽 실측 Hz가 가장 확실한 근거다.
   useEffect(() => {
     if (hz > 0) {
-      setStream("playing");
-      setLastOk(new Date().toLocaleTimeString("ko-KR"));
+      markPlaying();
     }
   }, [hz]);
 
@@ -70,9 +74,13 @@ export default function CameraTile({
       {/* 영상은 상태 피드와 무관하게 항상 건다. ui_status_node나 rosbridge가
           죽어도 그림은 계속 나와야 한다. */}
       <img
-        className="pane-video"
+        className={`pane-video${cam.key === "mm_front" ? " pane-video-fill" : ""}`}
         src={src}
         alt={cam.name}
+        // MJPEG 첫 프레임이 브라우저에 실제로 로드되면 rosbridge의 Hz 상태가
+        // 아직 없더라도 연결 성공이다. 영상은 HTTP, 상태는 WebSocket이라
+        // 어느 한쪽의 지연이 다른 쪽 표시를 가리면 안 된다.
+        onLoad={markPlaying}
         onError={() => setStream("error")}
       />
 
