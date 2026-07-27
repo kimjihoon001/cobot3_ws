@@ -161,7 +161,7 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev   # 처음 한 번은
 ├── src/
 │   ├── smartfarm/          # 프로젝트 ROS 2 패키지 (위 표)
 │   ├── m0609/              # 부트캠프 실습 (개인 폴더)
-│   └── m-explore-ros2/     # 외부 패키지 (별도 clone, 추적 안 함)
+│   └── m-explore-ros2/     # 외부 서브모듈: frontier 기반 자동 탐사·다중 로봇 맵 병합
 ├── isaacpjt/               # Isaac Sim 씬·로봇·ROS 브리지
 │   ├── main.py             # 시뮬레이션 진입점
 │   ├── robots/  scene/  ros/
@@ -173,6 +173,31 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev   # 처음 한 번은
 ├── scripts/  tools/        # 빌드 환경 수정, 디버그 bag 분석 등
 └── build/ install/ log/    # colcon 산출물 (.gitignore)
 ```
+
+### `m-explore-ros2` 서브모듈
+
+`src/m-explore-ros2`는
+[`robo-friends/m-explore-ros2`](https://github.com/robo-friends/m-explore-ros2)의
+커밋 `326cf8a`를 고정해 사용하는 외부 ROS 2 패키지다. 주요 구성은 다음과 같다.
+
+- `explore_lite`: SLAM 지도의 미탐사 경계(frontier)를 찾아 Nav2
+  `navigate_to_pose` 목표를 자동 생성한다.
+- `map_merge`: 여러 로봇이 만든 occupancy grid를 하나로 병합한다.
+- `explore_lite_msgs`: 탐사 제어용 ROS 2 메시지를 제공한다.
+
+현재 프로젝트에서는
+`fleet_dispatch/launch/harvester_nav2.launch.py`의 `slam:=true explore:=true`에서
+`explore_lite`를 사용한다. 평상시 정적맵·AMCL 주행에는 실행되지 않는다.
+
+저장소를 처음 받거나 서브모듈이 비어 있을 때:
+
+```bash
+git submodule update --init --recursive
+```
+
+일반 `git pull`은 서브모듈 내부 커밋을 자동으로 바꾸지 않는다. 팀에서 검증한 gitlink를
+재현하려면 위 명령을 다시 실행한다. 외부 코드를 수정하거나 다른 upstream 커밋으로
+올릴 때는 서브모듈 내부 커밋과 루트 저장소의 gitlink 변경을 별도 검토한다.
 
 ### 문서
 
