@@ -11,18 +11,31 @@ import math
 import os
 import random
 
-from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdShade
+from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdShade
 
 from isaacsim.core.utils.stage import add_reference_to_stage
 
 from pjt_config.settings import (GreenhouseConfig, PhysicsConfig, PlantConfig,
                              TomatoAssetConfig)
 from scene import pedicel, physics
-from pjt_utils import ripeness
+from pjt_utils import ripeness, textures
 from pjt_utils.xform import set_pose, set_scale
 
 # aoc 배경 식물 잎 색 (무텍스처 → displayColor 로 초록. 루트 무광재질이 읽는다).
 FOLIAGE_COLOR = Gf.Vec3f(0.20, 0.42, 0.16)
+
+# aoc 식물 파트별 원본 텍스처 (파일명, 알파컷아웃 필요 여부).
+# dae→usd 변환기가 재질을 못 옮겨서 usd 안에는 흰색 DefaultMaterial 만 남았지만,
+# prim 이름(Leaf1/Blossom2/Branch1…)과 UV(primvars:st)는 살아 있어 여기서 다시 잇는다.
+# lef3=lef1, lef4=lef2 로 파일이 중복이라(md5 확인) 잎은 2종만 쓴다.
+FOLIAGE_TEXTURES = {
+    "Branch1":  ("AG15brn1.png", False),   # 줄기/가지 껍질. UV v 가 0~29 로 타일링됨
+    "Leaf1":    ("AG15lef1.png", True),    # 잎 = 사각 판 + 알파. 컷아웃 없으면 초록 사각형
+    "Leaf2":    ("AG15lef2.png", True),
+    "Blossom1": ("AG15blo1.png", True),    # 꽃도 알파 카드
+    "Blossom2": ("AG15blo2.png", True),
+    "Blossom3": ("AG15blo3.png", True),
+}
 
 STEM_COLOR = Gf.Vec3f(0.25, 0.45, 0.15)
 
@@ -78,6 +91,17 @@ class TomatoPlants:
         if self._cfg.use_aoc_background and not self._aoc_bg:
             print(f"[WARN] 배경 식물 에셋 없음: {self._assets.background_plant_usd}"
                   " — 원기둥 줄기만 스폰")
+        # 고화질 텍스처는 원본 png 폴더가 있어야 켜진다 (없으면 종전 단색으로).
+        has_tex = os.path.isdir(self._assets.texture_dir)
+        if (self._cfg.foliage_textured or self._cfg.fruit_textured) and not has_tex:
+            print(f"[WARN] 텍스처 폴더 없음: {self._assets.texture_dir} — 단색으로 스폰")
+        self._foliage_tex = self._cfg.foliage_textured and self._aoc_bg and has_tex
+        self._fruit_tex = self._cfg.fruit_textured and has_tex
+        # _measure_hq_scale 이 조기 반환(에셋 없음 등)해도 참조되므로 먼저 둔다.
+        self._hq_calyx_up = None
+        self._hq_scale = self._measure_hq_scale()
+        self._hq_count = 0
+        self._stem_tex = self._cfg.stem_textured and has_tex
         variants = self._find_usd_variants()
         self._fruit_material = physics.create_physics_material(
             stage, "/World/PhysicsMaterials/fruit",
@@ -123,6 +147,124 @@ class TomatoPlants:
                  c.aisle_x, c.aisle_y, c.row_spacing))
         print("[Scene] 베드 복제 기준: Sector_00/Row_00 (min X, min Y) — "
               "식물·토마토 상대 패턴 전 베드 동일")
+        if self._hq_scale is not None:
+            cx, cy = self._assets.hq_center
+            print("[Scene] 고화질 과실 %d개 (수확 반경 %.1fm @ (%.2f, %.2f)) "
+                  "/ 저폴리 %d개" % (self._hq_count, self._assets.hq_radius,
+                                    cx, cy, self._fruit_count - self._hq_count))
+
+    def _measure_hq_scale(self) -> float | None:
+        """HQ 과실 배율을 에셋 실측 bbox 에서 유도한다. 못 쓰면 None.
+
+        USD 는 참조할 때 단위(metersPerUnit)도 업축(upAxis)도 자동 변환하지 않는다.
+        이 usdz 는 metersPerUnit=0.01 / upAxis=Y 라 그냥 참조하면 2.6m 짜리 토마토가
+        옆으로 누워 나온다. 배율은 여기서, 회전은 스폰 때 Body 에 건다.
+
+        배율 = 목표 지름 / 원본 수평 지름. 매직넘버를 두지 않고 매번 재므로
+        에셋을 바꿔도 자동으로 맞는다([2] 유도).
+        """
+        a = self._assets
+        if not (a.hq_enabled and os.path.isfile(a.hq_usd)):
+            if a.hq_enabled:
+                print(f"[WARN] HQ 과실 에셋 없음: {a.hq_usd} — 저폴리 과실만 스폰")
+            return None
+        src = Usd.Stage.Open(a.hq_usd)
+        body = next((p for p in src.Traverse()
+                     if p.IsA(UsdGeom.Mesh) and "body" in p.GetName().lower()), None)
+        if body is None:
+            print(f"[WARN] HQ 에셋에서 body 메시를 못 찾음: {a.hq_usd}")
+            return None
+        # ⚠ 반드시 **합성된** bbox 로 재야 한다. 이 에셋은 메시 위에 scale=100 →
+        # 0.00126 → 축스왑 → 100 변환 체인이 걸려 있어, 원시 points 로 재면 12.7배
+        # 틀린다(2026-07-27 실측: 원시 2.66 vs 합성 33.68).
+        rng_ = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
+        ).ComputeWorldBound(body).ComputeAlignedRange()
+        if rng_.IsEmpty():
+            print(f"[WARN] HQ 에셋 bbox 계산 실패: {a.hq_usd}")
+            return None
+        # ⚠ 그리고 **에셋 단위(metersPerUnit)로 실제 미터를 만들어야** 한다.
+        # Isaac 의 metricsAssembler 가 참조 prim 에 Scale:unitsResolve=0.01 을 자동으로
+        # 걸어 cm→m 을 이미 해준다. 그걸 모르고 에셋 단위를 그대로 미터로 보면 배율이
+        # 100배 작아져 0.7mm 짜리 토마토가 된다(2026-07-27 실제로 겪음 — 수확 반경의
+        # 과실이 통째로 안 보였다). aoc 배경 식물의 foliage_scale 도 같은 규약이다
+        # (에셋 1.388m 기준 ×0.85).
+        mpu = UsdGeom.GetStageMetersPerUnit(src)
+        # 에셋이 Y-up 이므로 수평은 X·Z. 두 축 평균을 지름으로 본다(자연물이라 비대칭).
+        size = rng_.GetSize()
+        diam_m = (size[0] + size[2]) / 2.0 * mpu
+        scale = a.hq_target_diameter_m / diam_m
+        # 꽃자루를 **에셋 자체 꼭지 메시의 끝**에 붙이기 위해 그 높이를 재 둔다.
+        # 저폴리용 고정값(fruit_calyx_up=33mm)을 그대로 쓰면 HQ 는 꼭지가 더 높아서
+        # (실측 63mm) 꽃자루가 몸통 속에 박힌다.
+        stem = next((p for p in src.Traverse()
+                     if p.IsA(UsdGeom.Mesh) and "stem" in p.GetName().lower()), None)
+        self._hq_calyx_up = None
+        if stem is not None:
+            top = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
+            ).ComputeWorldBound(stem).ComputeAlignedRange().GetMax()[1]  # Y-up
+            self._hq_calyx_up = top * mpu * scale
+        print(f"[Scene] HQ 과실: 원본 지름 {diam_m * 1000:.1f}mm → 배율 {scale:.4f} "
+              f"(목표 {a.hq_target_diameter_m * 1000:.1f}mm), "
+              f"꼭지 끝 {(self._hq_calyx_up or 0) * 1000:.1f}mm")
+        return scale
+
+    def _spawn_hq_body(self, stage: Usd.Stage, path: str) -> None:
+        """고화질 과실(usdz)을 얹는다. **자체 PBR 재질을 그대로 살린다.**
+
+        이 에셋은 baseColor/roughness/normal 텍스처가 완비돼 있다. 저폴리 과실처럼
+        `bind_matte_material`/`bind_texture` 를 걸면 그 PBR 을 덮어버려 고화질을
+        쓰는 의미가 없어진다 → 재질은 손대지 않는다.
+
+        displayColor 는 **몸통 메시에만** 빨강으로 적는다. YOLO 데이터셋 생성이
+        이 값을 읽어 단색 재질을 굽기 때문(SDG 라벨 근거). 줄기·잎까지 빨갛게
+        칠하면 데이터셋 이미지가 이상해진다.
+        """
+        add_reference_to_stage(self._assets.hq_usd, path)
+        prim = stage.GetPrimAtPath(path)
+        # 업축(Y-up)은 **여기서 돌리지 않는다.** Isaac 의 metricsAssembler 가 참조
+        # prim 에 Rotate:unitsResolve=90 을 자동으로 걸어 이미 세워 준다. 여기서 또
+        # 90도를 주면 합쳐서 180도가 돼 거꾸로 선다(2026-07-27 실제로 겪음 — Property
+        # 패널의 unitsResolve 항목을 보고 발견). 단위 변환도 마찬가지로 자동이다
+        # (Scale:unitsResolve=0.01) — 배율 계산은 _measure_hq_scale 주석 참조.
+        hide = []
+        for m in Usd.PrimRange(prim):
+            if m.IsA(UsdShade.Shader):
+                self._soften_gloss(m)
+                continue
+            if not m.IsA(UsdGeom.Mesh):
+                continue
+            name = m.GetName().lower()
+            if "leaves" in name and not self._assets.hq_leaves:
+                hide.append(m)          # 순회 중 SetActive 금지 — 아래에서 처리
+            elif "body" in name:
+                ripeness.apply_flat_color(stage, str(m.GetPath()), ripeness.RED)
+        for m in hide:
+            UsdGeom.Imageable(m).MakeInvisible()
+
+    def _soften_gloss(self, shader: Usd.Prim) -> None:
+        """러프니스 텍스처 출력을 bias 만큼 끌어올려 광택을 낮춘다.
+
+        에셋 원본은 러프니스가 0.176~0.373(평균 0.21)이라 젖은 플라스틱처럼 번들거린다.
+        텍스처 연결을 끊고 상수로 덮으면 과피 굴곡이 통째로 사라지므로, UsdUVTexture 의
+        `bias`(출력 = 텍스처 × scale + bias)만 올려 **굴곡은 살리고 값만** 옮긴다.
+        """
+        b = self._assets.hq_roughness_bias
+        if b <= 0.0 or "roughness" not in shader.GetName().lower():
+            return
+        sh = UsdShade.Shader(shader)
+        if sh.GetIdAttr().Get() != "UsdUVTexture":
+            return
+        sh.CreateInput("bias", Sdf.ValueTypeNames.Float4).Set(
+            Gf.Vec4f(b, b, b, 0.0))
+
+    def _use_hq(self, x: float, y: float) -> bool:
+        """수확 정차 위치 반경 안인가. 전부 바꾸면 무거워서 이 구간만 HQ 로 쓴다."""
+        if self._hq_scale is None:
+            return False
+        cx, cy = self._assets.hq_center
+        return math.hypot(x - cx, y - cy) <= self._assets.hq_radius
 
     def _active_plant_indices(self, total: int) -> list[int]:
         """베드 전체 길이를 유지하며 지정 비율만 균등하게 선택한다."""
@@ -242,6 +384,12 @@ class TomatoPlants:
         UsdGeom.Xformable(stem.GetPrim()).AddTranslateOp().Set(
             Gf.Vec3d(x, y, c.stem_height / 2.0))
         physics.add_shape_collider(stem.GetPrim())
+        if self._stem_tex:
+            # 해석적 Cylinder 는 콜라이더·꽃자루 조인트 body 로 그대로 두고 **숨기기만**
+            # 한다. 그 자리에 UV 를 가진 튜브 메시를 얹어 껍질 텍스처를 입힌다
+            # (Cylinder 프리미티브엔 primvars:st 가 없어 텍스처를 못 문다).
+            UsdGeom.Imageable(stem.GetPrim()).MakeInvisible()
+            self._spawn_stem_skin(stage, path + "/StemSkin", x, y)
 
         # aoc 배경 식물(잎+가지) — 시각 전용. 원기둥 줄기(콜라이더)는 그대로 두고 위에 얹는다.
         # foliage=False 인 그루는 잎 없이 줄기만(레퍼런스처럼 덜 무성하게).
@@ -258,6 +406,47 @@ class TomatoPlants:
             self._spawn_fruit(stage, path, f"{path}/Fruit_{f:02d}", x, y,
                               variants, f, n_fruits, sector)
         self._fruit_count += n_fruits
+
+    def _spawn_stem_skin(self, stage: Usd.Stage, path: str,
+                         x: float, y: float) -> None:
+        """줄기 껍질 — UV 를 가진 튜브 메시. **시각 전용**(콜라이더·강체 없음).
+
+        UV: u = 둘레 한 바퀴(0~1), v = 길이 / stem_tile_m. 껍질 텍스처가 세로로
+        긴 스트립(80×1100)이라 이 방향이 맞다.
+        """
+        c = self._cfg
+        n, r, h = c.stem_segments, c.stem_radius, c.stem_height
+        pts, sts, nrm, counts, idx = [], [], [], [], []
+        for i in range(n):
+            a0 = 2.0 * math.pi * i / n
+            a1 = 2.0 * math.pi * (i + 1) / n
+            # u 는 i/n → (i+1)/n. 마지막 면은 1.0 으로 닫아 이음매를 없앤다.
+            u0, u1 = i / n, (i + 1) / n
+            v_top = h / c.stem_tile_m
+            quad = ((a0, 0.0, u0, 0.0), (a1, 0.0, u1, 0.0),
+                    (a1, h, u1, v_top), (a0, h, u0, v_top))
+            base = len(pts)
+            for ang, z, u, v in quad:
+                pts.append(Gf.Vec3f(r * math.cos(ang), r * math.sin(ang), z))
+                nrm.append(Gf.Vec3f(math.cos(ang), math.sin(ang), 0.0))
+                sts.append(Gf.Vec2f(u, v))
+            counts.append(4)
+            idx.extend([base, base + 1, base + 2, base + 3])
+        mesh = UsdGeom.Mesh.Define(stage, path)
+        mesh.CreatePointsAttr(pts)
+        mesh.CreateFaceVertexCountsAttr(counts)
+        mesh.CreateFaceVertexIndicesAttr(idx)
+        mesh.CreateNormalsAttr(nrm)
+        mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
+        mesh.CreateExtentAttr([Gf.Vec3f(-r, -r, 0.0), Gf.Vec3f(r, r, h)])
+        UsdGeom.PrimvarsAPI(mesh.GetPrim()).CreatePrimvar(
+            "st", Sdf.ValueTypeNames.TexCoord2fArray,
+            UsdGeom.Tokens.faceVarying).Set(sts)
+        UsdGeom.Xformable(mesh.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(x, y, 0.0))
+        textures.bind_texture(
+            stage, path, "/World/Looks/StemBark",
+            os.path.join(self._assets.texture_dir, "AG15brn1.png"),
+            roughness=0.75)          # 껍질은 무광
 
     def _spawn_background(self, stage: Usd.Stage, path: str,
                           x: float, y: float, height_scale: float) -> None:
@@ -277,25 +466,69 @@ class TomatoPlants:
         set_pose(stage.GetPrimAtPath(path), (x, y, c.foliage_z),
                  Gf.Quatd(q.GetReal(), q.GetImaginary()))
         set_scale(stage.GetPrimAtPath(path), c.foliage_scale * height_scale)
+        # 변환된 USD 메시엔 흰색 기본 재질이 바인딩돼 있어 루트 재질을 덮는다 → 먼저 뗀다.
+        for prim in Usd.PrimRange(stage.GetPrimAtPath(path)):
+            if prim.IsA(UsdGeom.Mesh):
+                UsdShade.MaterialBindingAPI(prim).UnbindAllBindings()
+        # displayColor(초록)는 텍스처를 쓰든 안 쓰든 항상 남긴다 — YOLO 데이터셋
+        # 생성(03_generate_from_scene.colorize_subtree)이 이 값을 읽어 데이터셋용
+        # 단색 재질을 굽는다. 텍스처는 화면에 보이는 재질만 갈아끼운다.
+        ripeness.apply_flat_color(stage, path, FOLIAGE_COLOR)
+        if self._foliage_tex:
+            self._bind_foliage_textures(stage, path)
+            return
         # 참조 메시가 아직 비동기 로딩 중이어도 루트 상속 재질의 fallback이 초록이므로
         # 회색 프레임이 나타나지 않는다. 로딩된 메시에는 아래에서 한 번 더 직접 바인딩한다.
         ripeness.bind_matte_material(
             stage, path,
             mat_path="/World/Looks/MatteFoliage",
             fallback_color=FOLIAGE_COLOR)
-        # 변환된 USD 메시엔 흰색 기본 재질이 바인딩돼 있어 루트 무광재질을 덮는다.
         # reference 180개가 재구성될 때 루트의 상속 바인딩이 간헐적으로 회색 fallback으로
-        # 남으므로, 각 mesh에 초록 primvar와 무광 재질을 직접 바인딩한다.
-        for prim in Usd.PrimRange(stage.GetPrimAtPath(path)):
-            if prim.IsA(UsdGeom.Mesh):
-                UsdShade.MaterialBindingAPI(prim).UnbindAllBindings()
-        ripeness.apply_flat_color(stage, path, FOLIAGE_COLOR)
+        # 남으므로, 각 mesh에 무광 재질을 직접 바인딩한다.
         for prim in Usd.PrimRange(stage.GetPrimAtPath(path)):
             if prim.IsA(UsdGeom.Mesh):
                 ripeness.bind_matte_material(
                     stage, str(prim.GetPath()),
                     mat_path="/World/Looks/MatteFoliage",
                     fallback_color=FOLIAGE_COLOR)
+
+    def _bind_foliage_textures(self, stage: Usd.Stage, path: str) -> None:
+        """잎/꽃/줄기에 파트별 사진 텍스처를 바인딩.
+
+        메시 경로는 `<Foliage>/<파트>/<메시>` 구조라 **부모 prim 이름**이 파트를 정한다.
+        재질은 파트당 1개를 만들어 전 그루(180개)가 공유한다 — 인스턴스마다 만들면
+        RTX 셰이더 컴파일이 폭발한다.
+
+        루트에 상속 바인딩을 걸지 않는 이유: `bind_matte_material` 의 기본값인
+        strongerThanDescendants 가 아래 메시별 텍스처 바인딩을 이겨서 전부 초록
+        단색으로 덮어버린다.
+        """
+        hide = []
+        for prim in Usd.PrimRange(stage.GetPrimAtPath(path)):
+            if not prim.IsA(UsdGeom.Mesh):
+                continue
+            part = prim.GetParent().GetName()
+            # 큰 잎 메시(Leaf2 = 전체 잎의 81%)를 숨겨 캐노피를 성기게 만든다.
+            # 과실이 잎 사이로 보이게 하는 방법 — 캐노피를 올리거나 줄이면 줄기가
+            # 장대처럼 드러난다(2026-07-27 시행착오).
+            # ⚠ 순회 중에 prim 을 지우면(SetActive) PrimRange 가 깨져 Isaac 이 씬
+            #   빌드 전에 죽는다(실제로 겪음). 목록만 모아 두고 순회가 끝난 뒤 처리한다.
+            #   지우지 않고 visibility 로만 감춘다 — 물리·수확에 영향 없는 시각 처리.
+            if part == "Leaf2" and not self._cfg.foliage_big_leaves:
+                hide.append(prim)
+                continue
+            entry = FOLIAGE_TEXTURES.get(part)
+            if entry is None:
+                continue
+            fname, cutout = entry
+            textures.bind_texture(
+                stage, str(prim.GetPath()),
+                "/World/Looks/AocFoliage/" + part,
+                os.path.join(self._assets.texture_dir, fname),
+                cutout=cutout)
+        # 순회가 끝난 뒤에 감춘다 (위 ⚠ 참조).
+        for prim in hide:
+            UsdGeom.Imageable(prim).MakeInvisible()
 
     def _spawn_fruit(self, stage: Usd.Stage, plant_path: str, path: str,
                      stem_x: float, stem_y: float,
@@ -322,22 +555,40 @@ class TomatoPlants:
         # 회전(요)은 넣지 않는다 — 과실 Xform 에 회전이 걸리면 pedicel.spawn 의 조인트
         # 프레임 계산이 어긋나 "disjointed body transforms" 로 스냅된다(spike 02 는 회전
         # 없이 검증됨). 토마토는 구형이라 요는 시각적으로도 거의 무의미.
+        # 수확 정차 위치 반경 안에서만 고화질 과실을 쓴다(전부 바꾸면 1300만면).
+        hq = self._use_hq(stem_x, stem_y)
         fruit = UsdGeom.Xform.Define(stage, path)
         fruit.GetPrim().SetCustomDataByKey("class_name", class_name)
         fruit.GetPrim().SetCustomDataByKey(
-            "shape_asset", os.path.basename(body_usd))
+            "shape_asset",
+            os.path.basename(self._assets.hq_usd if hq else body_usd))
         xf = UsdGeom.Xformable(fruit.GetPrim())
         xf.AddTranslateOp().Set(pos)
-        s = self._assets.scale
+        s = self._hq_scale if hq else self._assets.scale
         xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
 
-        add_reference_to_stage(body_usd, path + "/Body")
-        ripeness.apply_flat_color(stage, path + "/Body", ripeness.RED)
-        ripeness.bind_matte_material(
-            stage, path + "/Body",
-            mat_path="/World/Looks/MatteFruitRipe",
-            fallback_color=ripeness.RED)
-        if calyx_usd:
+        if hq:
+            self._spawn_hq_body(stage, path + "/Body")
+            self._hq_count += 1
+        else:
+            add_reference_to_stage(body_usd, path + "/Body")
+            # displayColor(빨강)는 텍스처를 쓸 때도 남긴다 — SDG 라벨 근거(red_fraction).
+            ripeness.apply_flat_color(stage, path + "/Body", ripeness.RED)
+            if self._fruit_tex:
+                # 과실 usd 는 points/normals 만 있고 UV 가 없다 → 구면 투영으로 만들어
+                # 과피 사진을 입힌다. 과실마다 4종 중 랜덤이라 전부 같아 보이지 않는다.
+                textures.add_spherical_uv(stage, path + "/Body")
+                skin = rng.choice(self._assets.skin_textures)
+                textures.bind_texture(
+                    stage, path + "/Body",
+                    "/World/Looks/TomatoSkin/" + os.path.splitext(skin)[0],
+                    os.path.join(self._assets.texture_dir, skin))
+            else:
+                ripeness.bind_matte_material(
+                    stage, path + "/Body",
+                    mat_path="/World/Looks/MatteFruitRipe",
+                    fallback_color=ripeness.RED)
+        if calyx_usd and not hq:   # HQ 에셋은 꼭지(stem)를 자체 메시로 갖고 있다
             add_reference_to_stage(calyx_usd, path + "/Calyx")
             ripeness.apply_flat_color(stage, path + "/Calyx", ripeness.GREEN)
             ripeness.bind_matte_material(
@@ -352,9 +603,11 @@ class TomatoPlants:
         # 충돌은 안정적인 해석적 구를 쓰되 반지름을 시각 몸통 표면과 맞춘다. 보이는
         # 토마토보다 작은 구는 손가락이 메시를 관통한 뒤에야 접촉하는 빈손 파지를 만든다.
         # 반지름은 월드 m 를 과실 스케일로 나눠 로컬 단위로 지정한다.
+        # HQ 과실은 배율이 달라서(에셋 원본 크기가 다름) 반드시 이 과실의 s 로 나눈다.
+        # self._assets.scale 로 나누면 HQ 만 콜라이더가 17배로 커진다.
         physics.add_sphere_collider(
             stage, path + "/Collision",
-            self._phys.fruit_collision_radius_m / self._assets.scale)
+            self._phys.fruit_collision_radius_m / s)
         # 충돌구를 **시각 몸통 중심**으로 옮긴다 — 토마토 USD 원점이 몸통 중심과 안 맞아
         # (미centering) 원점에 두면 겨냥점(sim/tomato 발행=bbox 중심)과 어긋나 그리퍼가
         # 손가락 사이에 과실 없이 완전히 닫힌다(2026-07-23 빈손 파지 원인). bbox 유효할 때만.
@@ -381,7 +634,11 @@ class TomatoPlants:
         # 과실은 꼭지가 위를 향하게 스폰되므로 위로 올린 점이 꼭지 위치. (조인트 물리 앵커는
         # 과실 원점=중심 그대로 두어 안정적, 시각 꽃자루만 꼭지로 — pedicel.spawn 의 fruit_point
         # 은 세그먼트용이라 조인트 프레임엔 영향 없다.)
-        calyx = (pos[0], pos[1], pos[2] + c.fruit_calyx_up)
+        # HQ 는 꼭지가 자체 메시라 높이가 다르다(실측 63mm vs 저폴리 33mm). 고정값을
+        # 쓰면 꽃자루가 몸통 속에 박히므로 에셋에서 잰 꼭지 끝을 쓴다.
+        calyx_up = (self._hq_calyx_up if (hq and self._hq_calyx_up)
+                    else c.fruit_calyx_up)
+        calyx = (pos[0], pos[1], pos[2] + calyx_up)
 
         # dynamic 과실을 static 줄기에 **비파단** FixedJoint로 매단다. 팔 kp=1e5에서는
         # 2cm 접촉 오차만으로도 기존 hold_force=2000N 수준에 도달해 접촉 순간 과실이

@@ -40,6 +40,8 @@ def generate_launch_description():
             "nav_reposition_enabled": "false",
             # 고정 Nav 목표가 성공하기 전에는 수확 게이트를 절대 열지 않는다.
             "resume_search_after_start_sec": "0.0",
+            "place_target_count": LaunchConfiguration(
+                "place_target_count"),
         }.items(),
     )
     return LaunchDescription([
@@ -53,5 +55,8 @@ def generate_launch_description():
         DeclareLaunchArgument("nav_rviz", default_value="true"),
         DeclareLaunchArgument("moveit_rviz", default_value="true"),
         DeclareLaunchArgument("debug_view", default_value="true"),
+        DeclareLaunchArgument(
+            "place_target_count", default_value="1",
+            description="IW 하역 전 수확·적재할 토마토 개수"),
         pipeline,
     ])

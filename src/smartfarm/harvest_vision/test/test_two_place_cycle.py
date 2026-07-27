@@ -48,6 +48,10 @@ class _FakeTransform:
 def fsm():
     rclpy.init()
     node = HarvestFsmNode()
+    # real_main 기본값은 1(수확 1회)이므로 다회 경로를 검증하려면 명시적으로 올린다.
+    node.set_parameters([
+        rclpy.Parameter(
+            "place_target_count", rclpy.Parameter.Type.INTEGER, 2)])
     node._status_pub = _Recorder()
     node._iw_mission_pub = _Recorder()
     node._iw_yield_complete_pub = _Recorder()
@@ -119,6 +123,17 @@ def test_place_target_count_one_keeps_the_old_single_place_behavior(fsm):
             "place_target_count", rclpy.Parameter.Type.INTEGER, 1)])
     _report_place_done(fsm)
 
+    assert fsm._iw_full is True
+    assert "PREPARE_FORKLIFT" in fsm._iw_mission_pub.messages
+
+
+def test_only_exact_two_enables_multi_place(fsm):
+    fsm.set_parameters([
+        rclpy.parameter.Parameter(
+            "place_target_count", rclpy.Parameter.Type.INTEGER, 3)])
+    _report_place_done(fsm)
+
+    assert fsm._place_count == 1
     assert fsm._iw_full is True
     assert "PREPARE_FORKLIFT" in fsm._iw_mission_pub.messages
 

@@ -9,6 +9,8 @@
   (맵/수확 위치를 바꾸려면)
   ros2 launch harvest_vision smartfarm_integration.launch.py \
       map:=/경로/farm.yaml harvest_x:=-0.54 harvest_y:=-8.19 harvest_yaw:=1.91
+  (두 번 수확·적재하려면)
+  ros2 launch harvest_vision smartfarm_integration.launch.py place_target_count:=2
 
 포함:
   1) mm_moveit/nav_harvest_pipeline — 현재 검증된 MoveIt 스쿱 파지 파이프라인.
@@ -56,6 +58,9 @@ def generate_launch_description():
         DeclareLaunchArgument("moveit_rviz", default_value="true"),
         DeclareLaunchArgument("iw_rviz", default_value="true"),
         DeclareLaunchArgument("use_debug", default_value="true"),
+        DeclareLaunchArgument(
+            "place_target_count", default_value="1",
+            description="IW 하역 전 수확·적재할 토마토 개수"),
         # MM 중심에서 현재 IW 접근 방향으로 유지할 비접촉 플레이스 거리.
         DeclareLaunchArgument("iw_dock_standoff", default_value="1.03"),
 
@@ -84,6 +89,8 @@ def generate_launch_description():
                 "nav_reposition_enabled": "false",
                 # 과거 SUCCEEDED goal이 아니라 이번 자동 goal 도착 뒤에만 수확한다.
                 "resume_search_after_start_sec": "0.0",
+                "place_target_count": LaunchConfiguration(
+                    "place_target_count"),
             }.items(),
         ),
 
@@ -117,9 +124,19 @@ def generate_launch_description():
         ),
 
         # 4) 지게차 하역 노드
+        #
+        # fork_lift_node가 아니라 회수 노드를 쓴다. iw.py의 load_cargo()가 IW를
+        # Pallet_00을 실은 상태로 스폰하므로 첫 도킹은 "랙 → IW 상차"가 아니라
+        # "만재 팔레트 회수"다. fork_lift_node는 IW가 빈 채로 온다는 전제라서
+        # 이 씬에서는 랙으로 헛걸음한다. 회수 노드는 ForkLiftNode 서브클래스로
+        # 같은 랙 경로를 물려받고, mission_nav_node가 IW 도착 시 호출하는
+        # /forklift/start_cycle 서버도 제공한다(fork_lift_node에는 없어서
+        # 예전에는 MM↔IW↔지게차가 순환 대기에 빠졌다 — 2026-07-26 실측).
+        # 두 노드를 같이 띄우면 같은 도킹 이벤트에 하나는 상차, 하나는 하차를
+        # 시도해 /forklift_0/joint_command를 동시에 몰다 실패한다.
         Node(
-            package="warehouse_dock", executable="fork_lift_node",
-            name="fork_lift_node", output="screen",
+            package="warehouse_dock", executable="fork_lift_return_node",
+            name="fork_lift_return_node", output="screen",
             parameters=[{
                 "use_sim_time": ParameterValue(
                     use_sim_time, value_type=bool),

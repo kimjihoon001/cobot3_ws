@@ -272,11 +272,60 @@ ros2 service list | grep /forklift/start_cycle
 - 팔레트 교환 후 `RETURNED → FOLLOW` 재개
 - 통합 launch의 지게차 노드와 `/forklift/start_cycle` 서비스 구현자 불일치
 
-## 10. 발표자가 답할 수 있어야 하는 질문
+## 10. 발표용 핵심 제어기술
 
-1. 왜 자유 Nav2가 아니라 레인 기반 `NavigateThroughPoses`인가?
-2. 왜 odom은 바퀴 적분이 아니라 Isaac chassis pose를 쓰는가?
-3. 왜 도크 마지막 구간은 Nav2가 아닌 별도 폐루프인가?
-4. 빈 KLT 두 칸을 어떻게 구분하고 언제 초기화하는가?
-5. `PREPARE_FORKLIFT`와 `FORKLIFT` 사이에 MM 피항이 필요한 이유는 무엇인가?
-6. 팔레트를 fork와 deck에 동시에 결속하지 않도록 어디서 보장하는가?
+| 핵심 기술 | 제어 대상과 방식 | 발표 핵심 문장 |
+|---|---|---|
+| 차동구동 속도 제어 | Nav2의 선속도·각속도를 좌우 wheel 속도로 변환하고 watchdog·deadband 적용 | “항법 명령을 실제 바퀴 속도로 변환하면서 명령 단절과 목표점 떨림을 억제합니다.” |
+| 레인 기반 경로 제어 | 온실 중심선의 직선·원호 waypoint와 적재 footprint 검사를 거쳐 `NavigateThroughPoses` 실행 | “온실 통로의 구조적 제약을 경로 생성 단계에서 강제합니다.” |
+| FOLLOW standoff 제어 | MM 접근 방향에 약 1.03 m 떨어진 목표를 만들고 변화량이 클 때만 재계획 | “움직이는 로봇 자체가 아니라 안전 이격점을 레인 경로로 추종합니다.” |
+| AMCL–물리 odom 융합 | AMCL이 `map→odom`, Isaac chassis가 `odom→base_link`를 단독 발행 | “전역 위치 보정과 실제 차체 운동을 역할 분담해 TF 중복과 위치 점프를 막습니다.” |
+| 하이브리드 도킹 제어 | 원거리 Nav2 접근 후 20 Hz POSITION/YAW 폐루프로 XY·yaw를 순차 정렬 | “항법의 강점과 정밀 상대 정렬의 강점을 구간별로 결합했습니다.” |
+| 미션·자원 상태 제어 | MM 피항, KLT 슬롯 소비, Forklift 서비스, 팔레트 소유권을 명시적 handshake로 조정 | “주행뿐 아니라 공유 통로와 적재 자원의 상태까지 제어합니다.” |
+
+발표에서는 **레인 항법 → FOLLOW → 정밀 도킹 → MM/Forklift handshake** 순서로
+설명하면 IW가 세 시스템을 연결하는 오케스트레이터라는 점이 드러난다.
+
+## 11. 발표자가 답할 수 있어야 하는 질문과 답
+
+### Q1. 왜 자유 Nav2가 아니라 레인 기반 `NavigateThroughPoses`인가?
+
+온실은 배드 사이 통로가 좁고 적재된 IW의 swept footprint가 크기 때문에 자유 경로가
+기하학적으로 짧더라도 배드 모서리나 적재물과 충돌할 수 있다. 레인 중심선과 원호
+웨이포인트를 미리 구성하고 footprint 검사를 통과한 경로만 보내면 통로 규칙을
+결정적으로 지키면서도 Nav2의 추종·장애물 대응 기능을 사용할 수 있다.
+
+### Q2. 왜 odom은 바퀴 적분이 아니라 Isaac chassis pose를 쓰는가?
+
+시뮬레이션의 실제 이동 결과에는 미끄러짐, 접촉, 물리 solver의 영향이 포함되므로 명령된
+바퀴 회전만 적분하면 실제 차체와 오차가 누적될 수 있다. Isaac chassis pose를 odom으로
+쓰면 물리 장면의 실제 운동을 반영하고, AMCL은 그 위에서 `map→odom` 전역 보정만
+담당한다.
+
+### Q3. 왜 도크 마지막 구간은 Nav2가 아닌 별도 폐루프인가?
+
+Nav2의 costmap 해상도와 일반 goal tolerance는 포크 삽입에 필요한 수 cm·수 도 수준의
+반복 정렬을 안정적으로 보장하기 어렵다. 따라서 Nav2는 도크 근처까지의 장애물 회피를
+담당하고, 마지막에는 실제 pose 오차를 20 Hz로 보면서 위치와 yaw를 순서대로 수렴시킨다.
+허용오차 안에서 1초간 안정된 뒤에만 지게차 서비스를 호출한다.
+
+### Q4. 빈 KLT 두 칸을 어떻게 구분하고 언제 초기화하는가?
+
+IW는 현재 deck에 결속된 팔레트의 앞열 `KLT_30`, `KLT_31` 가운데 사용하지 않은
+슬롯만 후보로 두고 실제 MM 베이스에 더 가까운 슬롯을 선택한다. release 이벤트를
+받으면 해당 슬롯을 사용 완료로 기록하며, 지게차가 새 팔레트를 deck에 정상 결속한
+뒤에만 두 슬롯의 사용 이력을 초기화한다.
+
+### Q5. `PREPARE_FORKLIFT`와 `FORKLIFT` 사이에 MM 피항이 필요한 이유는 무엇인가?
+
+`PREPARE_FORKLIFT`는 적재 완료를 알리는 준비 상태이지 즉시 출발 명령이 아니다.
+수확 위치에서 MM과 IW가 통로를 공유하므로 IW는 먼저 피항을 요청하고 MM의 안전 자세와
+Nav2 이동 완료를 확인해야 한다. `/iw/mm_yield_complete` 뒤에만 `FORKLIFT`로
+전환해 충돌과 교착을 방지한다.
+
+### Q6. 팔레트를 fork와 deck에 동시에 결속하지 않도록 어디서 보장하는가?
+
+ROS 미션은 `/forklift/handoff_state`의 owner와 결속 상태를 확인하고, Isaac의
+`fork.py`와 `iw_dock.py`가 실제 FixedJoint와 충돌 필터를 전환한다. `pallet_owner`
+명령은 새 owner를 결속하기 전에 기존 owner의 joint를 제거하도록 원자적으로 처리한다.
+따라서 상위 상태 gate와 하위 물리 소유권 관리 두 층에서 이중 결속을 막는다.

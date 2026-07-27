@@ -105,9 +105,16 @@ UI 전용 apt 패키지 4개(`web_video_server` 등)와 `npm install`이 먼저 
 [5.1](#51-apt-의존-패키지)·[5.3](#53-모니터링-ui-웹-node) 참고.
 
 ```bash
-ros2 launch monitor_ui stream.launch.py   # 카메라 스트리밍 + QoS 브리지
-ros2 launch monitor_ui ui.launch.py       # 상태 집계 + 웹 UI
+# 1) ROS 쪽 — 영상 스트리밍 + QoS 브리지 + 상태 집계 + 녹화 제어
+ros2 launch monitor_ui ui.launch.py
+
+# 2) 화면 — 별도 터미널
+cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev   # 처음 한 번은 npm install
 ```
+
+그다음 <http://localhost:5173>. `ui.launch.py`가 `stream.launch.py`를 포함하므로
+둘을 같이 띄우면 안 된다(영상 노드가 이중으로 뜬다). 영상 배선만 따로 볼 때만
+`stream.launch.py`를 단독으로 쓴다.
 
 ### 주요 launch 인자
 

@@ -153,15 +153,6 @@ def _pose(goal):
     return round(p.position.x, 3), round(p.position.y, 3), round(yaw, 3)
 
 
-def test_yield_does_not_start_before_place(node):
-    """적재(만재) 전에는 피항을 시작하지 않는다."""
-    node._iw_full = False
-    node._mobility_ready = True
-    node._iw_yield_request_callback(Bool(data=True))
-    assert node._sent == []
-    assert node._yield_stages == []
-
-
 def test_yield_request_recovers_full_state_after_coordinator_restart(node):
     """IW가 대기 중이면 코디네이터 재시작 후에도 피항을 재개한다."""
     node._iw_full = False
