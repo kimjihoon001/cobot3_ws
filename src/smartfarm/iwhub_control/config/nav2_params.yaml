@@ -10,7 +10,7 @@ amcl:
     base_frame_id: "iwhub_0/base_link"
     odom_frame_id: "iwhub_0/odom"
     global_frame_id: "iwhub_0/map"
-    scan_topic: front_2d_lidar/scan_filtered
+    scan_topic: /iwhub_0/front_2d_lidar/scan_filtered
     # IW 전용 맵은 Isaac 월드 좌표에 정렬되어 있다.
     set_initial_pose: true
     initial_pose: {x: 1.6955, y: -12.0, z: 0.0, yaw: 3.141592653589793}
@@ -155,7 +155,7 @@ local_costmap:
         enabled: true
         observation_sources: scan_front scan_back
         scan_front:
-          topic: front_2d_lidar/scan_filtered
+          topic: /iwhub_0/front_2d_lidar/scan_filtered
           data_type: "LaserScan"
           marking: true
           clearing: true
@@ -163,7 +163,7 @@ local_costmap:
           obstacle_max_range: 20.0
           raytrace_max_range: 25.0
         scan_back:
-          topic: back_2d_lidar/scan_filtered
+          topic: /iwhub_0/back_2d_lidar/scan_filtered
           data_type: "LaserScan"
           marking: true
           clearing: true
@@ -203,14 +203,14 @@ global_costmap:
         enabled: true
         observation_sources: scan_front scan_back
         scan_front:
-          topic: front_2d_lidar/scan_filtered
+          topic: /iwhub_0/front_2d_lidar/scan_filtered
           data_type: "LaserScan"
           marking: true
           clearing: true
           obstacle_max_range: 20.0
           raytrace_max_range: 25.0
         scan_back:
-          topic: back_2d_lidar/scan_filtered
+          topic: /iwhub_0/back_2d_lidar/scan_filtered
           data_type: "LaserScan"
           marking: true
           clearing: true
@@ -308,13 +308,13 @@ collision_monitor:
     observation_sources: ["scan_front", "scan_back"]
     scan_front:
       type: "scan"
-      topic: "front_2d_lidar/scan_filtered"
+      topic: "/iwhub_0/front_2d_lidar/scan_filtered"
       min_height: 0.15
       max_height: 2.0
       enabled: True
     scan_back:
       type: "scan"
-      topic: "back_2d_lidar/scan_filtered"
+      topic: "/iwhub_0/back_2d_lidar/scan_filtered"
       min_height: 0.15
       max_height: 2.0
       enabled: True

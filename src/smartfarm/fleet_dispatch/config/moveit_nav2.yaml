@@ -4,8 +4,8 @@
 #   [1] 골격은 nav2_bringup 의 nav2_params.yaml == carter_navigation 의
 #       carter_navigation_params.yaml 구조 그대로. Carter 도 이 파일을 로봇값만 바꿔 쓴다.
 #   [2] Ridgeback 으로 바뀌는 부분은 아래 4곳뿐 — 나머지는 재사용:
-#         (a) 프레임/토픽 이름  → 상대 cmd_vel, odom, scan
-#             (launch namespace 아래에서만 해석되어 다른 로봇과 충돌하지 않음)
+#         (a) 프레임/토픽 이름  → 상대 cmd_vel, odom + 절대 센서 scan
+#             (costmap은 nested namespace이므로 scan은 실제 절대 토픽을 사용)
 #         (b) 주행 방식         → 홀로노믹 이동 + 식물 방향 완만한 정렬(OmniMotionModel)
 #         (c) 풋프린트          → Ridgeback 0.96 × 0.793 m
 #         (d) 인플레이션 반경   → 온실 통로 1.5m 에 맞춰 축소
@@ -170,7 +170,7 @@ local_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: scan
+          topic: /harvester_0/scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -216,7 +216,7 @@ global_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: scan
+          topic: /harvester_0/scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
