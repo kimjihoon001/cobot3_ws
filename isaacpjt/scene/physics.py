@@ -21,6 +21,18 @@ def add_shape_collider(prim: Usd.Prim) -> None:
     UsdPhysics.CollisionAPI.Apply(prim)
 
 
+def add_box_mesh_collider(prim: Usd.Prim) -> None:
+    """직육면체 Mesh 에 콜라이더 부여. 온실 벽 패널용.
+
+    벽은 텍스처를 입히려고 Cube(해석적 도형) 대신 UV 를 가진 박스 Mesh 로 만든다
+    (Cube 프리미티브에는 primvars:st 가 없어 UsdUVTexture 를 물릴 수 없다).
+    형상이 정확히 직육면체이므로 boundingCube 근사가 **근사가 아니라 정확**하고,
+    해석적 Cube 콜라이더와 물리적으로 동일하게 동작한다.
+    """
+    UsdPhysics.CollisionAPI.Apply(prim)
+    UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr("boundingCube")
+
+
 def add_mesh_colliders(stage: Usd.Stage, root_path: str,
                        approximation: str = "convexHull") -> int:
     """root_path 아래 모든 Mesh 에 콜라이더 부여. 참조된 USD(과실)용.
