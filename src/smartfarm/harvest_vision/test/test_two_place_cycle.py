@@ -127,6 +127,17 @@ def test_place_target_count_one_keeps_the_old_single_place_behavior(fsm):
     assert "PREPARE_FORKLIFT" in fsm._iw_mission_pub.messages
 
 
+def test_only_exact_two_enables_multi_place(fsm):
+    fsm.set_parameters([
+        rclpy.parameter.Parameter(
+            "place_target_count", rclpy.Parameter.Type.INTEGER, 3)])
+    _report_place_done(fsm)
+
+    assert fsm._place_count == 1
+    assert fsm._iw_full is True
+    assert "PREPARE_FORKLIFT" in fsm._iw_mission_pub.messages
+
+
 def _report_final_failure(fsm):
     """매니퓰레이터가 모든 재시도를 소진하고 홈으로 돌아온 상황."""
     fsm._manipulator_state_callback(String(data="HARVEST_FAILED"))

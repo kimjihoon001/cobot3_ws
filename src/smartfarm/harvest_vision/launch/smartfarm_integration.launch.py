@@ -9,6 +9,8 @@
   (맵/수확 위치를 바꾸려면)
   ros2 launch harvest_vision smartfarm_integration.launch.py \
       map:=/경로/farm.yaml harvest_x:=-0.54 harvest_y:=-8.19 harvest_yaw:=1.91
+  (두 번 수확·적재하려면)
+  ros2 launch harvest_vision smartfarm_integration.launch.py place_target_count:=2
 
 포함:
   1) mm_moveit/nav_harvest_pipeline — 현재 검증된 MoveIt 스쿱 파지 파이프라인.
@@ -56,6 +58,9 @@ def generate_launch_description():
         DeclareLaunchArgument("moveit_rviz", default_value="true"),
         DeclareLaunchArgument("iw_rviz", default_value="true"),
         DeclareLaunchArgument("use_debug", default_value="true"),
+        DeclareLaunchArgument(
+            "place_target_count", default_value="1",
+            description="IW 하역 전 수확·적재할 토마토 개수"),
         # MM 중심에서 현재 IW 접근 방향으로 유지할 비접촉 플레이스 거리.
         DeclareLaunchArgument("iw_dock_standoff", default_value="1.03"),
 
@@ -84,6 +89,8 @@ def generate_launch_description():
                 "nav_reposition_enabled": "false",
                 # 과거 SUCCEEDED goal이 아니라 이번 자동 goal 도착 뒤에만 수확한다.
                 "resume_search_after_start_sec": "0.0",
+                "place_target_count": LaunchConfiguration(
+                    "place_target_count"),
             }.items(),
         ),
 
