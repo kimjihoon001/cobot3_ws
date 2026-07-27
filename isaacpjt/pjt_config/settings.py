@@ -52,6 +52,43 @@ class TomatoAssetConfig:
     background_plant_usd: str = os.path.join(
         ISAAC_DIR, "assets", "aoc", "usd", "tomato_plant.usd")
 
+    # aoc 원본 텍스처 폴더 (AG15{brn,lef,blo,frt}*.png, Apache-2.0 동봉).
+    # dae→usd 변환기가 재질을 못 옮겨서 usd 안에는 흰색 DefaultMaterial 만 있다.
+    # UV(primvars:st)는 살아있으므로 여기 png 를 씬에서 직접 물린다.
+    texture_dir: str = os.path.join(ISAAC_DIR, "assets", "aoc", "plant")
+
+    # 과피 텍스처 후보 — 과실마다 랜덤 선택해 전부 똑같아 보이지 않게 한다.
+    # 4장 전부 내용이 다르다(md5 확인). frt = fruit.
+    skin_textures: tuple = ("AG15frt1.png", "AG15frt2.png",
+                            "AG15frt3.png", "AG15frt4.png")
+
+    # ── 고화질 과실 (2026-07-27) ────────────────────────────────────────────
+    # Sketchfab "Tomato" by Claudiu (CC-BY). 24k면 + 완전 PBR(baseColor/roughness/
+    # normal). 자체 재질이 완비돼 있어 우리가 색·텍스처를 입히면 안 된다(덮어버림).
+    # 자산 실측(usd-core): defaultPrim=/scene, upAxis=**Y**, metersPerUnit=0.01,
+    #   메시 3개 = Cube_Tomato_body_0 / Cube_001_Tomato_stem_0 / Cube_002_..._leaves_0
+    #
+    # 540개 전부 바꾸면 1300만면이라 무겁다 → **수확 지점 반경 안에서만** 쓴다.
+    # 나머지는 종전 저폴리 과실 그대로. (2026-07-27 사용자 결정)
+    hq_usd: str = os.path.join(ISAAC_DIR, "assets", "tomato_hq", "tomato_hq.usdz")
+    hq_enabled: bool = True
+    # 수확 정차 위치 = 통합 launch 의 harvest_x/harvest_y 기본값(맵==월드 정렬).
+    # 팔이 닿는 범위(약 1m)에 여유를 둬 그 베드 한 구간을 덮는다.
+    hq_center: tuple = (-0.54, -8.19)
+    hq_radius: float = 2.5         # m
+    hq_leaves: bool = True         # 화방 잎 메시 표시 (2026-07-27 사용자 요청)
+    # 광택 낮추기 — 에셋의 러프니스 텍스처가 0.176~0.373(평균 0.21)이라 젖은
+    # 플라스틱처럼 번들거린다(스튜디오 조명 스캔이라 그렇다). 텍스처를 끊고 상수로
+    # 덮으면 표면 굴곡이 사라지므로, UsdUVTexture 의 bias 로 값만 끌어올린다
+    # (출력 = 텍스처 × scale + bias). 0.30 이면 0.48~0.67 로 올라가 온실 토마토답게
+    # 은은해진다(저폴리 무광 재질이 0.65). 0 이면 에셋 원본 광택 그대로.
+    hq_roughness_bias: float = 0.30
+    # 목표 지름 — 저폴리 과실과 같은 크기로 맞춘다(68.7mm, 위 scale 근거와 동일).
+    # 배율은 스폰 시 에셋의 **합성 bbox** 를 재서 유도한다([2] 유도, 매직넘버 없음).
+    # 원시 points 로 재면 안 된다 — 메시 위에 100 → 0.00126 → 100 변환이 걸려 있어
+    # 12.7배 틀린다(2026-07-27 실측). 이걸 놓치면 1m 짜리 토마토가 나온다.
+    hq_target_diameter_m: float = 0.0687
+
 
 @dataclass
 class LightingConfig:
@@ -84,6 +121,17 @@ class GreenhouseConfig:
     length: float = 26.0           # 앞뒤길이(Y, 창고 방향). "가로" ×1.3
     height: float = 4.5            # ×1.5
     post_spacing: float = 3.0      # 기둥 간격 (길이 방향)
+
+    # ── 벽 패널 텍스처 (2026-07-27) ─────────────────────────────────────────
+    # 벽이 단색 회백색이라 밋밋했다. tools/make_greenhouse_textures.py 가 만드는
+    # 폴리카보네이트 중공판(알루미늄 프레임 + 세로 리브) 텍스처를 입힌다.
+    # 켜면 벽이 Cube 대신 **UV 를 가진 박스 Mesh** 로 생성된다 — Cube 프리미티브엔
+    # primvars:st 가 없어 텍스처를 물릴 수 없기 때문. 콜라이더는 boundingCube 라
+    # 물리·라이다 거동은 종전과 같다(불투명 벽 유지 → AMCL 영향 없음).
+    wall_textured: bool = True
+    wall_texture: str = os.path.join(
+        ISAAC_DIR, "assets", "greenhouse", "greenhouse_panel.png")
+    wall_tile_m: float = 1.0       # 텍스처 1타일이 덮는 실제 거리(m). 패널 1장 크기
     frame_size: float = 0.08       # 기둥/보 두께
     frame_color: tuple[float, float, float] = (0.75, 0.78, 0.80)
 
@@ -173,8 +221,46 @@ class PlantConfig:
     # 잎이 너무 많고 낮다는 피드백(2026-07-18, 레퍼런스 대비) → 덜 무성하게:
     #   일부 그루만 + 축소 + 과실 구간으로 올림. 시각 전용값(근거 등급 없음).
     foliage_fraction: float = 1.0    # 잎 얹는 그루 비율. 1.0=전 그루(잎 없는 줄기+과실 방지)
+    # ⚠ 2026-07-27 변경 — **2026-07-18 의 "잎을 과실 구간에 오게 올린다"를 뒤집는다.**
+    #   잎에 사진 텍스처를 입히고 나서 과실이 화면에서 완전히 사라졌다. 재보니
+    #   캐노피(반지름 0.34m)의 26% 지점(줄기에서 0.09m)에 과실이 매달리고 높이
+    #   0.5~1.4m 도 캐노피 0.40~1.58m 안에 100% 들어가 있었다 = 잎 속에 파묻힘.
+    #   단색 잎일 땐 덜 티가 났지만 텍스처를 입히자 잎이 진짜 잎처럼 가리기 시작했다.
+    #   → 캐노피를 과실 위로 올리고 줄인다. 실제 하이와이어 재배도 착과 화방 주변
+    #     잎을 따내(적엽) 광 투과와 수확 접근성을 확보하므로 이쪽이 더 사실적이다.
+    #   과실 높이(fruit_height_range)는 팔 도달 범위와 엮여 있어 건드리지 않았다.
+    #   잎을 다시 과실 사이로 내리려면 foliage_z 를 0.4 로 되돌리면 된다.
     foliage_scale: float = 0.85      # aoc 식물 기준 크기(원본 1.388m). 개체마다 ×0.8~1.2 변주됨
     foliage_z: float = 0.4           # 바닥에서 올림. 잎이 과실 구간(0.5~1.4m)에 오게 위로
+    # aoc 식물의 잎은 메시 2개다 — Leaf1(3,198점) + Leaf2(13,962점, 전체의 81%).
+    # False 로 두면 Leaf2 를 숨겨 캐노피가 성겨진다.
+    #
+    # 2026-07-27 기록 — 수확 반경의 과실이 안 보이길래 잎이 가리는 줄 알고 캐노피를
+    # 올렸다 줄였다 하며 두 번 헛짚었다(맵이 앙상해졌다는 피드백). 진짜 원인은 잎이
+    # 아니라 **HQ 과실 배율이 100배 작았던 것**이었다(metricsAssembler 의
+    # Scale:unitsResolve=0.01 을 중복 계산). 잎 설정은 원래대로 되돌린다.
+    foliage_big_leaves: bool = True
+
+    # 줄기 껍질 텍스처 (2026-07-27) — 사진 잎 옆에서 단색 원기둥이 CG 티가 난다는
+    # 피드백. aoc 에 딸려온 껍질 텍스처(AG15brn1.png, 80×1100 세로 스트립)를 입힌다.
+    # ⚠ 물리는 손대지 않는다 — 콜라이더용 해석적 Cylinder(`Stem`)는 그대로 두고
+    #   숨기기만 하고, 그 위에 UV 를 가진 튜브 메시를 시각 전용으로 얹는다.
+    #   `Stem` 은 꽃자루 FixedJoint 의 body 이기도 해서 형상을 바꾸면 위험하다.
+    stem_textured: bool = True
+    stem_tile_m: float = 0.25        # 텍스처 1타일이 덮는 줄기 길이(m). 둘레는 1바퀴
+    stem_segments: int = 12          # 튜브 단면 분할수. 12면 가까이서도 각져 보이지 않는다
+
+    # ── 고화질 텍스처 (2026-07-27) ──────────────────────────────────────────
+    # 지금까지 잎/줄기는 초록 단색, 과실은 빨강 단색이었다. aoc 에셋에 딸려온 사진
+    # 텍스처(잎 2종/꽃 3종/줄기 1종)와 과피 텍스처 4종이 저장소에 있는데도 변환
+    # 과정에서 재질이 끊겨 안 쓰이고 있었다 → 씬에서 직접 물린다.
+    #
+    # YOLO 데이터셋 생성 경로(03_generate_from_scene.py)는 재질을 다시 단색으로
+    # 굽기 때문에 **데이터셋은 영향받지 않는다**. 순수하게 보이는 화면만 바뀐다.
+    # 폴리곤은 그대로고 텍스처 6장이 늘 뿐이라 성능 영향도 작다.
+    # 문제가 생기면 False 로 두면 종전 단색으로 돌아간다.
+    foliage_textured: bool = True    # 잎/꽃/줄기에 사진 텍스처 (알파 컷아웃)
+    fruit_textured: bool = True      # 수확 대상 과실 과피 텍스처 (구면 UV 생성)
 
     # 현재 수확 통합시험 씬은 모든 과실을 익은 토마토로 고정한다.
     # 품질 분류 데이터셋 생성은 별도 스크립트의 클래스 분포를 사용한다.

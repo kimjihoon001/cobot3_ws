@@ -32,6 +32,8 @@ from dataclasses import dataclass
 
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
+from pjt_utils import ripeness
+
 PEDICEL_COLOR = Gf.Vec3f(0.30, 0.50, 0.18)
 
 
@@ -80,6 +82,13 @@ def _segment(stage: Usd.Stage, path: str, start: Gf.Vec3d, end: Gf.Vec3d,
     cyl.CreateExtentAttr([Gf.Vec3f(-r, -r, -length / 2.0),
                           Gf.Vec3f(r, r, length / 2.0)])
     cyl.CreateDisplayColorAttr([PEDICEL_COLOR])
+    # 재질을 직접 물린다. displayColor 만 두고 /World/Plants 의 공통 무광재질에
+    # 맡기면, PrimvarReader 가 값을 못 읽을 때 fallback 회색(0.5)으로 렌더돼
+    # 흰 막대처럼 보인다(2026-07-27 확인). fallback 을 꽃자루 초록으로 준
+    # 전용 재질이면 어느 쪽으로 풀리든 초록이다.
+    ripeness.bind_matte_material(
+        stage, path, mat_path="/World/Looks/MattePedicel",
+        fallback_color=PEDICEL_COLOR)
 
     xf = UsdGeom.Xformable(cyl.GetPrim())
     xf.AddTranslateOp().Set((start + end) / 2.0)
