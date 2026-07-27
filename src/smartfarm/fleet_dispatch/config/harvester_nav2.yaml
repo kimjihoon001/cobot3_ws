@@ -65,6 +65,10 @@ bt_navigator:
     odom_topic: odom
     bt_loop_duration: 10
     default_server_timeout: 20
+    # [3] Isaac 을 다른 PC 로 분리한 뒤 BT 액션 노드의 goal 수락 대기가 기본 20ms 를
+    #     넘겨 wait/spin 이 즉시 실패했다(2026-07-27 실측 19ms → Goal failed).
+    #     관측값의 10배 여유. 이 값은 벽시계 기준이라 sim clock 저하와 무관하다.
+    server_timeout: 200
     # plugin_lib_names 는 일부러 비운다 — Humble 과 Jazzy 의 기본 목록이 달라서
     # (제거된 BT 노드가 섞이면 로드 자체가 실패) 각 distro 기본값에 맡긴다.
 
