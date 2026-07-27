@@ -35,13 +35,58 @@ def _yaml(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-_ADAPTERS = " ".join([
-    "default_planner_request_adapters/AddTimeOptimalParameterization",
-    "default_planner_request_adapters/FixWorkspaceBounds",
-    "default_planner_request_adapters/FixStartStateBounds",
-    "default_planner_request_adapters/FixStartStateCollision",
-    "default_planner_request_adapters/FixStartStatePathConstraints",
-])
+# Humble과 Jazzy(MoveIt 2.12.4)는 플래닝 파이프라인 파라미터 스키마가 다르다
+# (2026-07-27 Jazzy GPU 실측으로 확인). 이 파일은 원래 Humble에서만 검증됐고
+# (README §5.5), 이 워크스테이션은 Jazzy라 그 차이를 실측으로 잡았다 — 둘 다
+# 돌아가야 하니 ROS_DISTRO로 분기한다.
+#   1) planning_plugin(단수, 문자열) → Jazzy는 planning_plugins(복수,
+#      string_array)만 읽는다. 단수 키를 주면 "Planning plugin name is empty"
+#      로 move_group이 terminate/abort.
+#   2) request_adapters — Humble은 공백-join 문자열 하나에 전/후처리(시간
+#      파라미터화 포함)를 다 담지만(default_planner_request_adapters/*),
+#      Jazzy는 string_array를 요구하고 전처리(default_planning_request_adapters/
+#      Check*/Resolve*/Validate*)와 후처리(response_adapters,
+#      default_planning_response_adapters/AddTimeOptimalParameterization 등)를
+#      분리했다. Jazzy에 Humble 이름을 주면 pluginlib이 "does not exist"로 못
+#      찾고, Jazzy에 response_adapters를 안 주면 궤적 시간이 전부 0으로 남아
+#      arm_controller가 "Time between points ... not strictly increasing"으로
+#      매번 거부한다(계획은 되는데 팔이 전혀 안 움직임).
+_DISTRO = os.environ.get("ROS_DISTRO", "humble")
+
+if _DISTRO == "humble":
+    _ADAPTERS = " ".join([
+        "default_planner_request_adapters/AddTimeOptimalParameterization",
+        "default_planner_request_adapters/FixWorkspaceBounds",
+        "default_planner_request_adapters/FixStartStateBounds",
+        "default_planner_request_adapters/FixStartStateCollision",
+        "default_planner_request_adapters/FixStartStatePathConstraints",
+    ])
+    _RESPONSE_ADAPTERS = None
+    _PILZ_REQUEST_ADAPTERS = ""
+else:
+    _ADAPTERS = [
+        "default_planning_request_adapters/CheckForStackedConstraints",
+        "default_planning_request_adapters/CheckStartStateBounds",
+        "default_planning_request_adapters/CheckStartStateCollision",
+        "default_planning_request_adapters/ResolveConstraintFrames",
+        "default_planning_request_adapters/ValidateWorkspaceBounds",
+    ]
+    _RESPONSE_ADAPTERS = [
+        "default_planning_response_adapters/AddTimeOptimalParameterization",
+        "default_planning_response_adapters/ValidateSolution",
+    ]
+    # request_adapters 키 자체를 안 준다 — 빈 리스트([])를 주면 ros2 launch가
+    # 파라미터 타입을 추론 못 해 "Expected 'value' to be one of [...], but got
+    # '()' of type 'tuple'"로 launch 자체가 죽는다(2026-07-27 확인). 안 주면
+    # move_group이 빈 배열 기본값으로 처리한다.
+    _PILZ_REQUEST_ADAPTERS = None
+
+
+def _planning_plugin_kv(name: str) -> dict:
+    """Humble=planning_plugin(단수 문자열), Jazzy=planning_plugins(복수 리스트)."""
+    if _DISTRO == "humble":
+        return {"planning_plugin": name}
+    return {"planning_plugins": [name]}
 
 
 # ★멀티로봇 TF 격리(2026-07-23): tf2_ros 는 /tf·/tf_static 을 **절대경로**로 pub/sub 하므로
@@ -96,15 +141,16 @@ def generate_launch_description():
 
     # ── 계획 파이프라인 3종: OMPL(기본) + Pilz(직선 LIN) + CHOMP(최적화) ──
     ompl = {
-        "planning_plugin": "ompl_interface/OMPLPlanner",
+        **_planning_plugin_kv("ompl_interface/OMPLPlanner"),
         "request_adapters": _ADAPTERS,
         "start_state_max_bounds_error": 0.1,
     }
+    if _RESPONSE_ADAPTERS is not None:
+        ompl["response_adapters"] = _RESPONSE_ADAPTERS
     ompl.update(_yaml(os.path.join(share, "config", "ompl_planning.yaml")))
 
     pilz = {
-        "planning_plugin": "pilz_industrial_motion_planner/CommandPlanner",
-        "request_adapters": "",
+        **_planning_plugin_kv("pilz_industrial_motion_planner/CommandPlanner"),
         # Humble PlanningPipeline은 CIRC 보조점(path_constraints.name=interim)을
         # 일반 경로제약으로 다시 검사해, 생성된 원호의 거의 모든 점을 invalid로 만든다.
         # Pilz 생성기 자체의 관절한계/IK 검사는 유지하고 이 중복 사후검사만 끈다.
@@ -115,12 +161,16 @@ def generate_launch_description():
             "pilz_industrial_motion_planner/MoveGroupSequenceService",
         ]),
     }
+    if _PILZ_REQUEST_ADAPTERS is not None:
+        pilz["request_adapters"] = _PILZ_REQUEST_ADAPTERS
 
     chomp = {
-        "planning_plugin": "chomp_interface/CHOMPPlanner",
+        **_planning_plugin_kv("chomp_interface/CHOMPPlanner"),
         "request_adapters": _ADAPTERS,
         "start_state_max_bounds_error": 0.1,
     }
+    if _RESPONSE_ADAPTERS is not None:
+        chomp["response_adapters"] = _RESPONSE_ADAPTERS
     chomp.update(_yaml(os.path.join(share, "config", "chomp_planning.yaml")))
 
     planning_pipelines = {
@@ -163,7 +213,17 @@ def generate_launch_description():
     _ns = LaunchConfiguration("ns")
     def _spawner(controller: str) -> Node:
         return Node(
-        package="controller_manager", executable="spawner", namespace=_ns,
+        # move_group/servo/rviz 와 같은 이유로 절대경로("/", _ns)를 쓴다.
+        # spawner_jsb 는 TimerAction으로 실행돼 isolated GroupAction의
+        # PushRosNamespace(_ns) 컨텍스트를 그대로 물려받지만, spawner_arm/
+        # spawner_gripper 는 RegisterEventHandler(OnProcessExit) 콜백으로
+        # 비동기 실행되며 그 컨텍스트를 못 물려받는다(2026-07-27 확인 — namespace를
+        # 아예 안 주면 jsb는 되는데 arm/gripper 는 /harvester_0 없이 떠서
+        # --controller-manager controller_manager가 존재하지 않는
+        # /controller_manager를 찾다 60초 타임아웃). 절대경로는 두 실행 경로
+        # 모두에서 항상 /harvester_0로 고정돼 안전하다.
+        package="controller_manager", executable="spawner",
+        namespace=["/", _ns],
         arguments=[
             controller,
             "--controller-manager", "controller_manager",
@@ -202,7 +262,10 @@ def generate_launch_description():
     # 짧은 카메라 미세보정 구간에만 JTC joint_trajectory를 발행한다.
     servo = Node(
         package="moveit_servo",
-        executable="servo_node_main",
+        # Humble의 moveit_servo 실행 파일은 servo_node_main, Jazzy부터는
+        # servo_node로 이름이 바뀌었다(2026-07-27 확인: /opt/ros/jazzy/lib/moveit_servo/
+        # 실측 — Humble 값은 git 이력의 원래 코드 그대로).
+        executable="servo_node_main" if _DISTRO == "humble" else "servo_node",
         name="servo_node",
         namespace=["/", _ns],
         parameters=[servo_params, robot_description,
