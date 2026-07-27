@@ -1,0 +1,53 @@
+# -*- coding: utf-8 -*-
+"""BEST_EFFORT로 오는 이미지를 RELIABLE로 한 번 되뿌린다.
+
+image_transport republish는 구독 QoS가 RELIABLE로 고정돼 있어서, 센서
+QoS(BEST_EFFORT)로 발행되는 토픽을 한 장도 받지 못한다. 발행자 쪽
+경고로 확인된다:
+
+    New publisher discovered on topic '...', offering incompatible QoS.
+    No messages will be sent to it. Last incompatible policy: RELIABILITY
+
+republish에 qos_overrides 파라미터를 줘도 적용되지 않는다(2026-07-26 실측).
+그래서 QoS만 바꿔 통과시키는 이 노드를 앞에 세우고, raw→JPEG 변환은
+그대로 republish가 하게 둔다. 압축 품질이 화면마다 달라지지 않는다.
+
+메시지는 손대지 않는다. 여기서 인코딩까지 하면 이 노드가 두 번째
+이미지 파이프라인이 되고, 다른 화면과 품질이 갈린다.
+"""
+from __future__ import annotations
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
+
+
+class QosBridge(Node):
+    def __init__(self) -> None:
+        super().__init__("qos_bridge")
+        self.declare_parameter("in_topic", "")
+        self.declare_parameter("out_topic", "")
+        in_topic = str(self.get_parameter("in_topic").value)
+        out_topic = str(self.get_parameter("out_topic").value)
+        if not in_topic or not out_topic:
+            raise SystemExit("in_topic / out_topic 파라미터가 필요합니다.")
+
+        # 발행은 기본(RELIABLE) — 뒤에 붙는 republish가 그걸 요구한다.
+        self._pub = self.create_publisher(Image, out_topic, 1)
+        self.create_subscription(
+            Image, in_topic, self._pub.publish, qos_profile_sensor_data)
+        self.get_logger().info(f"QoS 브리지: {in_topic} → {out_topic}")
+
+
+def main() -> None:
+    rclpy.init()
+    node = QosBridge()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
