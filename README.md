@@ -6,7 +6,7 @@ Isaac Sim 위에 온실·창고 씬을 세우고, **로봇 3대가 토마토를 
 
 ROS 2 패키지(`src/`)와 Isaac Sim 스크립트(`isaacpjt/`)를 하나의 저장소로 관리합니다.
 
-- ROS 2: Humble (`/opt/ros/humble`)
+- ROS 2: Humble (`/opt/ros/humble`) — Jazzy도 지원, 차이는 [5.5](#55-jazzy-ubuntu-2404-에서-쓰려면)
 - 통신: `ROS_DOMAIN_ID=108`, `RMW_IMPLEMENTATION=rmw_fastrtps_cpp`
 - 원격 저장소: <https://github.com/kimjihoon001/cobot3_ws.git>
 
@@ -42,6 +42,9 @@ MM Nav2로 수확 위치 이동 → HOME → BED_VIEW
 
 ## 2. 실행 방법
 
+> 새 PC라면 [5. 설치 및 빌드](#5-설치-및-빌드)를 먼저 끝내세요. `ros-humble-desktop`
+> 만으로는 MoveIt·Nav2·UI 패키지가 없어 launch가 바로 실패합니다.
+
 **터미널 4개**를 쓰고, 순서대로 띄웁니다. Isaac Sim이 먼저 떠 있어야 나머지가 붙습니다.
 
 ### ① Isaac Sim (GPU 호스트)
@@ -49,6 +52,10 @@ MM Nav2로 수확 위치 이동 → HOME → BED_VIEW
 ```bash
 cd ~/cobot3_ws/isaacpjt
 isaac_python main.py --mm --iw --fork --nav --camera
+
+# 모니터링 UI(4분할 CCTV)를 같이 볼 때 — --cctv 추가
+cd ~/cobot3_ws/isaacpjt
+isaac_python main.py --mm --iw --fork --nav --camera --cctv
 ```
 
 | 플래그 | 의미 |
@@ -93,6 +100,9 @@ ros2 launch smartfarm_bringup forklift.launch.py
 
 4분할 CCTV형 관제 화면입니다. **Isaac을 `--cctv`와 함께 띄워야** 고정 감시 카메라가
 나옵니다. 자세한 사용법은 [`src/smartfarm/monitor_ui/README.md`](src/smartfarm/monitor_ui/README.md) 참고.
+
+UI 전용 apt 패키지 4개(`web_video_server` 등)와 `npm install`이 먼저 필요합니다 —
+[5.1](#51-apt-의존-패키지)·[5.3](#53-모니터링-ui-웹-node) 참고.
 
 ```bash
 ros2 launch monitor_ui stream.launch.py   # 카메라 스트리밍 + QoS 브리지
@@ -168,14 +178,123 @@ ros2 launch monitor_ui ui.launch.py       # 상태 집계 + 웹 UI
 
 ---
 
-## 5. 빌드
+## 5. 설치 및 빌드
+
+### 5.1 apt 의존 패키지
+
+기준 배포판은 **Humble**(Ubuntu 22.04)이고, **Jazzy**(Ubuntu 24.04)도 거의 그대로
+쓸 수 있습니다(차이는 [5.5](#55-jazzy-ubuntu-2404-에서-쓰려면)). 아래는 배포판
+이름을 `$ROS_DISTRO`에서 읽으므로 어느 쪽이든 같은 명령입니다.
+
+`ros-*-desktop`만으로는 **부족**합니다. 빠뜨리면 launch가 `package '...' not found`로
+즉사합니다.
+
+```bash
+source /opt/ros/humble/setup.bash    # 또는 /opt/ros/jazzy/setup.bash
+sudo apt update
+
+# 기반 — MoveIt / ros2_control / 주행
+sudo apt install -y \
+  ros-$ROS_DISTRO-moveit \
+  ros-$ROS_DISTRO-moveit-servo \
+  ros-$ROS_DISTRO-moveit-planners-chomp \
+  ros-$ROS_DISTRO-moveit-task-constructor-core \
+  ros-$ROS_DISTRO-moveit-task-constructor-capabilities \
+  ros-$ROS_DISTRO-ros2-control \
+  ros-$ROS_DISTRO-ros2-controllers \
+  ros-$ROS_DISTRO-ur-description \
+  ros-$ROS_DISTRO-ur-moveit-config \
+  ros-$ROS_DISTRO-navigation2 \
+  ros-$ROS_DISTRO-nav2-bringup \
+  ros-$ROS_DISTRO-nav2-smac-planner \
+  ros-$ROS_DISTRO-nav2-regulated-pure-pursuit-controller \
+  ros-$ROS_DISTRO-slam-toolbox
+
+# Isaac ↔ MoveIt 하드웨어 인터페이스 — Humble만 바이너리가 있다.
+# Jazzy는 5.5의 소스 빌드로 대체한다.
+sudo apt install -y ros-$ROS_DISTRO-topic-based-ros2-control
+
+# 모니터링 UI 전용 (트랙 D — UI를 안 쓰면 생략 가능)
+sudo apt install -y \
+  ros-$ROS_DISTRO-web-video-server \
+  ros-$ROS_DISTRO-compressed-image-transport \
+  ros-$ROS_DISTRO-rosbridge-server \
+  ros-$ROS_DISTRO-rosbag2-storage-mcap
+```
+
+목록을 외우는 대신 `package.xml`에서 뽑아 쓰는 쪽이 안전합니다. 새 의존이 추가돼도
+따라옵니다.
 
 ```bash
 cd ~/cobot3_ws
-source /opt/ros/humble/setup.bash
+rosdep install --from-paths src --ignore-src -r -y --rosdistro $ROS_DISTRO
+# 확인: "All system dependencies have been satisfied"
+rosdep check --from-paths src --ignore-src --rosdistro $ROS_DISTRO
+```
+
+> `ROS_DISTRO`가 설정돼 있지 않으면 rosdep이 키를 하나도 못 풀고 그냥 넘어갑니다.
+> `source /opt/ros/<distro>/setup.bash`를 먼저 하거나 `--rosdistro`를 명시하세요.
+
+### 5.2 파이썬 패키지 (트랙 A 비전)
+
+`harvest_vision`의 YOLO 검출에 필요합니다. **`numpy`는 2.x로 올리면 안 됩니다** —
+`cv_bridge`·Isaac 쪽 확장 모듈이 1.x ABI로 빌드돼 있어서 import가 깨집니다.
+
+```bash
+pip install ultralytics "numpy<2"
+# torch는 GPU에 맞는 CUDA 빌드로 (RTX 50 계열은 cu128 이상)
+```
+
+### 5.3 모니터링 UI 웹 (Node)
+
+```bash
+cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm install
+```
+
+Node 18 이상(vite 6). `npm install`을 건너뛰면 `npm run dev`가 `> vite`만 찍고
+멈춘 것처럼 보입니다. 설치 중 뜨는 `npm warn allow-scripts esbuild` 경고는
+무시해도 됩니다(프리빌트 바이너리라 install 스크립트가 필요 없습니다).
+
+### 5.4 빌드
+
+```bash
+cd ~/cobot3_ws
+source /opt/ros/humble/setup.bash    # 또는 /opt/ros/jazzy/setup.bash
 colcon build --symlink-install
 source install/setup.bash
 ```
+
+### 5.5 Jazzy (Ubuntu 24.04) 에서 쓰려면
+
+**검증은 Humble에서만 했습니다.** Jazzy는 아래 네 가지를 처리하면 뜨는 것까지는
+확인 가능한 상태지만, 전 공정을 돌려본 적은 없습니다.
+
+**① `topic_based_ros2_control` 소스 빌드** — 이것만 Jazzy 바이너리가 없습니다
+(noble 저장소 인덱스 확인). Isaac이 관절 명령을 토픽으로 받는 통로라 MM이 아예
+안 움직이므로 필수입니다. 상류에 `jazzy` 브랜치가 없어 `main`을 씁니다.
+
+```bash
+cd ~/cobot3_ws/src
+git clone https://github.com/PickNikRobotics/topic_based_ros2_control.git
+cd ~/cobot3_ws && colcon build --packages-select topic_based_ros2_control
+```
+
+**② `empy` 버전** — Humble/Iron은 3.3.4, Jazzy 이상은 4.x입니다. 섞이면
+`smartfarm_interfaces` 빌드가 `ModuleNotFoundError: No module named 'em'`으로
+깨집니다. `./scripts/fix_ros_build_env.sh`가 `$ROS_DISTRO`를 보고 맞는 쪽을 깔아 줍니다.
+
+**③ Nav2 파라미터 키** — `controller_server`의 진행 검사기 키가 Humble은
+`progress_checker_plugin`(단수), Jazzy는 `progress_checker_plugins`(리스트)입니다.
+`config/harvester_nav2.yaml`에는 **양쪽이 이미 병기**돼 있어 그대로 둬도 됩니다.
+다만 플래너·behavior 플러그인 이름이 Jazzy에서 `nav2_navfn_planner/NavfnPlanner`
+형태(슬래시)에서 `::` 형태로 정리됐습니다. 이 파일은 아직 슬래시 형태라, Nav2가
+플러그인을 못 찾으면 여기부터 보세요. **[4] 임의 — 미검증, TODO**
+
+**④ 파이썬** — Jazzy는 Python 3.12입니다. `numpy<2` 제약은 그대로 유효합니다
+(24.04의 `python3-numpy`도 1.26).
+
+Isaac Sim 쪽은 5.1이 Humble·Jazzy 양쪽 ROS 2 브리지를 제공하므로 `main.py`는
+그대로 씁니다.
 
 ---
 
@@ -193,6 +312,8 @@ source install/setup.bash
 
 | 상황 | 해결 |
 |---|---|
+| `package '...' not found` 로 launch 즉사 | apt 의존 패키지 누락 → [5.1](#51-apt-의존-패키지). `rosdep check --from-paths src --ignore-src --rosdistro humble` 로 확인 |
+| `npm run dev`가 `> vite`에서 멈춤 | `web/`에 `npm install`을 안 한 것 → [5.3](#53-모니터링-ui-웹-node) |
 | `git push` 거부(rejected) | 원격에 새 커밋이 있음 → `git pull` 후 다시 push |
 | 로봇이 토픽을 못 받음 | 모든 호스트의 `ROS_DOMAIN_ID`(108)·RMW·DDS 화이트리스트가 같은지 확인 |
 | Nav2가 목표를 못 세움 | `map` 인자(기본 `maps/farm.yaml`)가 맞는 지도인지, AMCL 초기 pose가 맞는지 확인 |

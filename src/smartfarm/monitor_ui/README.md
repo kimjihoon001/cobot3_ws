@@ -6,7 +6,39 @@
 
 ## 실행
 
-터미널 3개가 필요하다.
+처음 한 번만:
+
+```bash
+# 1) ROS 의존 패키지 (기본 desktop 설치에는 없다)
+#    $ROS_DISTRO를 쓰므로 humble/jazzy 어느 쪽이든 그대로 붙여넣으면 된다.
+source /opt/ros/humble/setup.bash    # 또는 /opt/ros/jazzy/setup.bash
+sudo apt update && sudo apt install -y \
+  ros-$ROS_DISTRO-web-video-server \
+  ros-$ROS_DISTRO-compressed-image-transport \
+  ros-$ROS_DISTRO-rosbridge-server \
+  ros-$ROS_DISTRO-rosbag2-storage-mcap
+
+# 2) 빌드 + 웹 의존성
+cd ~/cobot3_ws && colcon build --packages-select monitor_ui
+cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm install
+```
+
+apt 목록 대신
+`cd ~/cobot3_ws && rosdep install --from-paths src --ignore-src -y --rosdistro $ROS_DISTRO`
+로 한 번에 받아도 된다(`package.xml`에 전부 선언돼 있다).
+
+빠뜨렸을 때 나오는 증상:
+
+| 빠진 것 | 증상 |
+|---|---|
+| `web_video_server` | `ros2 launch`가 `package 'web_video_server' not found`로 즉사 |
+| `compressed_image_transport` | launch는 뜨는데 `republish`가 JPEG를 못 만들어 전 화면 NO SIGNAL |
+| `rosbag2-storage-mcap` | 실행은 되는데 `R`(녹화)만 실패한다 |
+| `npm install` | `npm run dev`가 `> vite`만 찍고 멈춘 것처럼 보인다 |
+
+웹 쪽은 Node 18 이상이면 된다(vite 6). 확인은 `node -v`.
+
+그다음부터는 터미널 3개.
 
 ```bash
 # 1) Isaac — --cctv 를 빼면 고정 카메라가 안 뜬다
