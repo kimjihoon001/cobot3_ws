@@ -142,6 +142,29 @@ def _bringup_without_smoothers() -> str:
         "                       'waypoint_follower',\n"
         "                       'velocity_smoother']",
         "                       'waypoint_follower']")
+    # 순정 Nav2 는 behavior_server 출력(cmd_vel)을 velocity_smoother 가 리맵한
+    # cmd_vel 과 합류시켜 로봇에 보낸다. 위에서 smoother 를 빼고 watchdog
+    # (cmd_vel_nav -> cmd_vel_safe)로 대체했으므로 그 합류점이 사라져,
+    # spin/backup/drive_on_heading 명령이 구독자 없는 cmd_vel 로 나가 버려진다
+    # (2026-07-27 실측: /harvester_0/cmd_vel 은 pub 4 / sub 0). 복구 동작을
+    # watchdog 입력에 합류시켜 안전 타임아웃까지 그대로 적용받게 한다.
+    # controller 와 behavior 는 Nav2 가 동시에 실행하지 않으므로 경합이 없다.
+    behavior_remap_anchor = (
+        "                executable='behavior_server',\n"
+        "                name='behavior_server',\n"
+        "                output='screen',\n"
+        "                respawn=use_respawn,\n"
+        "                respawn_delay=2.0,\n"
+        "                parameters=[configured_params],\n"
+        "                arguments=['--ros-args', '--log-level', log_level],\n"
+        "                remappings=remappings),")
+    if behavior_remap_anchor not in navigation:
+        raise RuntimeError("nav2_bringup behavior_server 정의 형식이 예상과 다릅니다")
+    navigation = navigation.replace(
+        behavior_remap_anchor,
+        behavior_remap_anchor.replace(
+            "                remappings=remappings),",
+            "                remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),"))
     nav_tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix="_navigation.launch.py", delete=False,
         encoding="utf-8")
