@@ -35,6 +35,27 @@ from fleet_dispatch.nav2_bringup_compat import (
 )
 
 
+def _deferred_ns(namespace: str) -> list:
+    """TimerAction 안쪽에서 다시 걸어야 하는 PushRosNamespace (Humble 전용).
+
+    배포판마다 지연 액션의 네임스페이스 문맥 처리가 다르다.
+
+    Humble — `GroupAction`(scoped=True)은 **자식 액션을 훑은 시점**에 스코프를
+      닫는다. `TimerAction`은 예약만 하고 즉시 반환하므로, 정작 타이머가 발화할
+      때는 바깥 `PushRosNamespace`가 이미 pop된 뒤다. 그래서 nav2 노드가
+      네임스페이스 없이 `/map_server`, `/controller_server`로 뜨고, YAML 루트 키
+      (`map_server:` …)와 실제 노드 경로가 어긋나 **파라미터가 하나도 안 먹는다**
+      (2026-07-27 실측: `yaml_filename is not initialized`,
+      `No critics defined for FollowPath` — 둘 다 파라미터 미적용이 원인).
+
+    Jazzy — 지연 액션이 문맥을 잡아두므로 여기서 또 push 하면 `/iwhub_0/iwhub_0`
+      로 겹친다(7a5951b 에서 실측·수정된 내용). 그쪽은 건드리지 않는다.
+    """
+    if os.environ.get("ROS_DISTRO", "") == "humble":
+        return [PushRosNamespace(namespace)]
+    return []
+
+
 def _navigation_without_charging_dock(nav2_bringup: str) -> str:
     """IW 물류 도킹과 무관한 Nav2 충전 docking_server를 제외한 launch 경로."""
     source_path = os.path.join(nav2_bringup, "launch", "navigation_launch.py")
@@ -134,12 +155,9 @@ def generate_launch_description():
             TimerAction(
                 period=2.0,
                 actions=[
-                    GroupAction(actions=[
-                        # TimerAction은 바깥 GroupAction의 PushRosNamespace(namespace)
-                        # 문맥을 그대로 물려받는다(2026-07-27 실측: 여기서 또 push하면
-                        # /iwhub_0/iwhub_0 로 겹쳐 map_server/amcl이 그 이중경로로 뜨고
-                        # RViz/코스트맵은 진짜 /iwhub_0/map을 못 받는다). 그래서 여기서
-                        # 다시 push하지 않는다.
+                    GroupAction(actions=_deferred_ns(namespace) + [
+                        # 네임스페이스 재적용은 Humble 에서만 필요하다 — 이유는
+                        # _deferred_ns() 주석 참조. Jazzy 는 빈 리스트라 종전과 동일.
                         IncludeLaunchDescription(
                             PythonLaunchDescriptionSource(os.path.join(
                                 nav2_bringup, "launch", "localization_launch.py")),
@@ -177,10 +195,32 @@ def generate_launch_description():
             TimerAction(
                 period=3.0,
                 actions=[
-                    # TimerAction은 바깥 GroupAction의 PushRosNamespace(namespace)
-                    # 문맥을 그대로 물려받는다(2026-07-27 실측 — 여기서 또 push하면
-                    # /iwhub_0/iwhub_0로 겹친다). 그래서 여기서 다시 push하지 않는다.
-                    GroupAction(actions=[
+                    # 네임스페이스 재적용은 Humble 에서만 — _deferred_ns() 주석 참조.
+                    GroupAction(actions=_deferred_ns(namespace) + [
+                        # navigation lifecycle 복구. localization 과 달리 여기엔
+                        # 재시도 주체가 없어서, 기동 순간 Isaac 의 odom TF 가 아직
+                        # 안 올라와 있으면 costmap configure 가 실패하고
+                        # lifecycle_manager 가 bringup 을 중단한 채 그대로 굳는다
+                        # (2026-07-27 재현: controller/planner=inactive,
+                        #  bt_navigator/behavior=unconfigured, costmap 미발행).
+                        # TF 는 몇 초 뒤 정상이 되므로 상태를 다시 읽고 재시도하면
+                        # 확실히 올라온다. autostart 가 먼저 시도할 시간을 주려고
+                        # startup_delay 를 navigation 지연(3s)보다 넉넉히 뒤에 둔다.
+                        Node(
+                            package="fleet_dispatch",
+                            executable="nav2_lifecycle_activator",
+                            name="iw_navigation_activator",
+                            output="screen",
+                            parameters=[{
+                                "targets": [
+                                    "controller_server", "smoother_server",
+                                    "planner_server", "behavior_server",
+                                    "bt_navigator", "waypoint_follower",
+                                    "velocity_smoother",
+                                ],
+                                "startup_delay_sec": 12.0,
+                            }],
+                        ),
                         IncludeLaunchDescription(
                             PythonLaunchDescriptionSource(navigation_launch),
                             launch_arguments={
