@@ -25,6 +25,9 @@ def generate_launch_description():
         DeclareLaunchArgument("nav_rviz", default_value="true"),
         DeclareLaunchArgument("moveit_rviz", default_value="true"),
         DeclareLaunchArgument("use_debug", default_value="true"),
+        DeclareLaunchArgument(
+            "place_target_count", default_value="1",
+            description="IW 하역 전 수확·적재할 토마토 개수"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 mm_moveit, "launch", "nav2_harvest_bringup.launch.py")),
@@ -46,6 +49,8 @@ def generate_launch_description():
                 "fixed_goal_yaw": LaunchConfiguration("harvest_yaw"),
                 "nav_reposition_enabled": "false",
                 "resume_search_after_start_sec": "0.0",
+                "place_target_count": LaunchConfiguration(
+                    "place_target_count"),
             }.items(),
         ),
     ])

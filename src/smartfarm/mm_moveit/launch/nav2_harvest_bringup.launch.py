@@ -97,6 +97,9 @@ def generate_launch_description():
             "resume_search_after_start_sec": ParameterValue(
                 LaunchConfiguration("resume_search_after_start_sec"),
                 value_type=float),
+            "place_target_count": ParameterValue(
+                LaunchConfiguration("place_target_count"),
+                value_type=int),
         }],
         remappings=_TF_REMAP,
     )
@@ -132,6 +135,9 @@ def generate_launch_description():
         DeclareLaunchArgument("fixed_goal_yaw", default_value="1.91"),
         DeclareLaunchArgument(
             "resume_search_after_start_sec", default_value="2.0"),
+        DeclareLaunchArgument(
+            "place_target_count", default_value="1",
+            description="IW 하역 전 수확·적재할 토마토 개수"),
         harvest,
         nav2,
         coordinator,

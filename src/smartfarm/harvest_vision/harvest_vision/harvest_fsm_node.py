@@ -37,9 +37,8 @@ class HarvestFsmNode(Node):
             "nav_status_topic", "/navigate_to_pose/_action/status")
         self.declare_parameter("harvest_enable_topic", "harvest_test/enable")
         # IW를 하역장으로 보내기 전에 데크에 실어야 하는 토마토 개수.
-        # 앞열 빈 KLT는 2칸이지만 real_main은 수확 1회로 고정한다 — 다회 수확은
-        # multiple_harvest 브랜치에서 2로 검증 중. 2 이상이면 1회차 플레이스 후
-        # HOME 왕복 없이 BED_VIEW로 돌아가 다음 수확을 이어간다.
+        # 기본 1은 기존 단일 사이클, 정확히 2일 때만 첫 플레이스 후 HOME 왕복
+        # 없이 BED_VIEW로 돌아가 두 번째 수확·플레이스를 수행한다.
         self.declare_parameter("place_target_count", 1)
         self.declare_parameter(
             "place_more_pending_topic", "harvest_test/place_more_pending")
@@ -547,7 +546,10 @@ class HarvestFsmNode(Node):
             f"joint_1={math.degrees(self._bed_view_joint_1):.1f}deg")
 
     def _place_target_count(self) -> int:
-        return max(1, int(self.get_parameter("place_target_count").value))
+        # 다회 동작은 명시적으로 2를 준 경우에만 허용한다. 다른 값은 안전하게
+        # 기본 단일 사이클로 처리해 의도치 않은 반복 수확을 막는다.
+        configured = int(self.get_parameter("place_target_count").value)
+        return 2 if configured == 2 else 1
 
     def _depart_with_partial_load(self, reason: str) -> bool:
         """목표 개수를 못 채웠어도 실은 게 있으면 그대로 하역을 시작한다.
