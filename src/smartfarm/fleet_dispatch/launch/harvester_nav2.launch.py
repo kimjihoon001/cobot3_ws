@@ -32,7 +32,6 @@
 #     sudo apt install ros-$ROS_DISTRO-navigation2 ros-$ROS_DISTRO-nav2-bringup
 
 import os
-import re
 import tempfile
 
 import yaml
@@ -45,31 +44,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-# Humble 표기 → Jazzy 이상 표기. 값에 '/' 가 들어가는 플러그인은 navfn 과 behaviors 뿐이고
-# (costmap·controller·smoother 플러그인은 Humble 도 이미 '::'), 키가 정확히 `plugin` 인
-# 줄만 건드리므로 map 경로·BT xml 경로 같은 다른 '/' 는 안 다친다.
-_PLUGIN_LINE = re.compile(r'(plugin:\s*")(\w+)/(\w+)(")')
-
-
-def _params_for_distro(params_file: str) -> str:
-    """distro 에 맞게 플러그인 표기를 고친 파라미터 파일 경로를 돌려준다.
-
-    nav2 는 Iron 에서 플러그인 클래스 이름을 `pkg/Class` → `pkg::Class` 로 바꿨다.
-    표기가 틀리면 pluginlib 이 못 찾아 해당 서버가 아예 안 뜬다. 파일을 두 벌 두면
-    한쪽만 고치는 사고가 나므로, 원본 하나를 두고 실행 시점에 변환한다.
-    """
-    if os.environ.get("ROS_DISTRO", "") == "humble":
-        return params_file
-    with open(params_file, encoding="utf-8") as f:
-        text = f.read()
-    fixed = _PLUGIN_LINE.sub(r"\1\2::\3\4", text)
-    if fixed == text:
-        return params_file
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False,
-                                      encoding="utf-8")
-    tmp.write(fixed)
-    tmp.close()
-    return tmp.name
+from fleet_dispatch.nav2_bringup_compat import (
+    convert_plugin_names_for_distro, remap_behavior_server_cmd_vel)
 
 
 def _pybool(context, name: str) -> str:
@@ -149,22 +125,7 @@ def _bringup_without_smoothers() -> str:
     # (2026-07-27 실측: /harvester_0/cmd_vel 은 pub 4 / sub 0). 복구 동작을
     # watchdog 입력에 합류시켜 안전 타임아웃까지 그대로 적용받게 한다.
     # controller 와 behavior 는 Nav2 가 동시에 실행하지 않으므로 경합이 없다.
-    behavior_remap_anchor = (
-        "                executable='behavior_server',\n"
-        "                name='behavior_server',\n"
-        "                output='screen',\n"
-        "                respawn=use_respawn,\n"
-        "                respawn_delay=2.0,\n"
-        "                parameters=[configured_params],\n"
-        "                arguments=['--ros-args', '--log-level', log_level],\n"
-        "                remappings=remappings),")
-    if behavior_remap_anchor not in navigation:
-        raise RuntimeError("nav2_bringup behavior_server 정의 형식이 예상과 다릅니다")
-    navigation = navigation.replace(
-        behavior_remap_anchor,
-        behavior_remap_anchor.replace(
-            "                remappings=remappings),",
-            "                remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),"))
+    navigation = remap_behavior_server_cmd_vel(navigation)
     nav_tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix="_navigation.launch.py", delete=False,
         encoding="utf-8")
@@ -186,8 +147,7 @@ def _bringup_without_smoothers() -> str:
 
 
 def _bringup(context, *_args, **_kwargs):
-    distro = os.environ.get("ROS_DISTRO", "")
-    params_file = _params_for_distro(
+    params_file = convert_plugin_names_for_distro(
         LaunchConfiguration("params_file").perform(context))
     params_file = _params_with_initial_pose(context, params_file)
     params_file = _params_with_forward_only_bt(params_file)
@@ -205,10 +165,11 @@ def _bringup(context, *_args, **_kwargs):
         # 각 서버를 독립 프로세스로 띄워 재시작 경합과 컨테이너 장애 전파를 없앤다.
         "use_composition": "False",
     }
-    # use_namespace 는 Humble 에만 있는 인자다 (Iron 에서 제거 — namespace 하나로 통합).
-    # Jazzy 에 넘기면 "unknown launch argument" 로 죽는다.
-    if distro == "humble":
-        args["use_namespace"] = str(bool(args["namespace"]))
+    # use_namespace 는 이 nav2_bringup(Jazzy 포함, 2026-07-27 실측)에도 있고 기본값이
+    # 'false' 다. 안 넘기면 namespace 를 줘도 PushROSNamespace 가 조건부(IfCondition
+    # (use_namespace))라 적용이 안 돼 map_server/amcl/costmap 이 전부 네임스페이스
+    # 없이 뜬다(/harvester_0/map 대신 /map 에 발행 — RViz "No map received" 로 확인).
+    args["use_namespace"] = str(bool(args["namespace"]))
     actions = [IncludeLaunchDescription(
         PythonLaunchDescriptionSource(_bringup_without_smoothers()),
         launch_arguments=args.items())]

@@ -21,6 +21,8 @@
   <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
+  <!-- nav2_lifecycle_activator 노드 + nav2_bringup_compat 배포판 호환 헬퍼 -->
+  <exec_depend>fleet_dispatch</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

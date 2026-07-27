@@ -289,6 +289,13 @@ class HarvestFsmNode(Node):
             self.get_parameter("fixed_goal_send_delay_sec").value)
         self._fixed_goal_deadline_ns = (
             self.get_clock().now().nanoseconds + int(fixed_delay * 1e9))
+        # fixed_goal_deadline_ns는 노드 생성 시점 기준이라, Nav2 활성화가
+        # (동시 기동 부하로) 그보다 오래 걸리면 사실상 지연 효과가 없다.
+        # navigate_to_pose 서버가 실제로 잡힌 시점부터 다시 fixed_delay를 준다 —
+        # AMCL의 첫 map→base TF가 서버 discovery보다 살짝 늦게 버퍼에 들어와
+        # "Initial robot pose is not available"(extrapolation into the past)로
+        # 목표가 즉시 aborted되는 걸 봤다(2026-07-27 실측, 0.3초 차이).
+        self._nav_ready_since_ns = 0
         resume = float(self.get_parameter("resume_search_after_start_sec").value)
         self._resume_deadline_ns = (
             self.get_clock().now().nanoseconds + int(resume * 1e9)
@@ -305,6 +312,14 @@ class HarvestFsmNode(Node):
             self._publish_status("WAITING_FOR_MOVEIT_READY")
             return
         if not self._nav_client.server_is_ready():
+            self._nav_ready_since_ns = 0
+            return
+        now = self.get_clock().now().nanoseconds
+        if self._nav_ready_since_ns == 0:
+            self._nav_ready_since_ns = now
+        fixed_delay_ns = int(
+            float(self.get_parameter("fixed_goal_send_delay_sec").value) * 1e9)
+        if now - self._nav_ready_since_ns < fixed_delay_ns:
             return
         x = float(self.get_parameter("fixed_goal_x").value)
         y = float(self.get_parameter("fixed_goal_y").value)

@@ -14,6 +14,7 @@ TF: map(AMCL)→odom(Isaac chassis)→base_link→chassis→front/back_2d_lidar
   (도메인은 Isaac 과 동일하게 export — 예 ROS_DOMAIN_ID=109. rviz2 로 목표점 찍어 주행 확인)
 """
 import os
+import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -28,16 +29,46 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
 
+from fleet_dispatch.nav2_bringup_compat import (
+    convert_plugin_names_for_distro,
+    remove_docking_server,
+)
+
+
+def _navigation_without_charging_dock(nav2_bringup: str) -> str:
+    """IW 물류 도킹과 무관한 Nav2 충전 docking_server를 제외한 launch 경로."""
+    source_path = os.path.join(nav2_bringup, "launch", "navigation_launch.py")
+    with open(source_path, encoding="utf-8") as stream:
+        source = stream.read()
+    fixed = remove_docking_server(source)
+    if fixed == source:
+        return source_path
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix="_iw_navigation.launch.py", delete=False,
+        encoding="utf-8")
+    tmp.write(fixed)
+    tmp.close()
+    return tmp.name
+
 
 def generate_launch_description():
     pkg = get_package_share_directory("iwhub_control")
     nav2_bringup = get_package_share_directory("nav2_bringup")
-    nav2_params = os.path.join(pkg, "config", "nav2_params.yaml")
+    navigation_launch = _navigation_without_charging_dock(nav2_bringup)
+    # nav2_params.yaml은 아직 Humble 표기(nav2_navfn_planner/NavfnPlanner,
+    # nav2_behaviors/Spin 등)라 Jazzy에서 그대로 주면 pluginlib이 "does not
+    # exist"로 planner_server를 못 띄우고, 그 lifecycle 실패가 costmap을 포함한
+    # navigation bringup 전체를 중단시킨다(2026-07-27 GPU 실측 — /iwhub_0/map은
+    # 정상 발행되는데 global_costmap이 cleaningup에 멈춰 RViz에 안 뜨는 걸로
+    # 관찰됨). harvester_nav2.launch.py와 같은 공용 변환 함수로 배포판별 분기.
+    nav2_params = convert_plugin_names_for_distro(
+        os.path.join(pkg, "config", "nav2_params.yaml"))
     # IW 전용 월드 정렬 맵.
     default_map = os.path.join(pkg, "maps", "greenhouse.yaml")
     map_yaml = LaunchConfiguration("map")
     use_sim_time = LaunchConfiguration("use_sim_time")
     rviz = LaunchConfiguration("rviz")
+    nav_autostart = LaunchConfiguration("nav_autostart")
     namespace = "iwhub_0"
     tf_remaps = [("/tf", "tf"), ("/tf_static", "tf_static")]
     with open(os.path.join(pkg, "urdf", "iwhub.urdf")) as urdf_file:
@@ -52,6 +83,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "rviz", default_value="true",
             description="IW 전용 RViz 실행 여부"),
+        DeclareLaunchArgument(
+            "nav_autostart", default_value="false",
+            description="Nav2 navigation lifecycle 즉시 활성화 여부"),
 
         Node(
             package="robot_state_publisher",
@@ -101,7 +135,11 @@ def generate_launch_description():
                 period=2.0,
                 actions=[
                     GroupAction(actions=[
-                        PushRosNamespace(namespace),
+                        # TimerAction은 바깥 GroupAction의 PushRosNamespace(namespace)
+                        # 문맥을 그대로 물려받는다(2026-07-27 실측: 여기서 또 push하면
+                        # /iwhub_0/iwhub_0 로 겹쳐 map_server/amcl이 그 이중경로로 뜨고
+                        # RViz/코스트맵은 진짜 /iwhub_0/map을 못 받는다). 그래서 여기서
+                        # 다시 push하지 않는다.
                         IncludeLaunchDescription(
                             PythonLaunchDescriptionSource(os.path.join(
                                 nav2_bringup, "launch", "localization_launch.py")),
@@ -139,14 +177,12 @@ def generate_launch_description():
             TimerAction(
                 period=3.0,
                 actions=[
-                    # TimerAction은 지연 실행 시 바깥 PushRosNamespace 문맥을
-                    # 보존하지 않는다. 여기서 namespace를 다시 적용해야 MM의
-                    # 전역 controller_server와 이름이 충돌하지 않는다.
+                    # TimerAction은 바깥 GroupAction의 PushRosNamespace(namespace)
+                    # 문맥을 그대로 물려받는다(2026-07-27 실측 — 여기서 또 push하면
+                    # /iwhub_0/iwhub_0로 겹친다). 그래서 여기서 다시 push하지 않는다.
                     GroupAction(actions=[
-                        PushRosNamespace(namespace),
                         IncludeLaunchDescription(
-                            PythonLaunchDescriptionSource(os.path.join(
-                                nav2_bringup, "launch", "navigation_launch.py")),
+                            PythonLaunchDescriptionSource(navigation_launch),
                             launch_arguments={
                                 "namespace": namespace,
                                 "use_sim_time": use_sim_time,
@@ -154,7 +190,7 @@ def generate_launch_description():
                                 "use_composition": "False",
                                 # mission_nav_node가 모든 프로세스 로드 후 STARTUP하고
                                 # action 서버가 없으면 자동 재시도한다.
-                                "autostart": "False",
+                                "autostart": nav_autostart,
                             }.items(),
                         ),
                     ]),
