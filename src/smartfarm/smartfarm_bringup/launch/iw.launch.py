@@ -28,6 +28,9 @@ def generate_launch_description():
                 "map": LaunchConfiguration("map"),
                 "use_sim_time": use_sim_time,
                 "rviz": LaunchConfiguration("iw_rviz"),
+                # 통합 진입점은 IDLE 상태에서도 costmap을 즉시 표시해야 한다.
+                # mission_nav_node의 STARTUP 복구는 mission이 생긴 뒤의 안전망이다.
+                "nav_autostart": "true",
             }.items(),
         ),
         Node(
@@ -43,6 +46,9 @@ def generate_launch_description():
                 "dock_standoff": ParameterValue(
                     LaunchConfiguration("iw_dock_standoff"),
                     value_type=float),
+                # navigation lifecycle autostart가 진행 중일 때 중복 STARTUP을
+                # 보내지 않는다. 이 시간이 지난 뒤에도 action이 없을 때만 복구한다.
+                "nav_startup_delay_sec": 20.0,
             }],
             remappings=[
                 ("/tf", "/harvester_0/tf"),

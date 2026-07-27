@@ -345,18 +345,23 @@ class MissionNavNode(Node):
     def _update_goal(self) -> None:
         if self._request_pending:
             return
-        if self._mission == "IDLE":
-            return
-        if self._mission == "PREPARE_FORKLIFT":
-            return  # MM 피항 완료 신호 전에는 기존 FOLLOW goal도 새 하역 goal도 금지
+        # Navigation lifecycle 복구는 mission 상태와 무관하게 수행한다. 통합 기동 중
+        # FastDDS가 change_state 응답 하나를 유실하면 autostart가 멈출 수 있는데,
+        # IDLE에서 먼저 반환하면 첫 명령이 올 때까지 costmap도 inactive로 남는다.
         if not self._through_client.server_is_ready():
             self._recover_nav2()
+            if self._mission == "IDLE":
+                return
             self.get_logger().warning(
                 "IW NavigateThroughPoses 서버 대기 중: "
                 f"{self.get_parameter('navigate_through_poses_action').value}",
                 throttle_duration_sec=5.0,
             )
             return
+        if self._mission == "IDLE":
+            return
+        if self._mission == "PREPARE_FORKLIFT":
+            return  # MM 피항 완료 신호 전에는 기존 FOLLOW goal도 새 하역 goal도 금지
         if self._mission == "FORKLIFT":
             # 레인 경로 주행(단일 goal 아님) — 통로 중심선만 타 배드 회피 보장.
             if self._dock_phase == "WAITING_CLEAR":

@@ -274,3 +274,47 @@ velocity_smoother:
     max_decel: [-3.0, 0.0, -2.0]
     odom_topic: "odom"
     odom_duration: 0.1
+
+# Jazzy부터 navigation_launch.py의 관리 노드 목록에 collision_monitor가 추가됐다
+# (Humble엔 없던 단계, 2026-07-27 확인). 이게 configure 안 되면 costmap을 포함한
+# 전체 navigation bringup이 중단된다. 빈 파라미터로 lifecycle만 통과시키는 건
+# 안 된다 — collision_monitor는 velocity_smoother의 cmd_vel_smoothed를 최종
+# cmd_vel로 중계하는 역할도 겸해서(base_node가 구독하는 그 cmd_vel), 완전히
+# 빼거나(node_names에서 제외) 관측 없이 텅 비워두면 로봇이 아예 안 움직인다.
+# 그래서 실제 충돌감지 소스를 costmap의 obstacle_layer와 동일한 스캔 2기로 채운다.
+collision_monitor:
+  ros__parameters:
+    use_sim_time: true
+    base_frame_id: "iwhub_0/base_link"
+    odom_frame_id: "iwhub_0/odom"
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "cmd_vel"
+    transform_tolerance: 0.2
+    source_timeout: 1.0
+    base_shift_correction: True
+    stop_pub_timeout: 2.0
+    # 코스트맵과 같은 이유로 접근 감지만 켠다(정지/감속 존은 아직 미검증) —
+    # local_costmap이 이미 발행 중인 실제 footprint를 그대로 참조한다.
+    polygons: ["FootprintApproach"]
+    FootprintApproach:
+      type: "polygon"
+      action_type: "approach"
+      footprint_topic: "local_costmap/published_footprint"
+      time_before_collision: 1.2
+      simulation_time_step: 0.1
+      min_points: 6
+      visualize: False
+      enabled: True
+    observation_sources: ["scan_front", "scan_back"]
+    scan_front:
+      type: "scan"
+      topic: "front_2d_lidar/scan_filtered"
+      min_height: 0.15
+      max_height: 2.0
+      enabled: True
+    scan_back:
+      type: "scan"
+      topic: "back_2d_lidar/scan_filtered"
+      min_height: 0.15
+      max_height: 2.0
+      enabled: True

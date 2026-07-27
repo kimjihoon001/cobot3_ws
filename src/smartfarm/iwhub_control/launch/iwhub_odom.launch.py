@@ -22,11 +22,16 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from fleet_dispatch.nav2_bringup_compat import convert_plugin_names_for_distro
+
 
 def generate_launch_description():
     pkg = get_package_share_directory("iwhub_control")
     nav2_bringup = get_package_share_directory("nav2_bringup")
-    nav2_params = os.path.join(pkg, "config", "nav2_params.yaml")
+    # nav2_params.yaml은 Humble 표기라 Jazzy에서 그대로 주면 planner_server가
+    # 안 뜬다 — iwhub_nav2.launch.py와 같은 이유(2026-07-27 확인).
+    nav2_params = convert_plugin_names_for_distro(
+        os.path.join(pkg, "config", "nav2_params.yaml"))
     # IW 전용 월드 정렬 맵. 실행 시 map:=... 으로 다른 맵을 덮어쓸 수 있다.
     default_map = os.path.join(pkg, "maps", "greenhouse.yaml")
     map_yaml = LaunchConfiguration("map")
