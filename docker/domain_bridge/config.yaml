@@ -132,6 +132,15 @@ topics:
     type: std_msgs/msg/String
     reversed: true
 
+  # IW 미션은 Jazzy(109)의 수확 FSM이 발행한다. Humble(108) 측 IW/UI도
+  # 동일한 latched 미션을 받도록 109→108 방향으로 중계한다.
+  iw/mission:
+    type: std_msgs/msg/String
+    reversed: true
+    qos:
+      reliability: reliable
+      durability: transient_local
+
   iwhub_0/joint_command:
     type: sensor_msgs/msg/JointState
     reversed: true
