@@ -1,0 +1,133 @@
+# smartfarm 전체(MM/IW/지게차) domain_bridge 설정 — 2026-07-27.
+#
+# isaacpjt/mm.py, iw.py, fork.py의 모든 RB.build_*/RosBridge 호출과
+# isaacpjt/pjt_config/settings.py의 토픽 기본값을 전수 확인해서 뽑았다.
+# 이 워크스테이션은 지금 MM만 띄우고 있어 IW/지게차는 실측 검증 전이다.
+# domain_bridge는 이름/타입이 틀려도 에러 없이 그냥 조용히 안 이어주니,
+# 새 토픽 추가할 땐 이름 오타를 특히 조심할 것.
+#
+# 기본 방향: Isaac(108, 팀 공용 Humble) → 이 워크스테이션(109, Jazzy).
+# ROS→Isaac로 나가는 토픽만 reversed: true로 뒤집는다.
+name: mm_bridge
+from_domain: 108
+to_domain: 109
+
+topics:
+  clock:
+    type: rosgraph_msgs/msg/Clock
+
+  harvester_0/joint_states:
+    type: sensor_msgs/msg/JointState
+
+  # topic_based_ros2_control(mm_mm.urdf.xacro)이 실제 하드웨어 피드백을 받는 토픽.
+  # /harvester_0/joint_states 와는 별개 — 그건 joint_state_broadcaster가 이걸
+  # 받아서 ROS 쪽에서 다시 만들어 내는 값이다. 이게 안 이어지면 MoveIt이 URDF의
+  # initial_value(홈 자세)만 계속 본다(2026-07-27 확인).
+  harvester_0/hw_joint_states:
+    type: sensor_msgs/msg/JointState
+
+  harvester_0/odom:
+    type: nav_msgs/msg/Odometry
+
+  harvester_0/scan:
+    type: sensor_msgs/msg/LaserScan
+    qos:
+      reliability: best_effort
+
+  harvester_0/tf:
+    type: tf2_msgs/msg/TFMessage
+
+  # tf_static은 뺐다 — 정적 프레임은 robot_state_publisher(ROS 쪽, 109 로컬)가
+  # URDF로 직접 발행해서 Isaac을 거칠 필요가 없다. Isaac의 RawTransformTree/
+  # TransformTree 노드는 odom→base_link, base_link→센서 프레임처럼 매 프레임
+  # 바뀌는 것만 "tf"(동적) 토픽으로 낸다.
+
+  harvester_0/rgb:
+    type: sensor_msgs/msg/Image
+    qos:
+      reliability: best_effort
+
+  harvester_0/depth:
+    type: sensor_msgs/msg/Image
+    qos:
+      reliability: best_effort
+
+  harvester_0/camera_info:
+    type: sensor_msgs/msg/CameraInfo
+    qos:
+      reliability: best_effort
+
+  harvester_0/sim/tomato:
+    type: std_msgs/msg/String
+
+  # Isaac(mm.py)의 grasp_check/gripper/blade 상태 응답 채널. 빠져 있으면
+  # manipulator_target_node의 GRASP_VERIFY가 Isaac 응답을 영원히 못 받는다
+  # (2026-07-27 확인 — 토픽명 불일치 버그와 같이 있었다).
+  harvester_0/status:
+    type: std_msgs/msg/String
+
+  # 릴리즈 순간 과실-TCP 오프셋 진단 전용(mm.py). 제어 로직이 구독하진 않지만
+  # status(120byte 제한)와 분리된 진단 채널이라 같이 이어둔다.
+  harvester_0/scoop/release_debug:
+    type: std_msgs/msg/String
+
+  # ===== IW(iwhub_0) — isaacpjt/iw.py, settings.py IwHubNavConfig 실측. =====
+  # 이 워크스테이션에선 아직 안 띄움 — iw.py 실행 전 실제 토픽/타입 재확인 권장.
+  iwhub_0/joint_states:
+    type: sensor_msgs/msg/JointState
+
+  iwhub_0/odom:
+    type: nav_msgs/msg/Odometry
+
+  iwhub_0/tf:
+    type: tf2_msgs/msg/TFMessage
+
+  # 전/후방 2D 라이다 2기(Nova Carter 방식, 각 270°로 360° 커버).
+  iwhub_0/front_2d_lidar/scan:
+    type: sensor_msgs/msg/LaserScan
+    qos:
+      reliability: best_effort
+
+  iwhub_0/back_2d_lidar/scan:
+    type: sensor_msgs/msg/LaserScan
+    qos:
+      reliability: best_effort
+
+  iwhub_0/deck_geometry:
+    type: std_msgs/msg/String
+
+  # 네임스페이스 없이 "/iw/"로 공유(iw.py build_pose_publisher 실측).
+  iw/basket/empty_slot_pose:
+    type: geometry_msgs/msg/PoseStamped
+
+  # ===== 지게차(forklift_0) — isaacpjt/fork.py 실측. =====
+  forklift_0/joint_states:
+    type: sensor_msgs/msg/JointState
+
+  forklift_0/pose:
+    type: geometry_msgs/msg/PoseStamped
+
+  # 네임스페이스 없이 "/forklift/"로 공유(fork.py build_string_pub 실측).
+  forklift/handoff_state:
+    type: std_msgs/msg/String
+
+  # --- 여기부터 ROS(109) → Isaac(108) ---
+  harvester_0/joint_command:
+    type: sensor_msgs/msg/JointState
+    reversed: true
+
+  harvester_0/cmd_vel_safe:
+    type: geometry_msgs/msg/Twist
+    reversed: true
+
+  harvester_0/cmd:
+    type: std_msgs/msg/String
+    reversed: true
+
+  iwhub_0/joint_command:
+    type: sensor_msgs/msg/JointState
+    reversed: true
+
+  forklift_0/joint_command:
+    type: sensor_msgs/msg/JointState
+    reversed: true
