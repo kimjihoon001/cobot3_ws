@@ -1,0 +1,27 @@
+# Smart Farm Autonomous Harvest & Transport System — Python 의존성
+#
+# 대상: ROS 2 Humble 워크스테이션의 시스템 python3 (3.10)
+# Isaac Sim 쪽(isaacpjt/)은 Isaac 동봉 python.sh(3.11)가 자체 의존성을 갖고 있어
+# 이 파일의 대상이 아니다.
+#
+#   pip install -r requirements.txt
+#
+# torch는 GPU에 맞는 CUDA 빌드를 별도로 설치한다. 아래 버전 제약만으로는
+# CPU 빌드가 깔릴 수 있다. RTX 50 계열은 cu128 이상이 필요하다.
+#   예) pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# ── 비전 (harvest_vision/vision_node.py) ──────────────────────────────
+ultralytics>=8.3,<9            # YOLO 검출 (finetuned_far.pt / finetuned_near.pt)
+torch>=2.4                     # YOLO 백엔드 — CUDA 빌드로 설치할 것
+
+# ── 수치·영상 처리 ────────────────────────────────────────────────────
+# numpy는 반드시 1.x. cv_bridge와 Isaac 확장 모듈이 1.x ABI로 빌드돼 있어
+# 2.x로 올리면 import가 깨진다.
+numpy>=1.24,<2
+opencv-python>=4.5
+
+# ── 설정·직렬화 ───────────────────────────────────────────────────────
+PyYAML>=5.4                    # launch/config 로딩
+
+# ── 테스트 (isaacpjt/tests, 각 패키지 test/) ──────────────────────────
+pytest>=6.2
