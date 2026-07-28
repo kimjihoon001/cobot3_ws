@@ -170,7 +170,7 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev   # 처음 한 번은
 │   └── tests/              # 시뮬 로직 pytest
 ├── maps/                   # Nav2 정적맵 (기본 farm.yaml, 생성본 farm_gen.yaml)
 ├── docs/                   # 파트별 시스템 가이드·조사 기록
-├── yolo_training/          # YOLO 학습 스크립트·가중치
+├── src/smartfarm/harvest_vision/resource/  # 시연용 YOLO 가중치
 ├── diagnostics/            # 통합 시뮬 진단 캡처 스크립트
 ├── scripts/  tools/        # 빌드 환경 수정, 디버그 bag 분석 등 (아래 표)
 └── build/ install/ log/    # colcon 산출물 (.gitignore)
@@ -291,6 +291,10 @@ rosdep check --from-paths src --ignore-src --rosdistro $ROS_DISTRO
 pip install ultralytics "numpy<2"
 # torch는 GPU에 맞는 CUDA 빌드로 (RTX 50 계열은 cu128 이상)
 ```
+
+시연용 가중치는 `src/smartfarm/harvest_vision/resource/`에 포함되어 있다.
+원본 학습 데이터와 도메인 적응 스크립트는 현재 저장소에 포함되어 있지 않아
+이 저장소만으로 재학습을 재현할 수는 없다.
 
 ### 5.3 모니터링 UI 웹 (Node)
 

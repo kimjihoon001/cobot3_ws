@@ -66,23 +66,15 @@ finetuned_near.pt -> {0: ripe, 1: spoiled}
 ### 원거리 모델의 Isaac Sim 도메인 적응
 
 실사 토마토 데이터만 학습한 원거리 모델은 Isaac Sim의 조명·재질·렌더링 차이로 검출
-성능이 떨어질 수 있다. `yolo_finetune_far_scene.py`는 원본 `scene_yolo`를 수정하지 않고
-`ripe`와 `spoiled`를 모두 `tomato=0`으로 합친 파생 데이터셋을 만든 뒤 기존
-`finetuned_far.pt`를 낮은 학습률로 파인튜닝한다.
+성능이 떨어질 수 있다. 과거에는 별도 학습 workspace에서 `ripe`와 `spoiled`를
+모두 `tomato=0`으로 합친 파생 데이터셋을 만든 뒤 기존 `finetuned_far.pt`를
+낮은 학습률로 파인튜닝했다. 해당 학습 스크립트와 원본 데이터셋은 현재 이
+저장소에 포함되어 있지 않다.
 
-```bash
-cd /home/rokey/cobot3_ws
-
-# 파생 데이터만 확인
-python3 yolo_training/yolo_finetune_far_scene.py --prepare-only
-
-# 기본 25 epoch 시뮬 도메인 적응
-python3 yolo_training/yolo_finetune_far_scene.py --device 0
-```
-
-파생 데이터는 `yolo_training/processed/scene_tomato_detection`에 생성된다. 이미지는
-복제하지 않고 원본을 가리키는 심볼릭 링크를 사용하며, 라벨만 1클래스로 변환한다.
-학습 결과는 `yolo_training/runs/far_scene_finetune_<시간>/weights/best.pt`에 저장된다.
+재학습이 필요하면 원본 데이터와 학습 스크립트를 별도 이관한 뒤 실행 절차를
+함께 복원해야 한다. 현재 저장소만으로는 학습을 재현할 수 없고, 아래 시연용
+가중치만 제공한다. 현재 저장소에는 학습 결과 중 시연에 사용하는 최종 가중치만
+`src/smartfarm/harvest_vision/resource/`에 보관한다.
 
 시뮬 파인튜닝 모델로 리소스를 교체하기 전에 기존 실사 검증셋과 시뮬 검증셋을 모두
 평가해야 한다. 시뮬 데이터만 과도하게 학습하면 실사 성능을 잊을 수 있다.
@@ -90,7 +82,7 @@ python3 yolo_training/yolo_finetune_far_scene.py --device 0
 원거리 학습 결과:
 
 ```text
-yolo_training/runs/tomato_detector_20260721_120648/weights/best.pt
+src/smartfarm/harvest_vision/resource/finetuned_far.pt
 ```
 
 ## ROS 토픽
@@ -373,7 +365,8 @@ ros2 topic info /clock --verbose
   계산하며 `J/L`로 제자리 회전한 뒤 `I/K`로 이동한다. Nav2의 `vy=0` 정책과 같다.
 - 사용자 조작 통일을 위해 MM 회전 키를 기존 `U/O`에서 `J/L`로 변경했다.
 - `scene_yolo`의 `ripe/spoiled`를 `tomato` 한 클래스로 합쳐 원거리 모델을 시뮬레이션
-  도메인에 적응시키는 `yolo_finetune_far_scene.py`를 추가했다.
+  도메인 적응 학습을 수행했다. 당시 학습 스크립트와 데이터셋은 현재 저장소에
+  포함되어 있지 않다.
 - 저장된 `maps/farm.yaml`로 MM Nav2를 검증하는 절차를 추가했다. 게걸음 금지 정책에
   맞춰 AMCL을 DifferentialMotionModel로 바꾸고 DWB의 유효한 `vy_samples=5`와
   `min/max_vel_y=0` 조합으로 수정했다. Nav2/Isaac 토픽 주석도 실제 전역 토픽에 맞췄다.
