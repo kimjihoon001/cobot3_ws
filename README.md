@@ -109,15 +109,44 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 
 ## 개발 환경 (Environment)
 
-![활용 장비 및 프로그램](docs/media/tech_stack.png)
+**실행 환경**
 
-- **OS:** Ubuntu 22.04.5 LTS (Jammy Jellyfish)
-- **Middleware:** ROS 2 Humble Hawksbill (`/opt/ros/humble`)
-- **Simulator:** NVIDIA Isaac Sim 5.1 (Standalone, PhysX)
-- **Language:** Python 3.10 (ROS 2 노드) / Python 3.11 (Isaac Sim 동봉 인터프리터)
-- **Key Libraries:** `rclpy`, `ultralytics`, `cv_bridge`, `moveit_ros_move_group`, `nav2_bringup`, `topic_based_ros2_control`, `web_video_server`, `rosbridge_server`
-- **Frontend:** React 18 + TypeScript 5 + Vite 6 + roslib
-- **통신 설정:** `ROS_DOMAIN_ID=108`, `RMW_IMPLEMENTATION=rmw_fastrtps_cpp`, `use_sim_time=true`
+![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04.5_LTS-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)
+![ROS 2](https://img.shields.io/badge/ROS_2-Humble-22314E?style=for-the-badge&logo=ros&logoColor=white)
+![Isaac Sim](https://img.shields.io/badge/Isaac_Sim-5.1-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10_|_3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
+
+**인지 · AI**
+
+![Ultralytics](https://img.shields.io/badge/Ultralytics-YOLOv8_|_v11-0B23A9?style=for-the-badge&logo=yolo&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-CUDA-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
+![OpenCV](https://img.shields.io/badge/OpenCV-cv__bridge-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)
+![RealSense](https://img.shields.io/badge/RealSense-D455_RGB--D-0071C5?style=for-the-badge&logo=intel&logoColor=white)
+
+**제어 · 주행**
+
+![MoveIt 2](https://img.shields.io/badge/MoveIt_2-OMPL_%7C_Pilz-0A7BBB?style=for-the-badge)
+![Nav2](https://img.shields.io/badge/Nav2-DWB_%7C_AMCL-1C7C54?style=for-the-badge)
+![ros2_control](https://img.shields.io/badge/ros2__control-topic__based-22314E?style=for-the-badge)
+![Fast DDS](https://img.shields.io/badge/Fast_DDS-rmw__fastrtps__cpp-5A5A5A?style=for-the-badge)
+
+**개발 · 협업**
+
+![React](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-6-646CFF?style=for-the-badge&logo=vite&logoColor=white)
+![GitHub](https://img.shields.io/badge/GitHub-%ED%98%91%EC%97%85-181717?style=for-the-badge&logo=github&logoColor=white)
+![Notion](https://img.shields.io/badge/Notion-%EB%AC%B8%EC%84%9C%ED%99%94-000000?style=for-the-badge&logo=notion&logoColor=white)
+
+| 항목 | 값 |
+|---|---|
+| **OS** | Ubuntu 22.04.5 LTS (Jammy Jellyfish) |
+| **Middleware** | ROS 2 Humble Hawksbill (`/opt/ros/humble`) |
+| **Simulator** | NVIDIA Isaac Sim 5.1 (Standalone, PhysX) |
+| **Language** | Python 3.10 (ROS 2 노드) / Python 3.11 (Isaac Sim 동봉 인터프리터) |
+| **Key Libraries** | `rclpy`, `ultralytics`, `cv_bridge`, `moveit_ros_move_group`, `nav2_bringup`, `topic_based_ros2_control`, `web_video_server`, `rosbridge_server` |
+| **Frontend** | React 18 + TypeScript 5 + Vite 6 + roslib |
+| **통신 설정** | `ROS_DOMAIN_ID=108` · `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` · `use_sim_time=true` |
 
 > `isaacpjt/main.py`가 `ROS_DOMAIN_ID`를 **108로 강제**합니다. ROS 터미널도 108이어야 통신됩니다.
 > Isaac Sim 코드는 반드시 Isaac 동봉 `python.sh`(Python 3.11)로 실행해야 하며 시스템 python으로는 동작하지 않습니다.
