@@ -95,9 +95,11 @@ ros2 run warehouse_dock fork_lift_return_node --ros-args -p initial_pallet:=2
 대기 위치로 빠질 때까지 IW 상하차 축에서 조향하지 않는다.
 
 입구 중앙 대기점에서는 포크가 AMR(-Y)을 향한다. 랙 작업을 시작할 때는 먼저
-창고 안쪽으로 1.5m 후진하고, `temp/spikes/06_pallet_lift.py`와 동일한 ForkliftB
-조향 방식으로 우측 U턴한다. 최대 조향은 70°로 제한하되, 첫 U턴은 종료점이
-`Pallet_00`의 X축에 정확히 맞도록 약 59.7°(반경 1.2m)를 사용한다. U턴이 끝나면
+창고 안쪽으로 1.5m 후진하고, 초기 팔레트 리프트 spike에서 검증한 ForkliftB
+후륜 조향 방식으로 우측 U턴한다. 해당 spike 파일은 현재 저장소에 남아 있지
+않으며 현행 구현은 `fork_lift_node.py`가 소유한다. 최대 조향은 70°로 제한하되,
+첫 U턴은 종료점이 `Pallet_00`의 X축에 정확히 맞도록 약 59.7°(반경 1.2m)를
+사용한다. U턴이 끝나면
 실제 `/forklift_0/pose`의 누적 회전각과 목표 yaw가 모두 180°에 도달했을 때만
 성공 처리한다. 약 13.4초 조건은 성공 조건이 아니라 pose 미도달 시 안전 정지하는
 watchdog이다. 이어서

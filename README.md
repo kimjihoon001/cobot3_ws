@@ -172,6 +172,10 @@ pip install -r requirements.txt
 2.x로 올리면 import가 깨집니다. `torch`는 GPU에 맞는 CUDA 빌드로 별도 설치하며,
 RTX 50 계열은 **cu128 이상**이 필요합니다.
 
+시연용 YOLO 가중치는 `src/smartfarm/harvest_vision/resource/`에 포함되어 있어 별도 내려받기가
+필요 없습니다. 다만 원본 학습 데이터셋과 도메인 적응 스크립트는 이 저장소에 없어,
+저장소만으로 재학습을 재현할 수는 없습니다.
+
 ### 2. ROS 2 패키지 설치
 
 MoveIt 2, Nav2, ros2_control 및 관제 UI 관련 패키지가 설치되어 있어야 합니다.

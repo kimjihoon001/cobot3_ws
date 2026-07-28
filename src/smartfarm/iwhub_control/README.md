@@ -21,6 +21,16 @@ iw.hub 운반 AMR(트랙 B) 베이스 제어 + 주행 미션 패키지.
 - `iwhub_odom.launch.py` — 오도메트리 확인용
 - `iwhub_nav2.launch.py` — IW 전용 Nav2 스택
 
+## Behavior Tree
+
+| 파일 | 역할 |
+|---|---|
+| `behavior_trees/forward_only_through_poses.xml` | FOLLOW·도크 접근·복귀 레인 경로를 Spin/BackUp 복구 없이 전진 위주로 수행 |
+| `behavior_trees/dock_final_pose.xml` | 마지막 도크 goal의 yaw를 삭제하지 않고 `ComputePathThroughPoses → FollowPath`로 전달 |
+
+`mission_nav_node`가 목적에 따라 두 트리를 선택한다. 도크 근처에서 Nav2가 끝난
+뒤에는 별도 20 Hz POSITION/YAW 폐루프가 최종 정렬을 담당한다.
+
 ## 도구
 
 - `tools/generate_greenhouse_map.py` — Isaac 온실/창고 설정에서 IW Nav2 정적 맵(`maps/greenhouse.yaml`)을 재생성. 기존 `map → odom` 정렬을 깨지 않도록 원점·범위를 유지한 채 갱신할 때 사용

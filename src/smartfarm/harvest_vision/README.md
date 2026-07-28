@@ -12,6 +12,26 @@ colcon build --packages-select smartfarm_interfaces harvest_vision --symlink-ins
 source install/setup.bash
 ```
 
+## 현행 노드와 실행 진입점
+
+| 이름 | 역할 |
+|---|---|
+| `vision_node` | RGB·Depth·CameraInfo로 토마토를 검출하고 카메라 기준 3D pose 발행 |
+| `manipulator_target_node` | 비전/IW pose를 MM `base_link`로 변환하고 수확·플레이스 상세 상태기계 수행 |
+| `harvest_fsm_node` | Nav2 도착, 수확 횟수, IW 미션과 MM 피항을 조정하는 상위 FSM |
+| `fixed_harvest_moveit_node` | 고정 수확 pose를 기본값으로 쓰는 `harvest_fsm_node` 파생 실행 노드. 현행 `smartfarm_bringup/mm.launch.py`의 코디네이터 |
+| `vision_debug_view` | YOLO 결과와 Depth를 나란히 표시 |
+| `harvest_teleop` | 수동 팔 목표·홈 복귀 시험용 키보드 노드 |
+
+현행 통합 실행은 다음 진입점을 사용한다.
+
+```bash
+ros2 launch smartfarm_bringup mm.launch.py
+```
+
+이 경로는 `mm_moveit/nav2_harvest_bringup.launch.py`를 포함하며, 비전 목표를
+`mm_motion_bridge`가 MoveIt OMPL/Pilz goal로 변환한다.
+
 ## 좌표 브리지 dry-run
 
 ```bash
@@ -23,10 +43,10 @@ ros2 run harvest_vision manipulator_target_node --ros-args \
 `harvester_0/base_link`로 이어지는 TF와 변환된 좌표를 확인하기 전에는 활성화하지
 않는다.
 
-Isaac Sim 쪽은 `--mm --rmpflow`로 실행한다. 검증된 목표가
-`/harvester_0/cmd`의 `rmp_target` JSON으로 전달되며, Isaac의 공식 UR10e
-RMPflow 설정이 이를 관절 action으로 변환한다. `command_enabled`가 false이면
-RMPflow 명령은 발행되지 않는다.
+이 절의 YAML은 좌표 변환만 확인하는 레거시 dry-run 설정이다. 현행 시연에서는
+Isaac을 `--mm --nav`로 실행하고, 검증된 목표를 `mm_motion_bridge`가 MoveIt
+OMPL/Pilz 궤적으로 변환한다. `command_enabled: false`이면 실제 팔 명령은
+발행되지 않는다.
 
 ## 근거리 품질 판정 상태 디버깅
 
@@ -67,18 +87,18 @@ IW 바스켓 TF 프레임이나 map/base 계열 어느 것이어도 된다. 노�
 팔 작업영역 안의 가장 가까운 빈 슬롯을 선택한다. IW가 없거나 모든 슬롯이 작업영역
 밖이면 추가 팔 동작 없이 홈으로 복귀해 유지한다.
 
-배치가 끝나면 RMPflow의 초기 관절 자세로 복귀하고, 관절 최대 오차가 0.03 rad
+배치가 끝나면 MoveIt HOME 관절 자세로 복귀하고, 관절 최대 오차가 0.03 rad
 이하일 때만 `/harvester_0/manipulator/mobility_ready=true`와 `HOME_READY`를 발행한다.
 Isaac의 JSON `base` 명령도 홈이 아니면 차단한다. Nav2/외부 이동 노드는 같은
 `mobility_ready` 인터록을 구독해 true일 때만 주행 목표를 실행해야 한다.
 
 ## IW 없는 Nav2→수확 통합시험
 
-Isaac은 MM Nav 브리지와 RMPflow를 함께 켠다.
+Isaac은 현행 MM Nav·카메라·조인트 브리지를 함께 켠다.
 
 ```bash
-isaac_python isaacpjt/basic/jihoonkim/isaacpjt/main.py \
-  --mm --nav --rmpflow
+cd ~/cobot3_ws/isaacpjt
+isaac_python main.py --mm --nav
 ```
 
 Nav2를 실행한 뒤 단독 시험 노드를 띄운다.
@@ -102,3 +122,17 @@ RViz에서 `Nav2 Goal`을 찍으면 시험 노드가 새 NavigateToPose goal ID�
 `config/nav_harvest_test.yaml`의 `mock_basket_release_xyz`를 사용한다. 배치와 홈
 복귀가 완료되면 시험 상태는 `CYCLE_COMPLETE_HOME_READY`가 된다. 이 시험 중에는
 `target_approach_node`나 MM teleop을 동시에 실행하지 않는다.
+
+## 수동 텔레옵
+
+자동 수확 FSM을 띄우지 않은 상태에서만 사용한다.
+
+```bash
+ros2 launch harvest_vision teleop_harvest.launch.py
+# 또는
+ros2 run harvest_vision harvest_teleop
+```
+
+`I/K`, `J/L`, `U/O`로 `base_link` 기준 목표를 조금씩 옮기고 `g`로 HOME에
+복귀한다. 자동 수확 launch나 다른 팔 명령 노드와 동시에 실행하면 같은 명령
+토픽을 경쟁하므로 병행하지 않는다.

@@ -10,9 +10,8 @@
   LD_LIBRARY_PATH=<isaac>/exts/isaacsim.ros2.bridge/humble/lib:$LD_LIBRARY_PATH \\
   RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=108 \\
   isaac_python main.py --mm --iw --fork   (로봇 3대 전부 — 물류 루프 데모)
-  (Isaac은 domain 108/Humble 고정이 기본 구조 — docker/domain_bridge/로
-   109(Jazzy 워크스테이션)와 중계한다. 아래는 domain_bridge 없이 Isaac과
-   Jazzy를 같은 domain에 직접 물리는 실험용으로만 쓸 것 — Humble 내장
+  (Isaac과 모든 ROS 2 노드는 domain 108에서 직접 통신한다. 별도의
+   Docker/domain bridge는 사용하지 않는다. 아래 Jazzy 브리지 선택은 Humble 내장
    Fast-DDS(2.6.10)가 Jazzy Fast-DDS(2.14.x)의 ros_discovery_info CDR을
    잘못 해석해 abort()하는 크래시가 확인됐다(2026-07-27), 우회 시도이며
    미검증)
@@ -100,9 +99,8 @@ WAREHOUSE_TEST = (
 # 렌더하므로 기본은 꺼두고 모니터링 화면이 필요할 때만 켠다.
 CCTV = "--cctv" in sys.argv
 
-# Warehouse 자동화의 공통 도메인은 108이다. ~/.bashrc가 109를 기본으로 내보내므로
-# setdefault()를 쓰면 Isaac만 109에 남고 ROS 터미널(108)과 완전히 분리된다.
-# 이 진입점에서는 양방향 브리지가 반드시 같은 값으로 뜨도록 명시적으로 고정한다.
+# Warehouse 자동화의 공통 도메인은 108이다. 외부 셸 설정과 무관하게 Isaac과
+# 모든 ROS 2 노드가 같은 도메인에서 직접 통신하도록 이 진입점에서 고정한다.
 if not NO_ROS:
     os.environ["ROS_DOMAIN_ID"] = "108"
     os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
@@ -112,18 +110,15 @@ if not NO_ROS:
 def _bootstrap_isaac_ros2() -> None:
     """Isaac 내장 ROS 2 라이브러리를 잡은 환경으로 main.py를 한 번 재실행한다.
 
-    ISAACPJT_ROS_DISTRO 환경변수로 배포판을 고른다(기본 humble). 현재 확정
-    구조는 Isaac=Humble(domain 108) 고정, 워크스테이션=Jazzy(domain 109),
-    그 사이는 domain_bridge가 중계한다(docker/domain_bridge/). 일반
-    ROS_DISTRO를 그대로 봤다면 Jazzy가 source된 터미널에서 isaac_python을
-    켰을 때 Isaac까지 Jazzy 브리지를 골라버려 이 구조와 충돌한다(2026-07-27
-    확인) — 그래서 범용 ROS_DISTRO가 아니라 이 전용 변수만 본다.
+    ISAACPJT_ROS_DISTRO 환경변수로 Isaac 내장 배포판을 고른다(기본 humble).
+    모든 프로세스는 domain 108에서 직접 통신하며 별도의 domain bridge는 쓰지
+    않는다. 일반 ROS_DISTRO를 그대로 보면 Jazzy가 source된 터미널에서 Isaac도
+    의도치 않게 Jazzy 브리지를 고를 수 있으므로 이 전용 변수만 사용한다.
 
-    Jazzy 브리지 선택은 domain_bridge 없이 Isaac과 워크스테이션을 같은
-    domain에 직접 물리는 실험용으로만 쓴다 — 그 경우 Humble Fast-DDS(2.6.10)가
-    Jazzy Fast-DDS(2.14.x)의 ros_discovery_info CDR을 잘못 해석해 abort()하는
-    크래시가 확인돼서(2026-07-27) 우회 시도용으로 남겨둔 것이지, 지금의
-    domain_bridge 구조에서 쓰라는 게 아니다.
+    Jazzy 브리지 선택은 배포판 호환성 확인용 실험 옵션이다. Humble Fast-DDS와
+    Jazzy Fast-DDS를 같은 도메인에 혼용하면 ros_discovery_info CDR 해석 중
+    abort()한 사례가 있으므로 기본 시연 구성은 Isaac 내장 Humble과 호환되는
+    ROS 2 환경을 domain 108로 통일한다.
     """
     if NO_ROS:
         return

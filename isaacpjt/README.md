@@ -236,6 +236,23 @@ ros2 topic pub -1 /harvester_0/blade_command std_msgs/msg/Float64 '{data: 0.0}'
 | Robotiq `invalid inertia tensor` | 에셋 시각 링크 근사(무해) |
 | 다른 PC 에서 토픽이 안 보임 | 도메인 108·RMW·화이트리스트 셋 다 일치? 유선 10.10.0.x 인지? `ROS_LOCALHOST_ONLY` 해제? |
 
+## 수동·진단 진입점
+
+| 파일 | 용도 | 주의 |
+|---|---|---|
+| `main.py` | 현행 통합 시뮬레이션 진입점 | MM·IW·지게차 조합은 플래그로 선택 |
+| `forklift_teleop.py` | 지게차 drive·steer·lift 수동 시험 | 자동 `warehouse_dock` 노드와 동시 실행 금지 |
+| `iw_test.py` | IW 단독 브리지·센서 개발용 레거시 시험 진입점 | 통합 시연은 `main.py --iw --nav` 사용 |
+| `robot_base.py` | 로봇별 브리지 생성 실패를 공통 처리하는 내부 헬퍼 | 직접 실행하지 않음 |
+
+```bash
+# 자동 지게차 노드를 내린 뒤 수동 시험
+isaac_python forklift_teleop.py
+
+# IW 단독 개발 시험보다 현행 경로를 우선 사용
+isaac_python main.py --iw --nav
+```
+
 로봇 배치(온실 앞마당 y=−12)는 임시 — 물류 동선 확정 후 조정 예정.
 
 ---
