@@ -1,4 +1,4 @@
-# monitor_ui — 4분할 CCTV 관제 화면
+# monitor_ui — CCTV · 수확현황 · 도매시세 모바일 관제 화면
 
 수확 → 인계 → 적재 전 공정을 한 화면에서 본다. 영상은 HTTP MJPEG(8080),
 상태는 WebSocket JSON(9090)으로 채널을 나눴다. 이미지를 rosbridge로 보내면
@@ -56,6 +56,28 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev
 ```
 
 그다음 <http://localhost:5173>.
+
+휴대폰에서 볼 때는 같은 Wi-Fi에 연결한 뒤 Vite를 외부 접속 가능하게 띄운다.
+
+```bash
+cd ~/cobot3_ws/src/smartfarm/monitor_ui/web
+npm run dev -- --host 0.0.0.0
+# 휴대폰: http://<PC_IP>:5173
+```
+
+하단 탭은 `CCTV / 수확현황 / 시세·추천`으로 구성된다. 수확현황은
+`/harvester_0/vision/tomato_detections`와 매니퓰레이터 상태에서 집계한다.
+도매시세는 공공데이터포털의 온라인 도매시장 거래정보 API를 사용하며,
+브라우저에 인증키가 노출되지 않도록 `market_price_node`가 호출한다.
+
+```bash
+export DATA_GO_KR_SERVICE_KEY='공공데이터포털에서_발급받은_키'
+ros2 launch monitor_ui ui.launch.py
+```
+
+키가 없거나 해당 날짜에 토마토 거래가 없으면 임의 가격 대신 `연동 대기`가
+표시된다. 첫 연동 시 실제 API 응답의 가격 단위·필드가 신청한 명세와 같은지
+확인한 뒤 운영에 사용한다.
 
 주소창 없이 띄우려면:
 

@@ -28,6 +28,7 @@ setup(
             "ui_status_node = monitor_ui.ui_status_node:main",
             "recorder_node = monitor_ui.recorder_node:main",
             "qos_bridge = monitor_ui.qos_bridge:main",
+            "market_price_node = monitor_ui.market_price_node:main",
         ],
     },
 )

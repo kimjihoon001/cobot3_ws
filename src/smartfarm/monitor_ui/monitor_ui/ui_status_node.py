@@ -23,9 +23,11 @@ import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
+from smartfarm_interfaces.msg import TomatoDetectionArray
 
 # 공정 순서대로 놓인 스트림. stream.launch.py의 remap 결과와 같아야 한다.
 # overview는 격자에 없지만 확대해서 볼 수 있어 Hz를 같이 잰다.
@@ -35,6 +37,12 @@ PANES = ("mm_front", "greenhouse", "unloading", "storage", "overview")
 HZ_WINDOW_SEC = 2.0
 
 EVENT_LIMIT = 20
+
+LATCHED_QOS = QoSProfile(
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
 
 
 def _yaw(q) -> float:
@@ -52,6 +60,29 @@ class UiStatusNode(Node):
             "iw": {"state": "", "x": None, "y": None, "yaw": None},
         }
         self._events: deque = deque(maxlen=EVENT_LIMIT)
+        self._harvest = {
+            "detected": 0,
+            "ripe": 0,
+            "spoiled": 0,
+            "unknown": 0,
+            "harvested": 0,
+            "failed": 0,
+            "state": "",
+            "quality_enabled": False,
+        }
+        self._market = {
+            "available": False,
+            "product": "토마토",
+            "date": "",
+            "average_price": None,
+            "minimum_price": None,
+            "maximum_price": None,
+            "quantity": None,
+            "change_rate": None,
+            "unit": "원/kg",
+            "updated_at": "",
+            "message": "공공데이터 API 키 설정 대기",
+        }
 
         for name in PANES:
             # 이미지 데이터는 쓰지 않고 도착 시각만 센다. 압축본이라 이 구독
@@ -68,6 +99,20 @@ class UiStatusNode(Node):
             PoseStamped, "/forklift_0/pose", self._on_forklift_pose, 10)
         self.create_subscription(
             Odometry, "/iwhub_0/odom", self._on_iw_odom, 10)
+        self.create_subscription(
+            TomatoDetectionArray,
+            "/harvester_0/vision/tomato_detections",
+            self._on_detections,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            String,
+            "/harvester_0/manipulator/target_state",
+            self._on_harvest_state,
+            10,
+        )
+        self.create_subscription(
+            String, "/market/summary", self._on_market, LATCHED_QOS)
 
         self._pub = self.create_publisher(String, "/ui/status", 10)
         self.create_timer(0.2, self._publish)
@@ -98,6 +143,38 @@ class UiStatusNode(Node):
         self._robots["iw"].update(
             x=p.position.x, y=p.position.y, yaw=_yaw(p.orientation))
 
+    def _on_detections(self, msg: TomatoDetectionArray) -> None:
+        classes = [item.tomato_class.strip().lower() for item in msg.detections]
+        self._harvest.update(
+            detected=len(classes),
+            ripe=classes.count("ripe"),
+            spoiled=classes.count("spoiled"),
+            unknown=sum(name not in {"ripe", "spoiled"} for name in classes),
+            quality_enabled=any(name in {"ripe", "spoiled"} for name in classes),
+        )
+
+    def _on_harvest_state(self, msg: String) -> None:
+        state = msg.data.strip()
+        previous = self._harvest["state"]
+        if not state or state == previous:
+            return
+        self._harvest["state"] = state
+        # BASKET_RETRACT는 스쿱 개방 응답을 받은 뒤에만 진입하므로 적재 완료로 센다.
+        if state == "BASKET_RETRACT":
+            self._harvest["harvested"] += 1
+        elif state == "HARVEST_FAILED":
+            self._harvest["failed"] += 1
+        self._events.append(
+            {"t": self._sim_time(), "src": "mm", "text": state})
+
+    def _on_market(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        if isinstance(payload, dict):
+            self._market.update(payload)
+
     # ── 발행 ──
     def _sim_time(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
@@ -116,6 +193,8 @@ class UiStatusNode(Node):
             "sim_time": round(self._sim_time(), 2),
             "cameras": {name: self._hz(name) for name in PANES},
             "robots": self._robots,
+            "harvest": self._harvest,
+            "market": self._market,
             "events": list(self._events),
         }
         self._pub.publish(String(data=json.dumps(payload)))

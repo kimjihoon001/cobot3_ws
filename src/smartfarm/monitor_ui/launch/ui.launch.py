@@ -57,6 +57,14 @@ def generate_launch_description():
             output="screen",
         ),
 
+        # 인증키가 없으면 unavailable 상태만 발행한다. 브라우저에는 키를 노출하지 않는다.
+        Node(
+            package="monitor_ui",
+            executable="market_price_node",
+            name="market_price_node",
+            output="screen",
+        ),
+
         # 녹화 제어. use_sim_time을 주지 않는다 — 경과시간과 파일명은 실제
         # 벽시계로 세야 시뮬이 멈춰도 녹화가 멈춘 것처럼 보이지 않는다.
         Node(

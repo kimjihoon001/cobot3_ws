@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import ROSLIB from "roslib";
 
 import CameraTile from "./components/CameraTile";
+import BottomNav from "./components/BottomNav";
 import EventTicker from "./components/EventTicker";
+import HarvestPanel from "./components/HarvestPanel";
+import MarketPanel from "./components/MarketPanel";
 import TopStatusBar from "./components/TopStatusBar";
-import { CAMERAS, ROSBRIDGE_URL, RecordingStatus, UiStatus } from "./types";
+import { AppTab, CAMERAS, ROSBRIDGE_URL, RecordingStatus, UiStatus } from "./types";
 
 const STORE_KEY = "monitor-ui-prefs";
 
@@ -36,6 +39,7 @@ export default function App() {
   const [hud, setHud] = useState(prefs.hud);
   const [focused, setFocused] = useState<string | null>(prefs.focused);
   const [debug, setDebug] = useState(false);
+  const [activeTab, setActiveTab] = useState<AppTab>("cctv");
 
   // 발표 설정만 남긴다. 로봇 상태나 감지 결과는 저장하지 않는다.
   useEffect(() => {
@@ -151,23 +155,29 @@ export default function App() {
         onToggleRecording={toggleRecording}
       />
 
-      <main className={`grid${focused ? " is-focused" : ""}`}>
-        {visible.map((cam) => (
-          <CameraTile
-            key={cam.id}
-            cam={cam}
-            hz={status?.cameras[cam.key] ?? 0}
-            robot={cam.robot ? status?.robots[cam.robot] : undefined}
-            hud={hud}
-            debug={debug}
-            focused={cam.id === focused}
-            clock={clock}
-            onToggleFocus={() =>
-              setFocused((cur) => (cur === cam.id ? null : cam.id))
-            }
-          />
-        ))}
-      </main>
+      {activeTab === "cctv" && (
+        <main className={`grid${focused ? " is-focused" : ""}`}>
+          {visible.map((cam) => (
+            <CameraTile
+              key={cam.id}
+              cam={cam}
+              hz={status?.cameras[cam.key] ?? 0}
+              robot={cam.robot ? status?.robots[cam.robot] : undefined}
+              hud={hud}
+              debug={debug}
+              focused={cam.id === focused}
+              clock={clock}
+              onToggleFocus={() =>
+                setFocused((cur) => (cur === cam.id ? null : cam.id))
+              }
+            />
+          ))}
+        </main>
+      )}
+      {activeTab === "harvest" && <HarvestPanel metrics={status?.harvest} />}
+      {activeTab === "market" && (
+        <MarketPanel market={status?.market} harvest={status?.harvest} />
+      )}
 
       <footer className="bar bar-bottom">
         <EventTicker events={status?.events ?? []} format={formatSimTime} />
@@ -175,6 +185,7 @@ export default function App() {
           1-4 확대 · 5 조감도 · 0 복귀 · R 녹화 · F 전체화면 · H HUD · D 디버그
         </span>
       </footer>
+      <BottomNav active={activeTab} onChange={setActiveTab} />
     </div>
   );
 }

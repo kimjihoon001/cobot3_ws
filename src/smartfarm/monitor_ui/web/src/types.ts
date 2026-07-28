@@ -10,8 +10,37 @@ export interface UiStatus {
   sim_time: number;
   cameras: Record<string, number>;
   robots: Record<string, RobotState>;
+  harvest?: HarvestMetrics;
+  market?: MarketSummary;
   events: { t: number; src: string; text: string }[];
 }
+
+export interface HarvestMetrics {
+  detected: number;
+  ripe: number;
+  spoiled: number;
+  unknown: number;
+  harvested: number;
+  failed: number;
+  state: string;
+  quality_enabled: boolean;
+}
+
+export interface MarketSummary {
+  available: boolean;
+  product: string;
+  date: string;
+  average_price: number | null;
+  minimum_price: number | null;
+  maximum_price: number | null;
+  quantity: number | null;
+  change_rate: number | null;
+  unit: string;
+  updated_at: string;
+  message: string;
+}
+
+export type AppTab = "cctv" | "harvest" | "market";
 
 /** recorder_node가 /recording/status로 보내는 JSON. */
 export interface RecordingStatus {
