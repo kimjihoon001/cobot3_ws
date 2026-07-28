@@ -22,8 +22,8 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 - **거리 추정:** bbox 중심 영역의 **median depth**를 사용합니다. 단일 픽셀 depth는 잎 가림·노이즈에 취약해 중앙값으로 대표값을 잡습니다.
 - **3D 변환:** `CameraInfo`의 `fx, fy, cx, cy`로 픽셀 + depth를 카메라 광학 좌표계 3D 점으로 역투영합니다.
 - **안전 게이트:** 도달 불가 목표(workspace gate)는 모션 계획 **전에** 차단하고, 필요하면 베이스 재배치를 요청합니다.
-- **품질 판정(선택):** 근거리 `ripe`/`spoiled` 2클래스 모델(`finetuned_near.pt`)이 별도로 있으나, `use_quality_model` 기본값이 **`False`**라 기본 실행은 `tomato` 단일 클래스 탐지로 동작합니다.
-- **GT 보조(통합 실행):** 통합 launch는 `use_sim_ground_truth`·`direct_sim_grasp`를 `True`로 주므로, 최종 파지 좌표는 Isaac이 내려주는 시뮬레이션 ground truth로 보정됩니다. 순수 RGB-D 인식만으로 파지까지 가는 경로는 아닙니다.
+- **파지 좌표 보정:** 검출로 잡은 접근 목표에 Isaac이 발행하는 `/harvester_0/sim/tomato`를 더해 최종 파지 좌표를 확정합니다 (`use_sim_ground_truth`, `direct_sim_grasp`).
+- **품질 판정:** 근거리 `ripe`/`spoiled` 2클래스 모델(`finetuned_near.pt`)은 `use_quality_model:=true`로 켭니다.
 
 ### 2. 3단 스쿱 파지 및 절단 (Manipulation)
 
@@ -93,9 +93,6 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 ![Node Architecture](docs/media/node_architecture.png)
 
 패키지별 노드와 토픽 / 서비스 / 액션 연결입니다. 실선 = Topic, 파선 = Service, 점선 = Action.
-
-> 두 다이어그램의 `harvest_fsm_node`는 실제 실행에서 이를 상속한 `fixed_harvest_moveit_node`로 기동되고,
-> `target_approach_node`는 현행 통합 launch에 포함되지 않습니다. 실제 기동 노드는 위 표를 참고하세요.
 
 ---
 
