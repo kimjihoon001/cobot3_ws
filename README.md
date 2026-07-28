@@ -109,6 +109,8 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 
 ## 개발 환경 (Environment)
 
+![활용 장비 및 프로그램](docs/media/tech_stack.png)
+
 - **OS:** Ubuntu 22.04.5 LTS (Jammy Jellyfish)
 - **Middleware:** ROS 2 Humble Hawksbill (`/opt/ros/humble`)
 - **Simulator:** NVIDIA Isaac Sim 5.1 (Standalone, PhysX)
