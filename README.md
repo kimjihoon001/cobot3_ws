@@ -109,34 +109,11 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 
 ## 개발 환경 (Environment)
 
-**실행 환경**
-
-![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04.5_LTS-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)
-![ROS 2](https://img.shields.io/badge/ROS_2-Humble-22314E?style=for-the-badge&logo=ros&logoColor=white)
-![Isaac Sim](https://img.shields.io/badge/Isaac_Sim-5.1-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
-![Python](https://img.shields.io/badge/Python-3.10_|_3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
-
-**인지 · AI**
-
-![Ultralytics](https://img.shields.io/badge/Ultralytics-YOLOv8_|_v11-0B23A9?style=for-the-badge&logo=yolo&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-CUDA-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
-![OpenCV](https://img.shields.io/badge/OpenCV-cv__bridge-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)
-![RealSense](https://img.shields.io/badge/RealSense-D455_RGB--D-0071C5?style=for-the-badge&logo=intel&logoColor=white)
-
-**제어 · 주행**
-
-![MoveIt 2](https://img.shields.io/badge/MoveIt_2-OMPL_%7C_Pilz-0A7BBB?style=for-the-badge)
-![Nav2](https://img.shields.io/badge/Nav2-DWB_%7C_AMCL-1C7C54?style=for-the-badge)
-![ros2_control](https://img.shields.io/badge/ros2__control-topic__based-22314E?style=for-the-badge)
-![Fast DDS](https://img.shields.io/badge/Fast_DDS-rmw__fastrtps__cpp-5A5A5A?style=for-the-badge)
-
-**개발 · 협업**
-
-![React](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black)
-![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-6-646CFF?style=for-the-badge&logo=vite&logoColor=white)
-![GitHub](https://img.shields.io/badge/GitHub-%ED%98%91%EC%97%85-181717?style=for-the-badge&logo=github&logoColor=white)
-![Notion](https://img.shields.io/badge/Notion-%EB%AC%B8%EC%84%9C%ED%99%94-000000?style=for-the-badge&logo=notion&logoColor=white)
+![Ubuntu](https://img.shields.io/badge/UBUNTU-22.04_LTS-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)
+![ROS 2](https://img.shields.io/badge/ROS2-HUMBLE-22314E?style=for-the-badge&logo=ros&logoColor=white)
+![Isaac Sim](https://img.shields.io/badge/ISAAC_SIM-5.1-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
+![Python](https://img.shields.io/badge/PYTHON-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TYPESCRIPT-5.X-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
 
 | 항목 | 값 |
 |---|---|
