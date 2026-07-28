@@ -66,8 +66,9 @@ isaac_python main.py --mm --iw --fork --nav --camera --cctv
 | `--cctv` | 모니터링 UI용 **고정 감시 카메라 3대**. 카메라마다 씬을 다시 렌더해서 기본은 꺼져 있음 — 4분할 화면을 쓰려면 이 플래그가 필요 |
 | `--headless` / `--no-ros` | GUI 없이 / ROS 브리지 없이 실행 |
 
-> `main.py`는 `ROS_DOMAIN_ID`를 **108로 강제**합니다(`~/.bashrc`가 109를 내보내
-> Isaac만 분리되는 사고를 막기 위해). ROS 터미널도 108이어야 통신됩니다.
+> `main.py`는 `ROS_DOMAIN_ID`를 **108로 강제**합니다. MM·IW·지게차·비전·UI
+> 터미널도 모두 108로 맞춰 직접 통신하며, 별도의 Docker/domain bridge는
+> 사용하지 않습니다.
 
 ### ② MM (수확)
 
