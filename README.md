@@ -139,15 +139,15 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev   # 처음 한 번은
 
 | 패키지 | 담당 | 내용 |
 |---|---|---|
-| `smartfarm_bringup` | 공용 | **실행 진입점.** `isaac_sim` / `mm` / `iw` / `forklift` launch |
-| `harvest_vision` | 트랙 A | 수확 파이프라인. `vision_node`(YOLO 검출), `harvest_fsm_node`(상위 코디네이터: Nav2 게이트·적재 카운트·IW 미션·MM 피항), `manipulator_target_node`(파지/절단/플레이스 상세 FSM) |
-| `mm_moveit` | 트랙 A | MM용 MoveIt2 설정, URDF/SRDF, `mm_motion_bridge`(JSON 명령 → MoveIt goal), Nav2 bringup |
-| `harvest_moveit` | 트랙 A | 초기 MM Nav2→MoveIt 수확 데모용 설정(UR10e 시절 URDF 포함). 현행 실행 경로는 `mm_moveit` |
-| `iwhub_control` | 트랙 B | IW 베이스 제어. `base_node`(cmd_vel→차동 바퀴, odom/TF, 승강), `mission_nav_node`(미션·도킹), `scan_self_filter_node` |
-| `fleet_dispatch` | 트랙 B | `cmd_vel_watchdog`, `nav2_lifecycle_activator`, Nav2/AMCL 런치·설정 |
-| `warehouse_dock` | 트랙 C | 창고 하역. `fork_lift_node`, `fork_lift_return_node`(랙 6슬롯 적재·빈 팔레트 반환) |
-| `monitor_ui` | 트랙 D | 4분할 CCTV 관제 UI. `ui_status_node`, `recorder_node`(rosbag 녹화), `qos_bridge` + React 웹(`web/`) |
-| `smartfarm_interfaces` | 공용 | 커스텀 메시지/서비스. `TomatoDetection(Array)`, `ForkliftCycle.srv`, `DockAdjust.srv` 등 |
+| [`smartfarm_bringup`](src/smartfarm/smartfarm_bringup/README.md) | 공용 | **실행 진입점.** `isaac_sim` / `mm` / `iw` / `forklift` launch |
+| [`harvest_vision`](src/smartfarm/harvest_vision/README.md) | 트랙 A | 수확 파이프라인. `vision_node`(YOLO 검출), `harvest_fsm_node`(상위 코디네이터: Nav2 게이트·적재 카운트·IW 미션·MM 피항), `manipulator_target_node`(파지/절단/플레이스 상세 FSM) |
+| [`mm_moveit`](src/smartfarm/mm_moveit/README.md) | 트랙 A | MM용 MoveIt2 설정, URDF/SRDF, `mm_motion_bridge`(JSON 명령 → MoveIt goal), Nav2 bringup |
+| [`harvest_moveit`](src/smartfarm/harvest_moveit/README.md) | 트랙 A | 초기 MM Nav2→MoveIt 수확 데모용 설정(UR10e 시절 URDF 포함). 현행 실행 경로는 `mm_moveit` |
+| [`iwhub_control`](src/smartfarm/iwhub_control/README.md) | 트랙 B | IW 베이스 제어. `base_node`(cmd_vel→차동 바퀴, odom/TF, 승강), `mission_nav_node`(미션·도킹), `scan_self_filter_node` |
+| [`fleet_dispatch`](src/smartfarm/fleet_dispatch/README.md) | 트랙 B | `cmd_vel_watchdog`, `nav2_lifecycle_activator`, Nav2/AMCL 런치·설정 |
+| [`warehouse_dock`](src/smartfarm/warehouse_dock/README.md) | 트랙 C | 창고 하역. `fork_lift_node`, `fork_lift_return_node`(랙 6슬롯 적재·빈 팔레트 반환) |
+| [`monitor_ui`](src/smartfarm/monitor_ui/README.md) | 트랙 D | 4분할 CCTV 관제 UI. `ui_status_node`, `recorder_node`(rosbag 녹화), `qos_bridge` + React 웹(`web/`) |
+| [`smartfarm_interfaces`](src/smartfarm/smartfarm_interfaces/README.md) | 공용 | 커스텀 메시지/서비스. `TomatoDetection(Array)`, `ForkliftCycle.srv`, `DockAdjust.srv` 등 |
 | `smartfarm_common` | 공용 | 현재 노드 없음(초기 스켈레톤 폐기) |
 
 토픽·서비스 계약과 폐기 이력은 [`src/smartfarm/INTERFACES.md`](src/smartfarm/INTERFACES.md)에 정리돼 있습니다.
@@ -170,7 +170,8 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev   # 처음 한 번은
 ├── maps/                   # Nav2 정적맵 (기본 farm.yaml, 생성본 farm_gen.yaml)
 ├── docs/                   # 파트별 시스템 가이드·조사 기록
 ├── yolo_training/          # YOLO 학습 스크립트·가중치
-├── scripts/  tools/        # 빌드 환경 수정, 디버그 bag 분석 등
+├── diagnostics/            # 통합 시뮬 진단 캡처 스크립트
+├── scripts/  tools/        # 빌드 환경 수정, 디버그 bag 분석 등 (아래 표)
 └── build/ install/ log/    # colcon 산출물 (.gitignore)
 ```
 
@@ -199,6 +200,17 @@ git submodule update --init --recursive
 재현하려면 위 명령을 다시 실행한다. 외부 코드를 수정하거나 다른 upstream 커밋으로
 올릴 때는 서브모듈 내부 커밋과 루트 저장소의 gitlink 변경을 별도 검토한다.
 
+### 스크립트/도구
+
+| 경로 | 용도 |
+|---|---|
+| `diagnostics/capture_sim_diag.sh` | 문제 재현 순간의 전체 ROS 토픽을 `ros2 bag record -a`로 캡처(`diagnostics/bags/`, gitignore). IW 도킹 충돌·MM 파지 등 사후 분석용 |
+| `scripts/fix_ros_build_env.sh` | `colcon build` 시 `em`/`catkin_pkg` 누락 오류 해결 ([7. 자주 겪는 문제](#7-자주-겪는-문제) 참고) |
+| `scripts/record_forklift_debug_bag.sh` | 지게차 관련 토픽만 골라 `debug_bags/`에 녹화 (전체 캡처인 `capture_sim_diag.sh`보다 좁은 지게차 전용 버전) |
+| `scripts/analyze_forklift_debug_bag.py` | 위 지게차 디버그 bag을 읽어 리뷰용 요약 패킷(JSON)을 생성 |
+| `tools/iw_dock_align_once.py` | 실행 중인 IW를 재시작 없이 지게차 도크 pose로 1회 직접 정렬(도킹 파라미터 튜닝용) |
+| `tools/plot_harvest_tcp_center_path.py` | 현재 MM 수확 파라미터 기준 TCP 측면 경로를 그려 접근·파지 궤적을 시각 검증 |
+
 ### 문서
 
 | 문서 | 내용 |
@@ -206,7 +218,12 @@ git submodule update --init --recursive
 | [`docs/mm_system_guide.md`](docs/mm_system_guide.md) | MM 구조·좌표계·MoveIt·수확 FSM |
 | [`docs/iw_system_guide.md`](docs/iw_system_guide.md) | IW 주행·도킹·미션 |
 | [`docs/forklift_system_guide.md`](docs/forklift_system_guide.md) | 지게차 시퀀스·랙 기하 |
+| [`docs/monitor_ui_current_branch_reference.md`](docs/monitor_ui_current_branch_reference.md) | 모니터링 UI 데이터 흐름·카메라 배치·설계 판단 기준 |
 | [`src/smartfarm/INTERFACES.md`](src/smartfarm/INTERFACES.md) | 전 트랙 토픽/서비스 계약 |
+
+> `docs/`에는 이 외에도 날짜가 찍힌 인수인계·검수요청·조사보고 문서(`handoff_*`,
+> `review_request_*`, `investigation_*`, `change_summary_*`)가 있다. 특정 세션의
+> 작업 기록이라 위 표에는 넣지 않았고, 필요할 때 파일명으로 찾아본다.
 
 ---
 
