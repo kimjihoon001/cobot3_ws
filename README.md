@@ -23,6 +23,7 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 - **3D 변환:** `CameraInfo`의 `fx, fy, cx, cy`로 픽셀 + depth를 카메라 광학 좌표계 3D 점으로 역투영합니다.
 - **안전 게이트:** 도달 불가 목표(workspace gate)는 모션 계획 **전에** 차단하고, 필요하면 베이스 재배치를 요청합니다.
 - **품질 판정(선택):** 근거리 `ripe`/`spoiled` 2클래스 모델(`finetuned_near.pt`)이 별도로 있으나, `use_quality_model` 기본값이 **`False`**라 기본 실행은 `tomato` 단일 클래스 탐지로 동작합니다.
+- **GT 보조(통합 실행):** 통합 launch는 `use_sim_ground_truth`·`direct_sim_grasp`를 `True`로 주므로, 최종 파지 좌표는 Isaac이 내려주는 시뮬레이션 ground truth로 보정됩니다. 순수 RGB-D 인식만으로 파지까지 가는 경로는 아닙니다.
 
 ### 2. 3단 스쿱 파지 및 절단 (Manipulation)
 
@@ -447,61 +448,3 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev
 
 ![관제 UI 4분할](docs/media/monitor_ui_4pane.png)
 
----
-
-## 자주 겪는 문제 (Troubleshooting)
-
-| 상황 | 해결 |
-|---|---|
-| launch가 `package '...' not found`로 즉사 | apt 의존 누락 → [의존성 설치](#의존성-설치-installation). `rosdep check --from-paths src --ignore-src --rosdistro humble`로 확인 |
-| `colcon build`가 `No module named 'em'` / `'catkin_pkg'`로 실패 | `./scripts/fix_ros_build_env.sh` 실행. 수동 `pip install empy`만 하면 안 됨 |
-| `npm run dev`가 `> vite`에서 멈춤 | `web/`에 `npm install`을 안 한 것 |
-| 로봇이 토픽을 못 받음 | 모든 터미널의 `ROS_DOMAIN_ID`(**108**)·`RMW_IMPLEMENTATION`이 같은지 확인 |
-| `--mm` 실행이 크래시 | `isaacpjt/robots/m0617/m0617_isaac/m0617.usd` 미생성 → `isaac_python tools/import_m0617_urdf.py`로 URDF → USD 변환 먼저 실행 |
-| Nav2가 목표를 못 세움 | `map` 인자(기본 `maps/farm.yaml`)와 AMCL 초기 pose 확인 |
-| CAM-01 화면이 비어 있음 | `vision_node`가 떠 있어야 함(생 RGB가 아니라 검출 결과를 받는 화면) |
-| CAM-02 ~ CAM-05가 비어 있음 | Isaac을 `--cctv` 없이 띄운 것 |
-| 관제 UI 시세 패널이 `unavailable` | `export DATA_GO_KR_SERVICE_KEY=<키>` 후 `ui.launch.py` 재실행 |
-
----
-
-## 참고 — 구현 범위 명확화
-
-발표자료와 코드가 다를 경우 **코드가 기준**입니다. 아래는 코드로 확인한 내용입니다.
-
-- **비전 기본 모드는 `tomato` 단일 클래스 탐지**입니다. `ripe`/`spoiled` 2클래스 근거리 판정은
-  `use_quality_model` 기본값이 `False`라 명시적으로 켜야 동작합니다.
-- **통합 실행에서 시뮬레이션 Ground Truth 보조 경로가 켜져 있습니다.**
-  `manipulator_target_node`의 `use_sim_ground_truth`·`direct_sim_grasp`가 `True`라,
-  최종 파지 좌표는 Isaac이 내려주는 GT로 보정됩니다.
-- **MM 베이스는 실제 바퀴 동역학이 아닙니다.** 홀로노믹 키네마틱 방식이라 타이어 슬립·가감속이 없습니다.
-  실제 PhysX 바퀴로 구동되는 것은 IW뿐입니다.
-- **Pilz CIRC · MoveIt Servo · CHOMP는 최종 수확 시퀀스에서 사용되지 않습니다.**
-  CIRC는 상태명(`RETRACT_CIRC`)만 남고 실제 motion은 LIN이며, `servo_node`는 기동만 되고 명령 경로가 없고,
-  CHOMP는 파이프라인 등록만 돼 있습니다.
-- **Forklift는 동적 재경로를 지원하지 않습니다.** Nav2 대신 고정 웨이포인트 Step FSM입니다.
-- **정량 성능 검증이 부족합니다.** 도킹 허용오차(≤ 4 cm / ≤ 2°)와 랙 삽입 허용오차(±4 cm / ±3°)는
-  **설정값**이며 반복 시행으로 측정한 성능 통계가 아닙니다.
-
----
-
-## 팀 구성
-
-| 참여자 | 역할 |
-|---|---|
-| 이현민 | Vision · M0617 · 통합 |
-| 김지훈 | Map · MoveIt · Mechanism |
-| 김민성 | Forklift · Logistics |
-| 손미란 강사님 | 멘토 — 주제·구현 범위 조정 및 기술 자문 |
-
-## Asset Credits
-
-| 출처 | 자산 | 라이선스 |
-|---|---|---|
-| NVIDIA Isaac Sim Assets | Ridgeback, D455, Simple Warehouse, ForkliftB/C, iw.hub, KLT, EUR 팔레트 | NVIDIA Omniverse License Agreement |
-| [doosan-robot2](https://github.com/doosan-robotics/doosan-robot2) `dsr_description2` | M0617 URDF · DAE 메시 · 관절/관성 | BSD-3-Clause |
-| Sketchfab | 고화질 토마토 USDZ | **"Tomato" by Claudiu, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)** |
-| [LCAS/aoc_tomato_farm](https://github.com/LCAS/aoc_tomato_farm) | 배경 식물 DAE · 텍스처 | **Apache License 2.0** |
-| OnRobot RG2 | 기존 실습 자산 반입 — URDF · STL · 변환 USD | 부트캠프 제공 자산 |
-| FreeCAD 직접 제작 | 저폴리 토마토, 동축 3단 스쿱, 커터 및 D455 지그 | 본 프로젝트 제작 |
-| 절차 생성 | 온실 구조·재배 베드·창고 랙·Collider·Nav2 정적맵 | 본 프로젝트 제작 |
