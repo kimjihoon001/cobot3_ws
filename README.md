@@ -84,108 +84,29 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 | `warehouse_dock` | `fork_lift_return_node` | Decision | 팔레트 회수·랙 적재·빈 팔레트 반환 Step FSM |
 | `monitor_ui` | `ui_status_node` 외 | 관측 | 상태 집계·영상 중계·MCAP 녹화 |
 
-### 데이터 흐름
+### 아키텍처 다이어그램
 
-```mermaid
-flowchart TB
-    subgraph ISAAC["Isaac Sim 5.1 — 물리 · 센서"]
-        BRIDGE["robot_bridge (OmniGraph)<br/>joint_command / joint_states / clock<br/>RGB-D · LaserScan · CCTV"]
-    end
+![System Architecture](docs/media/system_architecture.png)
 
-    subgraph PER["Perception"]
-        VIS["vision_node<br/>YOLO + CameraInfo 역투영"]
-    end
+판단(개인 PC · ROS 2 Humble)과 실행(GPU 노트북 · Isaac Sim 5.1)이 동일 DDS로 직접 연결됩니다.
 
-    subgraph DEC["Decision"]
-        FSM["fixed_harvest_moveit_node<br/>상위 코디네이터"]
-        MAN["manipulator_target_node<br/>파지·절단·플레이스 FSM"]
-        MN["mission_nav_node<br/>IW 미션 · 도킹 폐루프"]
-        FR["fork_lift_return_node<br/>지게차 Step FSM"]
-    end
+![Node Architecture](docs/media/node_architecture.png)
 
-    subgraph CON["Control"]
-        BR["mm_motion_bridge<br/>Ranked IK"]
-        MG["move_group<br/>OMPL / Pilz"]
-        NAV["Nav2<br/>RotationShim·DWB / AMCL"]
-        BN["base_node"]
-    end
+패키지별 노드와 토픽 / 서비스 / 액션 연결입니다. 실선 = Topic, 파선 = Service, 점선 = Action.
 
-    UI["monitor_ui<br/>React · rosbridge · web_video_server"]
-
-    BRIDGE -->|"rgb / depth / camera_info"| VIS
-    VIS -->|"approach_target"| MAN
-    MAN -->|"target_state"| FSM
-    FSM -->|"harvest_test/enable"| MAN
-    MAN -->|"cmd (JSON)"| BR
-    BR ==>|"act move_action"| MG
-    MG -->|"arm_controller (JTC)"| BRIDGE
-    MAN -->|"cmd (JSON)"| BRIDGE
-
-    FSM ==>|"act navigate_to_pose"| NAV
-    NAV -->|"cmd_vel"| BRIDGE
-
-    FSM -->|"/iw/mission"| MN
-    MN -->|"/iw/status · /iw/mm_yield_request"| FSM
-    MN ==>|"act navigate_through_poses"| NAV
-    MN -->|"cmd_vel_nav"| BN
-    BN -->|"joint_command"| BRIDGE
-
-    MN -.->|"srv /forklift/start_cycle"| FR
-    FR -.->|"srv /iw/request_dock_adjust"| MN
-    FR -->|"/forklift/clear"| MN
-    BRIDGE -->|"/forklift_0/pose"| FR
-
-    BRIDGE -->|"CCTV · annotated_image"| UI
-    MN -->|"/iw/status"| UI
-```
-
-> 실선 = Topic · 점선 = Service · 굵은 선 = Action
+> 두 다이어그램의 `harvest_fsm_node`는 실제 실행에서 이를 상속한 `fixed_harvest_moveit_node`로 기동되고,
+> `target_approach_node`는 현행 통합 launch에 포함되지 않습니다. 실제 기동 노드는 위 표를 참고하세요.
 
 ---
 
 ## 알고리즘 플로우 차트 (Logic Flow)
 
-```mermaid
-flowchart TD
-    START(["시작 / IDLE"]) --> NAV{"Nav2 수확 위치<br/>도착?"}
-    NAV -->|"No"| NAV
-    NAV -->|"Yes"| HOME["팔 HOME → BED_VIEW 자세"]
-    HOME --> DETECT["D455 RGB-D + YOLO 검출"]
-    DETECT --> FOUND{"목표 검출?"}
-    FOUND -->|"No"| DETECT
-    FOUND -->|"Yes"| GATE{"workspace gate<br/>도달 가능?"}
-    GATE -->|"No"| REPOS["베이스 재배치 요청<br/>nav/reposition_request"]
-    REPOS --> DETECT
-    GATE -->|"Yes"| FOLLOW["/iw/mission = FOLLOW<br/>IW 추종 시작"]
+![Functional Flow chart](docs/media/functional_flow.png)
 
-    FOLLOW --> APPROACH["APPROACH (OMPL)<br/>충돌 회피 접근"]
-    APPROACH --> PRE["PREGRASP → GRASP (Pilz LIN)<br/>축방향 직선 삽입"]
-    PRE --> TRIM["CAPTURE_TRIM<br/>저속 LIN 미세 보정"]
-    TRIM --> CLOSE["스쿱 닫기 → 파지 검증"]
-    CLOSE --> OK{"파지 성공?"}
-    OK -->|"No (재시도 ≤ 2)"| APPROACH
-    OK -->|"No (2회 초과)"| FAIL["HARVEST_FAILED<br/>홈 복귀"]
-    OK -->|"Yes"| CUT["CUTTING<br/>블레이드 40° 이상"]
+수확 위치 이동 → 토마토 검출 → 파지·절단 → KLT 적재 → 하역 준비 → 하역장 이동·도킹
+→ 지게차 사이클 → 복귀·재개의 8단계 폐루프.
 
-    CUT --> RETRACT["RETRACT (LIN) → 후퇴"]
-    RETRACT --> SLOT["빈 KLT 슬롯 pose 수신<br/>/iw/basket/empty_slot_pose"]
-    SLOT --> PLACE["BASKET_APPROACH (OMPL)<br/>→ PLACE_RELEASING"]
-    PLACE --> COUNT{"적재 수 ≥<br/>place_target_count?"}
-    COUNT -->|"No"| DETECT
-    COUNT -->|"Yes"| ZERO{"적재 0개?"}
-    ZERO -->|"Yes"| DETECT
-    ZERO -->|"No"| PREP["/iw/mission = PREPARE_FORKLIFT"]
-
-    PREP --> YIELD["IW 피항 요청 → MM 통로 양보<br/>yield handshake"]
-    YIELD --> DOCK["IW 레인 경로 주행<br/>NavigateThroughPoses"]
-    DOCK --> ALIGN["POSITION → YAW → SETTLE<br/>≤ 4cm · ≤ 2° · 1s"]
-    ALIGN --> ADJ{"도킹 성공?"}
-    ADJ -->|"No (재정렬 ≤ 3)"| ALIGN
-    ADJ -->|"Yes"| CYCLE["srv /forklift/start_cycle<br/>팔레트 회수 → 랙 적재 → 빈 팔레트 상차"]
-    CYCLE --> CLEAR["/forklift/clear → IW 복귀"]
-    CLEAR --> DETECT
-    FAIL --> DETECT
-```
+**예외 경로** — 수확 최종 실패·탐색 타임아웃 시 부분 적재로 출발하고, 적재 0개면 빈 IW를 창고로 보내지 않는다.
 
 ---
 
