@@ -125,12 +125,10 @@ PC A는 Isaac Sim 5.1 Standalone과 관제 UI(React · TS · Vite)를, PC B는 Y
 
 ## 개발 환경 (Environment)
 
+<!-- 배지는 한 줄에 유지한다. for-the-badge 원본 폭 합이 794px라 GitHub 본문 폭에
+     걸려 줄바꿈되므로, height로 축소해 약 680px로 맞춘다. -->
 <p align="center">
-  <img src="https://img.shields.io/badge/UBUNTU-22.04_LTS-E95420?style=for-the-badge&logo=ubuntu&logoColor=white" alt="Ubuntu">
-  <img src="https://img.shields.io/badge/ROS2-HUMBLE-22314E?style=for-the-badge&logo=ros&logoColor=white" alt="ROS 2">
-  <img src="https://img.shields.io/badge/ISAAC_SIM-5.1-76B900?style=for-the-badge&logo=nvidia&logoColor=white" alt="Isaac Sim">
-  <img src="https://img.shields.io/badge/PYTHON-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/TYPESCRIPT-5.X-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
+  <img height="24" src="https://img.shields.io/badge/UBUNTU-22.04_LTS-E95420?style=for-the-badge&logo=ubuntu&logoColor=white" alt="Ubuntu">&nbsp;<img height="24" src="https://img.shields.io/badge/ROS2-HUMBLE-22314E?style=for-the-badge&logo=ros&logoColor=white" alt="ROS 2">&nbsp;<img height="24" src="https://img.shields.io/badge/ISAAC_SIM-5.1-76B900?style=for-the-badge&logo=nvidia&logoColor=white" alt="Isaac Sim">&nbsp;<img height="24" src="https://img.shields.io/badge/PYTHON-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">&nbsp;<img height="24" src="https://img.shields.io/badge/TYPESCRIPT-5.X-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
 </p>
 
 | 항목 | 값 |
