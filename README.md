@@ -69,27 +69,34 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 
 ### 전체 구조
 
-시스템은 크게 **Perception(인식)**, **Decision(판단)**, **Control(제어)** 세 파트로 구성됩니다.
+시스템은 크게 **Perception(인식)**, **Decision(판단)**, **Control(제어)**, **Monitoring(관측)** 네 파트로 구성됩니다.
 
 1. **Perception:** Isaac Sim의 eye-in-hand RealSense D455(RGB-D)와 2D LiDAR 데이터를 받아, `vision_node`가 YOLO로 토마토를 식별하고 `CameraInfo` 역투영으로 3D 접근 목표를 만듭니다.
 2. **Decision:** `fixed_harvest_moveit_node`(상위 코디네이터)가 Nav2 도착·팔 자세·적재 수를 종합해 다음 단계를 결정하고, `manipulator_target_node`가 파지·절단·플레이스 24개 상태의 상세 FSM을 돌립니다. IW는 `mission_nav_node`, 지게차는 `fork_lift_return_node`가 각자의 FSM을 담당합니다.
 3. **Control:** MoveIt 2 `move_group`(OMPL / Pilz)과 Nav2(DWB / AMCL)가 궤적을 만들고, `topic_based_ros2_control`과 OmniGraph 브리지를 거쳐 Isaac Sim의 조인트로 전달됩니다.
+4. **Monitoring:** `ui_status_node`가 로봇 상태·카메라 Hz·수확 집계·도매시세를 `/ui/status` 하나로 평탄화해 5 Hz JSON으로 발행합니다. 프론트가 토픽 열댓 개를 각각 구독하고 커스텀 메시지를 TypeScript로 재정의하는 비용을 없애는 게 목적입니다. 영상은 대역폭 때문에 이 채널에 싣지 않고 MJPEG(8080)로 분리합니다.
 
 ### 노드 구성
 
 | 패키지 | 노드 | 파트 | 역할 |
 |---|---|---|---|
 | `harvest_vision` | `vision_node` | Perception | YOLO 검출 → 3D 접근 목표 발행 |
+| | `vision_debug_view` | Perception | 검출 오버레이 디버그 창 (`use_debug:=true`) |
 | | `manipulator_target_node` | Decision | 파지·절단·플레이스 상세 FSM |
 | | `fixed_harvest_moveit_node` | Decision | 상위 코디네이터 (Nav2 게이트·적재 카운트·IW 미션·MM 피항) |
 | `mm_moveit` | `mm_motion_bridge` | Control | JSON 명령 → MoveGroup goal, Ranked IK·파이프라인 선택 |
 | | `move_group` | Control | MoveIt 2 모션 계획 (OMPL / Pilz) |
+| | `servo_node` | Control | MoveIt Servo 실시간 지령 경로 (`config/servo.yaml`) |
 | `fleet_dispatch` | `cmd_vel_watchdog` | Control | Nav2 중단 시 마지막 속도 유지 방지 |
+| | `nav2_lifecycle_activator` | Control | Nav2 lifecycle 노드 일괄 활성화 |
 | `iwhub_control` | `mission_nav_node` | Decision | IW 미션 FSM + 정밀 도킹 폐루프 |
 | | `base_node` | Control | `/cmd_vel` → 좌·우 바퀴 `joint_command` |
 | | `scan_self_filter_node` | Perception | 적재 팔레트·KLT를 자기 라이다에서 제거 |
 | `warehouse_dock` | `fork_lift_return_node` | Decision | 팔레트 회수·랙 적재·빈 팔레트 반환 Step FSM |
-| `monitor_ui` | `ui_status_node` 외 | 관측 | 상태 집계·영상 중계·MCAP 녹화 |
+| `monitor_ui` | `ui_status_node` | Monitoring | 로봇·카메라 Hz·수확·시세를 `/ui/status` 5 Hz JSON으로 평탄화 |
+| | `qos_bridge` ×5 | Monitoring | BEST_EFFORT 센서 영상 → RELIABLE `republish` 입력으로 변환 |
+| | `market_price_node` | Monitoring | 공공데이터 온라인 도매시장 시세 → `/market/summary` |
+| | `recorder_node` | Monitoring | MCAP rosbag 녹화 시작·정지 |
 
 ### 아키텍처 다이어그램
 
@@ -116,11 +123,13 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 
 ## 개발 환경 (Environment)
 
-![Ubuntu](https://img.shields.io/badge/UBUNTU-22.04_LTS-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)
-![ROS 2](https://img.shields.io/badge/ROS2-HUMBLE-22314E?style=for-the-badge&logo=ros&logoColor=white)
-![Isaac Sim](https://img.shields.io/badge/ISAAC_SIM-5.1-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
-![Python](https://img.shields.io/badge/PYTHON-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TYPESCRIPT-5.X-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
+<p align="center">
+  <img src="https://img.shields.io/badge/UBUNTU-22.04_LTS-E95420?style=for-the-badge&logo=ubuntu&logoColor=white" alt="Ubuntu">
+  <img src="https://img.shields.io/badge/ROS2-HUMBLE-22314E?style=for-the-badge&logo=ros&logoColor=white" alt="ROS 2">
+  <img src="https://img.shields.io/badge/ISAAC_SIM-5.1-76B900?style=for-the-badge&logo=nvidia&logoColor=white" alt="Isaac Sim">
+  <img src="https://img.shields.io/badge/PYTHON-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/TYPESCRIPT-5.X-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
+</p>
 
 | 항목 | 값 |
 |---|---|
