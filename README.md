@@ -102,7 +102,9 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 
 ![System Architecture](docs/media/system_architecture.png)
 
-판단(개인 PC · ROS 2 Humble)과 실행(GPU 노트북 · Isaac Sim 5.1)이 동일 DDS로 직접 연결됩니다.
+**GPU PC A(시뮬레이션·관제)**와 **GPU PC B(ROS 2 판단·추론)** 두 대를 동일 ROS 2 DDS로 직접 연결합니다.
+PC A는 Isaac Sim 5.1 Standalone과 관제 UI(React · TS · Vite)를, PC B는 YOLO 비전 추론 · MoveIt 2 + Nav2 · 미션 FSM을 맡습니다.
+로봇 3대(`harvester_0` / `iwhub_0` / `forklift_0`)와 온실·창고 씬, CCTV 4대는 모두 PC A의 Isaac Sim 씬에 스폰되고 **Action Graph 브리지**로 토픽을 주고받습니다.
 
 ![Node Architecture](docs/media/node_architecture.png)
 
