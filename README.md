@@ -12,6 +12,13 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 
 *4분할 관제 화면으로 본 한 사이클(1분 원본 5배속). 좌상 CAM-01 = MM 손끝 D455 + YOLO, 우상 CAM-02 = 수확 구간, 좌하 CAM-03 = 인계 구역, 우하 CAM-04 = 창고 랙.*
 
+## 기술 문서
+
+- [로봇 모델·MoveIt·Nav2 구성 및 튜닝 가이드](docs/robot_model_moveit_nav2_tuning_guide.md): 모델 조립, 실제 파라미터와 근거, 프레임워크와 프로젝트 코드의 책임 경계
+- [MM 시스템 가이드](docs/mm_system_guide.md): 비전·수확·플레이스·피항 전체 흐름
+- [IW 시스템 가이드](docs/iw_system_guide.md): MM 추종·레인 주행·정밀 도킹·Forklift 연동
+- [Forklift 시스템 가이드](docs/forklift_system_guide.md): 팔레트 인계와 랙 운용
+
 ---
 
 ## 주요 기능 (Key Features)
@@ -386,4 +393,3 @@ cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm run dev
 > `ui.launch.py`가 `stream.launch.py`를 포함합니다. 둘을 같이 띄우면 영상 노드가 이중으로 뜹니다.
 
 ![관제 UI 4분할](docs/media/monitor_ui_4pane.png)
-
