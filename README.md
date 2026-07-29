@@ -83,7 +83,7 @@ Isaac Sim은 물리(PhysX)·센서·액추에이터만 담당합니다.
 | `harvest_vision` | `vision_node` | Perception | YOLO 검출 → 3D 접근 목표 발행 |
 | | `vision_debug_view` | Perception | 검출 오버레이 디버그 창 (`use_debug:=true`) |
 | | `manipulator_target_node` | Decision | 파지·절단·플레이스 상세 FSM |
-| | `fixed_harvest_moveit_node` | Decision | 상위 코디네이터 (Nav2 게이트·적재 카운트·IW 미션·MM 피항) |
+| | `fixed_harvest_moveit_node` | Decision | 상위 코디네이터 (Nav2 게이트·적재 카운트·IW 미션·MM 피항). FSM 본체는 `harvest_fsm_node`이고, 이 노드는 그것을 상속해 고정 수확 위치를 프리셋한 실행 진입점입니다 |
 | `mm_moveit` | `mm_motion_bridge` | Control | JSON 명령 → MoveGroup goal, Ranked IK·파이프라인 선택 |
 | | `move_group` | Control | MoveIt 2 모션 계획 (OMPL / Pilz) |
 | | `servo_node` | Control | MoveIt Servo 실시간 지령 경로 (`config/servo.yaml`) |
@@ -109,6 +109,11 @@ PC A는 Isaac Sim 5.1 Standalone과 관제 UI(React · TS · Vite)를, PC B는 Y
 ![Node Architecture](docs/media/node_architecture.png)
 
 패키지별 노드와 토픽 / 서비스 / 액션 연결입니다. 실선 = Topic, 파선 = Service, 점선 = Action.
+
+이 그림은 **미션·의사결정 경로 중심**이라 위 표와 범위가 다릅니다. 두 가지만 짚어둡니다.
+
+- 관측 레이어(`ui_status_node` · `market_price_node` · `recorder_node`)는 그림에서 생략했습니다. 실제로는 `ui.launch.py`에서 함께 뜨며, 구성은 위 노드 표를 참조하세요.
+- `target_approach_node`는 **수동 실행 전용(기본 비활성)** 입니다. `/cmd_vel`을 Nav2와 공유하기 때문에 브링업 런치에 포함하지 않으며, 필요할 때만 `ros2 run harvest_vision target_approach_node`로 띄운 뒤 `ros2 param set /target_approach_node enabled true`로 켭니다. 자세한 절차는 [MM_VISION_CONTROL.md](src/smartfarm/harvest_vision/MM_VISION_CONTROL.md)에 있습니다.
 
 ---
 
