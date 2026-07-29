@@ -176,7 +176,22 @@ RTX 50 계열은 **cu128 이상**이 필요합니다.
 필요 없습니다. 다만 원본 학습 데이터셋과 도메인 적응 스크립트는 이 저장소에 없어,
 저장소만으로 재학습을 재현할 수는 없습니다.
 
-### 2. ROS 2 패키지 설치
+### 2. 서브모듈 및 웹 의존성
+
+서브모듈은 **`rosdep`보다 먼저** 받아야 합니다. `fleet_dispatch`가 `explore_lite`(자동 탐사 맵핑)를
+의존성으로 걸고 있는데 apt 배포판이 없어 서브모듈로 들어있습니다. 소스 트리에 없는 상태로
+`rosdep install`을 돌리면 `Cannot locate rosdep definition for [explore_lite]`로 실패합니다.
+
+```bash
+# 외부 ROS 2 서브모듈 (m-explore-ros2)
+cd ~/cobot3_ws
+git submodule update --init --recursive
+
+# 관제 UI 웹 (Node 18 이상)
+cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm install
+```
+
+### 3. ROS 2 패키지 설치
 
 MoveIt 2, Nav2, ros2_control 및 관제 UI 관련 패키지가 설치되어 있어야 합니다.
 
@@ -207,21 +222,15 @@ sudo apt install -y \
   ros-humble-rosbridge-server ros-humble-rosbag2-storage-mcap
 ```
 
-목록을 외우는 대신 `package.xml`에서 뽑아 쓰는 쪽이 안전합니다.
+목록을 외우는 대신 `package.xml`에서 뽑아 쓰는 쪽이 안전합니다. `rosdep`을 처음 쓰는
+머신이면 초기화가 먼저 필요합니다.
 
 ```bash
+sudo rosdep init     # 처음 한 번만. 이미 했으면 "already exists" 경고가 뜨며 무시해도 됩니다
+rosdep update
+
 cd ~/cobot3_ws
 rosdep install --from-paths src --ignore-src -r -y --rosdistro humble
-```
-
-### 3. 서브모듈 및 웹 의존성
-
-```bash
-# 외부 ROS 2 서브모듈 (m-explore-ros2)
-git submodule update --init --recursive
-
-# 관제 UI 웹 (Node 18 이상)
-cd ~/cobot3_ws/src/smartfarm/monitor_ui/web && npm install
 ```
 
 ### 4. 빌드
